@@ -1,0 +1,33 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node --test test/*.test.mjs
+      - run: |
+          for f in bot.mjs lib/*.mjs static/*.js; do
+            node --check "$f" || exit 1
+          done
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release archive
+        run: |
+          mkdir wechat-aibot
+          cp -r bot.mjs lib/ static/ knowledge/ package.json package-lock.json requirements-rag.txt config.example.json wechat-profiles.json rag.py launch.bat setup.bat rebuild-rag.bat cleanup-media.bat README.md LICENSE VERSION .gitignore wechat-aibot/
+          zip -r wechat-aibot-${{ github.ref_name }}.zip wechat-aibot/
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: wechat-aibot-${{ github.ref_name }}.zip
+          generate_release_notes: true

@@ -4,106 +4,56 @@ import crypto from "node:crypto";
 import { spawn, spawnSync, execSync } from "node:child_process";
 
 // ─── CONFIG ───────────────────────────────────────────────────
-const CONFIG_FILE = path.join(import.meta.dirname, "config.json");
-function loadAppConfig() {
-  try {
-    if (!fs.existsSync(CONFIG_FILE)) return {};
-    return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
-  } catch (e) {
-    process.stderr.write(`Failed to load config.json: ${e.message}\n`);
-    return {};
-  }
-}
-const APP_CONFIG = loadAppConfig();
-function configValue(key, fallback = null) {
-  let cur = APP_CONFIG;
-  for (const part of key.split(".")) {
-    if (!cur || typeof cur !== "object" || !(part in cur)) return fallback;
-    cur = cur[part];
-  }
-  return cur ?? fallback;
-}
-function envOrConfig(envName, configKey, fallback = null) {
-  return process.env[envName] !== undefined ? process.env[envName] : configValue(configKey, fallback);
-}
-function configBool(key, fallback = false) {
-  const value = configValue(key, fallback);
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") return !/^(0|false|no|off)$/i.test(value.trim());
-  return Boolean(value);
-}
-function configNumber(key, fallback) {
-  const n = Number(configValue(key, fallback));
-  return Number.isFinite(n) ? n : fallback;
-}
+import { configValue, envOrConfig, configBool, configNumber } from "./lib/config.mjs";
 
-const BASE_URL = "https://ilinkai.weixin.qq.com";
-const CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
-const BOT_TYPE = "3";
-const LONG_POLL_TIMEOUT_MS = 35_000;
-const TOKEN_FILE = path.join(import.meta.dirname, "weixin-token.json");
-const PROFILE_FILE = path.join(import.meta.dirname, "weixin-profiles.json");
 const NPM_GLOBAL = configValue("paths.npmGlobal", "C:\\Users\\25408\\AppData\\Roaming\\npm");
-const CLAUDE = envOrConfig("WEIXIN_CLAUDE_PATH", "paths.claude", path.join(NPM_GLOBAL, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"));
-const CODEX = envOrConfig("WEIXIN_CODEX_PATH", "paths.codex", path.join(NPM_GLOBAL, "node_modules", "@openai", "codex", "bin", "codex.js"));
+const CLAUDE = envOrConfig("WECHAT_CLAUDE_PATH", "paths.claude", path.join(NPM_GLOBAL, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"));
+const CODEX = envOrConfig("WECHAT_CODEX_PATH", "paths.codex", path.join(NPM_GLOBAL, "node_modules", "@openai", "codex", "bin", "codex.js"));
 const NODE = process.execPath;
-const HTTPS_PROXY = envOrConfig("WEIXIN_HTTPS_PROXY", "proxy.https", "http://127.0.0.1:7892"); // Codex (Rust) doesn't read Windows system proxy
-const CLAUDE_FAST_MODEL = envOrConfig("WEIXIN_CLAUDE_FAST_MODEL", "models.claudeFast", "deepseek-v4-flash[1m]");
-const CLAUDE_FALLBACK_MODEL = envOrConfig("WEIXIN_CLAUDE_FALLBACK_MODEL", "models.claudeFallback", "deepseek-v4-flash[1m]");
+const HTTPS_PROXY = envOrConfig("WECHAT_HTTPS_PROXY", "proxy.https", "http://127.0.0.1:7892"); // Codex (Rust) doesn't read Windows system proxy
+const CLAUDE_FAST_MODEL = envOrConfig("WECHAT_CLAUDE_FAST_MODEL", "models.claudeFast", "deepseek-v4-flash[1m]");
+const CLAUDE_FALLBACK_MODEL = envOrConfig("WECHAT_CLAUDE_FALLBACK_MODEL", "models.claudeFallback", "deepseek-v4-flash[1m]");
 const CLAUDE_TIMEOUT_MS = configNumber("timeouts.aiMs", 600_000);
 const RAG_SCRIPT = configValue("paths.ragScript", path.join(import.meta.dirname, "rag.py"));
 const RAG_ENABLED = configBool("rag.enabled", true);
-const RAG_SKIP_PATTERNS = [
-  /^(早上好|早安|早呀|早啊|早|上午好)[哦呀啊啦嘛~～!！。,.，\s]*$/i,
-  /^(晚上好|晚安|午安|下午好)[哦呀啊啦嘛~～!！。,.，\s]*$/i,
-  /^(你好|您好|在吗|在不在|hello|hi|hey)[哦呀啊啦嘛~～!！。,.，\s]*$/i,
-  /^(哈哈+|hhh+|嘿嘿+|嗯+|哦+|啊+)[哦呀啊啦嘛~～!！。,.，\s]*$/i,
-];
-const MAX_REPLY_LEN = 3800;
-const SOCIAL_REPLY_MAX_PARTS = 6;
 const INPUT_BATCH_MS = 30_000;
 const DUPLICATE_INPUT_MS = 5000;
 const SESSION_LOCK_RETRIES = 3;
 const SESSION_LOCK_RETRY_MS = 2_000;
 const SESSION_RELEASE_GRACE_MS = 800;
-const SESSION_FILE = path.join(import.meta.dirname, "weixin-sessions.json");
+const TOKEN_FILE = path.join(import.meta.dirname, "wechat-token.json");
+const PROFILE_FILE = path.join(import.meta.dirname, "wechat-profiles.json");
+const SESSION_FILE = path.join(import.meta.dirname, "wechat-sessions.json");
 const SESSION_REF_FILE = path.join(import.meta.dirname, "会话恢复指令.txt");
 const LOGS_DIR = path.join(import.meta.dirname, "logs");
-const LOG_RETENTION_DAYS = Number(process.env.WEIXIN_LOG_RETENTION_DAYS ?? configValue("logs.retentionDays", 30));
+const LOG_RETENTION_DAYS = Number(process.env.WECHAT_LOG_RETENTION_DAYS ?? configValue("logs.retentionDays", 30));
 const LOG_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const INBOUND_MEDIA_DIR = path.join(import.meta.dirname, "inbound_media");
-const INSTANCE_LOCK_FILE = path.join(import.meta.dirname, ".weixin-aibot.lock");
-const WEIXIN_MEDIA_MAX_BYTES = 100 * 1024 * 1024;
+const INSTANCE_LOCK_FILE = path.join(import.meta.dirname, ".wechat-aibot.lock");
+const WECHAT_MEDIA_MAX_BYTES = 100 * 1024 * 1024;
 const FILE_TEXT_PREVIEW_CHARS = 6000;
-const VISION_BASE_URL = process.env.WEIXIN_VISION_BASE_URL ?? process.env.OPENAI_BASE_URL ?? configValue("vision.baseUrl", "https://api.siliconflow.cn/v1");
-const VISION_API_KEY = process.env.WEIXIN_VISION_API_KEY ?? process.env.OPENAI_API_KEY ?? configValue("vision.apiKey", "");
-const VISION_MODEL = envOrConfig("WEIXIN_VISION_MODEL", "vision.model", "Qwen/Qwen3-VL-32B-Instruct");
-const VISION_DETAIL = envOrConfig("WEIXIN_VISION_DETAIL", "vision.detail", "high");
+const VISION_BASE_URL = process.env.WECHAT_VISION_BASE_URL ?? process.env.OPENAI_BASE_URL ?? configValue("vision.baseUrl", "https://api.siliconflow.cn/v1");
+const VISION_API_KEY = process.env.WECHAT_VISION_API_KEY ?? process.env.OPENAI_API_KEY ?? configValue("vision.apiKey", "");
+const VISION_MODEL = envOrConfig("WECHAT_VISION_MODEL", "vision.model", "Qwen/Qwen3-VL-32B-Instruct");
+const VISION_DETAIL = envOrConfig("WECHAT_VISION_DETAIL", "vision.detail", "high");
 const VISION_TIMEOUT_MS = configNumber("vision.timeoutMs", 180_000);
-const COMMON_CHAT_STYLE_PROMPT = [
-  "【共同聊天风格】",
-  "你是在和熟人私聊，不是在写标准答案。不要形成固定模板，不要总是先回应、再展开、最后反问。",
-  "多条消息应该像微信里的自然停顿、重复感、补一句、突然反应过来，而不是把一段说明文硬切开。",
-  "如果一句话已经接住了，就停在那里；如果想连发，用自然换行分隔每条短消息。",
-  "可以接话、吐槽、顺着情绪笑一下、分享一个小念头，或者把话停在一个自然的位置。反问只在你真的好奇或对话需要继续时使用。",
-  "别每句话都像总结陈词；少用列表式结构和解释腔。抓住当下语气，而不是把消息当任务处理。",
-  "颜文字和括号动作要像语气里的小装饰，不要机械重复。",
-  "颜文字要跟情绪匹配并保持丰富，避免连续复用同一个。可在可爱、得意、心虚、惊讶、无奈、开心、认真等情绪之间自然变化。",
-].join("\n");
+import { COMMON_CHAT_STYLE_PROMPT, MAX_REPLY_LEN, SOCIAL_REPLY_MAX_PARTS, splitText, hasInboundAttachment, splitSocialReply, extractKaomoji, rememberRecentKaomoji, isInfoSeekingTurn, chooseReplyBudget, constrainCasualReply, buildStylePrompt } from "./lib/reply.mjs";
+import { RAG_SKIP_PATTERNS, shouldSkipRag, buildRagBody } from "./lib/rag.mjs";
+import { startServer, stopServer } from "./lib/server.mjs";
+import { registerStatusRoutes } from "./lib/gui-status.mjs";
+import { registerSessionRoutes } from "./lib/gui-sessions.mjs";
+import { registerProfileRoutes } from "./lib/gui-profiles.mjs";
+import { registerConfigRoutes } from "./lib/gui-config.mjs";
+import { registerRagRoutes } from "./lib/gui-rag.mjs";
+import { registerMediaRoutes } from "./lib/gui-media.mjs";
+import { registerLogRoutes } from "./lib/gui-logs.mjs";
+import { registerControlRoutes } from "./lib/gui-control.mjs";
 
 // ─── STATE ──────────────────────────────────────────────────
-let token = null;
-let getUpdatesBuf = "";
-// AI key → Map<userId, { activeId, list: [{ id, name, busy, queue, _closing, _lastEnd, sid, _firstTurn }] }>
-const sessions = { cc: new Map(), codex: new Map() };
-let activeAI = "cc"; // "cc" | "codex"
-// Profile templates are shared; the active role is a session-level property.
-let profileTemplates = {};
-// model names loaded from config at startup
-let modelNames = { cc: "unknown", codex: "unknown" };
-const pendingInputs = new Map();
-const recentInputs = new Map();
-const pendingProfileDeletes = new Map();
+import { token, getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, recentInputs, pendingProfileDeletes, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
+import { uuid, shortId, sleep, log, isPidRunning } from "./lib/utils.mjs";
+import { loadToken, saveToken, loginWithQr, sendMessage, apiPost, apiGet } from "./lib/wechat.mjs";
+const LONG_POLL_TIMEOUT_MS = 35_000;
 const PROFILE_DELETE_CONFIRM_MS = 60_000;
 
 function loadModelNames() {
@@ -127,14 +77,6 @@ function loadModelNames() {
 }
 
 // ─── HELPERS ────────────────────────────────────────────────
-function uuid() { return crypto.randomUUID(); }
-function shortId() { return crypto.randomUUID().slice(0, 8); }
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-function log(emoji, msg) {
-  const ts = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-  process.stdout.write(`[${ts}] ${emoji} ${msg}\n`);
-}
-
 function cleanupOldLogs() {
   if (!Number.isFinite(LOG_RETENTION_DAYS) || LOG_RETENTION_DAYS <= 0) return;
   try {
@@ -152,16 +94,6 @@ function cleanupOldLogs() {
     if (removed) log("\u{1F9F9}", `已清理 ${removed} 个超过 ${LOG_RETENTION_DAYS} 天的日志文件`);
   } catch (e) {
     log("⚠️", `日志清理失败: ${e.message}`);
-  }
-}
-
-function isPidRunning(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -188,80 +120,19 @@ function releaseInstanceLock() {
     if (lockPid === process.pid) fs.unlinkSync(INSTANCE_LOCK_FILE);
   } catch {}
 }
-function randomUin() {
-  return Buffer.from(String(crypto.randomBytes(4).readUInt32BE(0))).toString("base64");
-}
-const VERSION_CODE = ((1 & 0xff) << 16) | ((0 & 0xff) << 8) | (0 & 0xff);
-
-function commonHeaders() {
-  return { "iLink-App-Id": "bot", "iLink-App-ClientVersion": String(VERSION_CODE) };
-}
-
-function apiHeaders() {
-  const h = { ...commonHeaders(), "Content-Type": "application/json", "AuthorizationType": "ilink_bot_token", "X-WECHAT-UIN": randomUin() };
-  if (token) h.Authorization = `Bearer ${token}`;
-  return h;
-}
-
-async function apiPost(endpoint, bodyObj = {}, timeoutMs = 15_000) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(`${BASE_URL}/${endpoint}`, { method: "POST", headers: apiHeaders(), body: JSON.stringify(bodyObj), signal: ctrl.signal });
-    return await res.json();
-  } catch (e) {
-    if (e.name === "AbortError") return { ret: -1, errmsg: "timeout" };
-    throw e;
-  } finally { clearTimeout(t); }
-}
-
-async function apiGet(endpoint, timeoutMs = 15_000, baseUrl = BASE_URL) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(`${baseUrl}/${endpoint}`, { method: "GET", headers: commonHeaders(), signal: ctrl.signal });
-    return await res.json();
-  } catch (e) {
-    if (e.name === "AbortError") return { status: "wait" };
-    return { status: "wait" };
-  } finally { clearTimeout(t); }
-}
-
-// ─── TOKEN ───────────────────────────────────────────────────
-function loadToken() {
-  try {
-    if (fs.existsSync(TOKEN_FILE)) {
-      const d = JSON.parse(fs.readFileSync(TOKEN_FILE, "utf-8"));
-      token = d.token;
-      getUpdatesBuf = d.syncBuf || "";
-      if (d.lastActiveAI === "cc" || d.lastActiveAI === "codex") activeAI = d.lastActiveAI;
-      if (token) log("\u{1F4C2}", "已加载 token");
-      return true;
-    }
-  } catch { /* ignore */ }
-  return false;
-}
-function saveToken(syncBuf = getUpdatesBuf) {
-  fs.writeFileSync(TOKEN_FILE, JSON.stringify({ token, syncBuf, lastActiveAI: activeAI }, null, 2));
-}
 
 // ─── PROFILES ────────────────────────────────────────────────
-const DEFAULT_PROFILES = {
-  "默认": "保持 AI 的默认风格",
-  "毒舌": "你是用户的毒舌损友。用刻薄但幽默的方式回复，每句话都要带刺但让人想笑。使用中文口语，夹杂网络流行语。回复尽量简洁。不要用敬语。",
-  "老师": "你是用户的私人技术导师。回复时循循善诱，先讲原理再说实践。用简洁的中文解释复杂概念，配合代码示例。语气亲切但不啰嗦。",
-  "简洁": "回复尽可能简短，每句话不超过30字。用关键词和短语而不是完整句子。拒绝啰嗦。",
-};
-
 function loadProfiles() {
+  // Mutate in-place so all importing modules see the same object
+  for (const k of Object.keys(profileTemplates)) delete profileTemplates[k];
   try {
     if (fs.existsSync(PROFILE_FILE)) {
       const d = JSON.parse(fs.readFileSync(PROFILE_FILE, "utf-8"));
-      profileTemplates = d.templates || DEFAULT_PROFILES;
+      Object.assign(profileTemplates, d.templates || { "默认": "保持 AI 的默认风格" });
     } else {
-      profileTemplates = { ...DEFAULT_PROFILES };
+      Object.assign(profileTemplates, { "默认": "保持 AI 的默认风格" });
     }
-  } catch { profileTemplates = { ...DEFAULT_PROFILES }; }
+  } catch { Object.assign(profileTemplates, { "默认": "保持 AI 的默认风格" }); }
 }
 
 function saveProfiles() {
@@ -271,15 +142,6 @@ function saveProfiles() {
 }
 
 // ── RAG query ──
-function shouldSkipRag(userMessage) {
-  const q = userMessage.trim().toLowerCase();
-  return !q || (q.length <= 24 && RAG_SKIP_PATTERNS.some(pattern => pattern.test(q)));
-}
-
-function hasInboundAttachment(body) {
-  return /^\[(图片|语音|文件|视频)\]/m.test(body);
-}
-
 function hasExplicitProfileName(userMessage) {
   return Object.keys(profileTemplates).some(name => name !== "默认" && userMessage.includes(name));
 }
@@ -329,21 +191,6 @@ function queryRag(userMessage, profile = null) {
   } finally {
     try { fs.rmSync(queryFile, { force: true }); } catch {}
   }
-}
-
-function buildRagBody(userMessage, profile = null) {
-  const ctx = queryRag(userMessage, profile);
-  return ctx ? [
-    "【可能相关的背景资料】",
-    "以下资料由向量检索自动召回，可能相关，也可能无关。",
-    "不要假设用户正在阅读、分享或讨论这些资料；只有当它确实能帮助回答时才使用。",
-    "",
-    ctx,
-    "",
-    "---",
-    "",
-    userMessage,
-  ].join("\n") : userMessage;
 }
 
 function sessionProfile(sess) {
@@ -403,8 +250,7 @@ function saveSessions() {
         if (ai === "cc") {
           lines.push(`    claude --resume ${s.sid}`);
         } else {
-          lines.push(`    交互:  codex resume ${s.sid}`);
-          lines.push(`    后台:  codex exec resume ${s.sid} --json --skip-git-repo-check - <prompt>`);
+          lines.push(`    codex resume ${s.sid}`);
         }
         lines.push("");
       }
@@ -458,65 +304,6 @@ function loadSessions() {
   return false;
 }
 
-// ─── QR LOGIN ───────────────────────────────────────────────
-async function tryQrTerminal(qrcodeUrl) {
-  try { const { default: qr } = await import("qrcode-terminal"); qr.generate(qrcodeUrl, { small: true }); return true; }
-  catch { return false; }
-}
-
-async function loginWithQr() {
-  log("\u{1F511}", "获取二维码...");
-  const qrResp = await apiPost(`ilink/bot/get_bot_qrcode?bot_type=${BOT_TYPE}`, { local_token_list: [] });
-  if (!qrResp.qrcode_img_content) { log("❌", "获取二维码失败: " + JSON.stringify(qrResp)); process.exit(1); }
-
-  const qrcodeUrl = qrResp.qrcode_img_content;
-  const qrcode = qrResp.qrcode;
-  const qrOk = await tryQrTerminal(qrcodeUrl);
-  if (!qrOk) log("\u{1F517}", "二维码链接: " + qrcodeUrl);
-  log("\u{1F4F1}", "请用手机微信扫描二维码...");
-
-  let pollBaseUrl = BASE_URL;
-  const deadline = Date.now() + 480_000;
-  while (Date.now() < deadline) {
-    let sr;
-    try { sr = await apiGet(`ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`, LONG_POLL_TIMEOUT_MS, pollBaseUrl); }
-    catch { await sleep(1000); continue; }
-
-    switch (sr.status) {
-      case "wait": break;
-      case "scaned": log("\u{1F4F1}", "已扫码，请在手机上确认..."); break;
-      case "scaned_but_redirect": if (sr.redirect_host) { pollBaseUrl = `https://${sr.redirect_host}`; log("\u{1F504}", "重定向: " + pollBaseUrl); } break;
-      case "confirmed": token = sr.bot_token; saveToken(""); log("✅", "登录成功! bot_id=" + sr.ilink_bot_id); return;
-      case "expired": log("⏰", "二维码过期，重新获取..."); return loginWithQr();
-      case "binded_redirect": log("✅", "已连接过此设备"); process.exit(0);
-      default: log("⚠️", "未知状态: " + sr.status);
-    }
-    await sleep(1000);
-  }
-  log("❌", "登录超时"); process.exit(1);
-}
-
-// ─── SEND ────────────────────────────────────────────────────
-async function sendMessage(toUserId, text, contextToken) {
-  if (!text?.trim()) return;
-  try {
-    await apiPost("ilink/bot/sendmessage", {
-      msg: { to_user_id: toUserId, client_id: shortId(), message_type: 2, message_state: 2,
-        item_list: [{ type: 1, text_item: { text } }], context_token: contextToken || undefined },
-    });
-  } catch (e) { log("❌", `发送失败: ${e.message}`); }
-}
-
-function splitText(text, maxLen) {
-  if (text.length <= maxLen) return [text];
-  const chunks = []; let i = 0;
-  while (i < text.length) {
-    let end = i + maxLen;
-    if (end < text.length) { const nl = text.lastIndexOf("\n", end); if (nl > i + maxLen * 0.5) end = nl + 1; }
-    chunks.push(text.slice(i, end)); i = end;
-  }
-  return chunks;
-}
 
 function mediaLogPath() {
   return path.join(LOGS_DIR, "inbound-media.jsonl");
@@ -661,7 +448,7 @@ async function fetchBuffer(url, label, timeoutMs = 60_000) {
     const res = await fetch(url, { signal: ctrl.signal });
     if (!res.ok) throw new Error(`${label}: CDN ${res.status} ${res.statusText}`);
     const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > WEIXIN_MEDIA_MAX_BYTES) throw new Error(`${label}: media too large (${buf.length} bytes)`);
+    if (buf.length > WECHAT_MEDIA_MAX_BYTES) throw new Error(`${label}: media too large (${buf.length} bytes)`);
     return buf;
   } finally {
     clearTimeout(t);
@@ -818,7 +605,7 @@ function extractVisionContent(messageContent) {
 async function captionImageCloud(filePath, hint = "") {
   if (!filePath || !fs.existsSync(filePath)) return null;
   if (!VISION_BASE_URL || !VISION_API_KEY || !VISION_MODEL) {
-    log("\u{1F441}", "cloud vision skipped: WEIXIN_VISION_BASE_URL/API_KEY/MODEL not configured");
+    log("\u{1F441}", "cloud vision skipped: WECHAT_VISION_BASE_URL/API_KEY/MODEL not configured");
     return null;
   }
   const imageBuffer = fs.readFileSync(filePath);
@@ -995,162 +782,6 @@ function isDuplicateInput(userId, body) {
     if (now - t > DUPLICATE_INPUT_MS * 2) recentInputs.delete(k);
   }
   return now - last < DUPLICATE_INPUT_MS;
-}
-
-function isStructuredReply(text) {
-  return /```|^\s*#{1,6}\s|^\s*[-*]\s|^\s*\d+[.)]\s|^\s*[>|]/m.test(text)
-    || /===|--- Tool:|Result:|\[usage\]|❌|⚠️|⏹️/.test(text);
-}
-
-function splitSocialReply(text) {
-  const t = text.trim();
-  if (isStructuredReply(t)) return [t];
-
-  const explicitBeats = t.split(/\n+/).map(s => s.trim()).filter(Boolean);
-  if (explicitBeats.length >= 2 && explicitBeats.every(p => p.length <= 90)) {
-    return limitSocialParts(explicitBeats, SOCIAL_REPLY_MAX_PARTS);
-  }
-
-  const sentences = t
-    .replace(/\s*\n+\s*/g, " ")
-    .match(/[^。！？!?…~～]+[。！？!?…~～]*|.+$/g)
-    ?.map(s => s.trim())
-    .filter(Boolean) || [t];
-
-  if (sentences.length <= 1) return [t];
-  if (!shouldSplitImplicitly(t, sentences)) return [t];
-
-  const chunks = makeChatBeats(sentences);
-  return limitSocialParts(chunks, SOCIAL_REPLY_MAX_PARTS);
-}
-
-function hasBurstReason(text) {
-  return /[！？!?…~～]{2,}|哈{2,}|h{2,}|欸|诶|呜|哇|啊这|等等|不是|真的|草|救命|怎么会/u.test(text);
-}
-
-function shouldSplitImplicitly(text, sentences) {
-  const r = Math.random();
-  if (hasBurstReason(text)) return r < 0.65;
-  if (sentences.length >= 5) return r < 0.35;
-  if (sentences.length >= 3) return r < 0.18;
-  return r < 0.08;
-}
-
-function makeChatBeats(sentences) {
-  const chunks = [];
-  let current = "";
-  for (const sentence of sentences) {
-    if (!current) {
-      current = sentence;
-    } else if ((current + sentence).length <= randomBeatLimit()) {
-      current += sentence;
-    } else {
-      chunks.push(current);
-      current = sentence;
-    }
-  }
-  if (current) chunks.push(current);
-  return chunks;
-}
-
-function limitSocialParts(parts, maxParts) {
-  const clean = parts.map(p => p.trim()).filter(Boolean);
-  if (clean.length <= maxParts) return clean;
-  if (maxParts <= 1) return [clean.join("")];
-  return [...clean.slice(0, maxParts - 1), clean.slice(maxParts - 1).join("")];
-}
-
-function randomBeatLimit() {
-  const limits = [12, 18, 24, 32, 46, 70, 110];
-  return limits[Math.floor(Math.random() * limits.length)];
-}
-
-function extractKaomoji(text) {
-  const found = new Set();
-  const bracketed = text.match(/[（(][^）)\n]{1,24}[）)](?:[^\s\w\u4e00-\u9fff]{0,3})/gu) || [];
-  for (const item of bracketed) {
-    if (/[\u4e00-\u9fff]/u.test(item)) continue;
-    if (/[｡•̀́ᴗω▽︿﹏∀◍〃^><;｀´≧≦╯╰･_]/u.test(item)) found.add(item);
-  }
-  const standalone = text.match(/[ヾヽ][^\s\n]{2,24}/gu) || [];
-  for (const item of standalone) {
-    if (/[｡ωᴗ▽︿﹏∀◍]/u.test(item)) found.add(item);
-  }
-  return Array.from(found).slice(0, 5);
-}
-
-function rememberRecentKaomoji(sess, text) {
-  const kaomoji = extractKaomoji(text);
-  if (!kaomoji.length) return;
-  const recent = sess._recentKaomoji || [];
-  sess._recentKaomoji = [...kaomoji, ...recent.filter(k => !kaomoji.includes(k))].slice(0, 8);
-}
-
-function isInfoSeekingTurn(userBody = "") {
-  return /为什么|怎么|如何|解释|分析|总结|建议|方案|教程|资料|报错|修|代码|测试|可行|区别|哪里|什么原因|能不能|\?|？/u.test(userBody);
-}
-
-function chooseReplyBudget(userBody = "") {
-  const infoSeeking = isInfoSeekingTurn(userBody);
-  const mediaCasual = hasInboundAttachment(userBody) && !infoSeeking;
-  const r = Math.random();
-  if (mediaCasual || !infoSeeking) {
-    if (r < 0.35) return { instruction: "极短：只回 1 条，中文 6-18 字；像微信里顺手接一句，不解释、不追问。", maxChars: 24, maxParts: 1, enforce: true };
-    if (r < 0.72) return { instruction: "短：只回 1 条，中文 20-45 字；抓住一个点回应，立刻停住。", maxChars: 55, maxParts: 1, enforce: true };
-    if (r < 0.90) return { instruction: "普通短聊：1 条，中文 45-90 字；可以有一点细节，但不要展开成小作文。", maxChars: 105, maxParts: 1, enforce: true };
-    if (r < 0.98) return { instruction: "短连发：2-4 条，每条 6-28 字，总量不超过 90 字；只有自然停顿或情绪跳动时才这样发。", maxChars: 105, maxParts: 4, enforce: true };
-    return { instruction: "少见长一点：1-2 条，总量不超过 160 字；仍然像私聊，不要讲设定课。", maxChars: 180, maxParts: 2, enforce: true };
-  }
-  if (r < 0.20) return { instruction: "短：1 条，中文 25-60 字；先给结论，不铺开。", maxChars: 80, maxParts: 1, enforce: false };
-  if (r < 0.65) return { instruction: "正常说明：1-2 条，总量 80-180 字；回答清楚即可，不要顺手扩写。", maxChars: 220, maxParts: 2, enforce: false };
-  if (r < 0.92) return { instruction: "较完整：1-3 条，总量 180-320 字；只在问题确实需要时使用。", maxChars: 360, maxParts: 3, enforce: false };
-  return { instruction: "长回复：可以超过 320 字，但必须是对方明确需要分析、排查或方案时；闲聊禁用。", maxChars: 800, maxParts: 4, enforce: false };
-}
-
-function constrainCasualReply(text, budget) {
-  if (!budget?.enforce || !text || text.length <= budget.maxChars || isStructuredReply(text)) return text;
-  const normalized = text.trim().replace(/\n{3,}/g, "\n\n");
-  const explicit = normalized.split(/\n+/).map(s => s.trim()).filter(Boolean);
-  const units = explicit.length > 1 ? explicit : (normalized.match(/[^。！？!?…~～\n]+[。！？!?…~～]*|.+$/g) || [normalized]).map(s => s.trim()).filter(Boolean);
-  const kept = [];
-  let total = 0;
-  for (const unit of units) {
-    if (kept.length >= Math.max(1, budget.maxParts || 1)) break;
-    if (total && total + unit.length > budget.maxChars) break;
-    if (!total && unit.length > budget.maxChars) {
-      kept.push(unit.slice(0, Math.max(8, budget.maxChars - 1)).trimEnd() + "…");
-      break;
-    }
-    kept.push(unit);
-    total += unit.length;
-  }
-  return kept.length ? kept.join(budget.maxParts > 1 ? "\n" : "") : normalized.slice(0, budget.maxChars).trimEnd() + "…";
-}
-
-function buildStylePrompt(recentKaomoji = [], userBody = "", budget = chooseReplyBudget(userBody)) {
-  const isTask = isInfoSeekingTurn(userBody);
-  const chatGuidance = isTask ? [
-    "【任务模式风格】",
-    "对方在正经求助，可以比闲聊说得更多、更完整。允许结构化表达——列表、分段、代码块在需要时都能用。",
-    "但你不是无个性的AI助手，保持你的角色语气和思维方式。过程中可以带出角色反应——遇到难题可以吐槽、解决后可以小小满意、解释时可以拿你生活里的东西类比。",
-    "不要因为要完成任务就把角色特征收起来；正因为是认真的事，对方才更需要\"你\"来帮忙。",
-  ].join("\n") : COMMON_CHAT_STYLE_PROMPT;
-
-  const parts = [
-    chatGuidance,
-    "",
-    "【本轮回复长度签】",
-    budget.instruction,
-    "长度签是本轮硬约束，不要告诉用户这件事。除非用户明确要求详细说明，否则不要突破长度签。",
-  ];
-  if (recentKaomoji?.length) {
-    parts.push(
-      "",
-      `【近期表达记忆】最近几轮已经用过这些颜文字：${recentKaomoji.join(" ")}`,
-      "接下来如果需要颜文字，优先换一个，不要连续复用这些同款；也可以干脆不用颜文字，让语气靠文字本身成立。",
-    );
-  }
-  return parts.join("\n");
 }
 
 // ─── SESSION MANAGEMENT ─────────────────────────────────────
@@ -1605,7 +1236,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
 
     const profile = turnProfile;
     const useRag = RAG_ENABLED && !hasInboundAttachment(body) && profile && profile !== "默认" && profileTemplates[profile];
-    const ragBody = useRag ? buildRagBody(body, profile) : body;
+    const ragBody = useRag ? buildRagBody(body, queryRag(body, profile)) : body;
     const task = runClaudeStream(ai, sid, sessionName, ragBody, firstTurn, handleClaudeEvent, stylePrompt, profile);
     if (onProc) onProc(task.proc);
 
@@ -1801,7 +1432,7 @@ async function handleMessage(msg) {
   // ── /cc ──
   if (/^\/cc$/.test(body)) {
     if (activeAI === "cc") { await sendMessage(userId, "⚠️ 当前已是 Claude Code", ctx); return; }
-    activeAI = "cc";
+    setActiveAI("cc");
     saveSessions(); saveToken();
     await sendMessage(userId, `✅ 已切换到 Claude Code`, ctx);
     return;
@@ -1810,7 +1441,7 @@ async function handleMessage(msg) {
   // ── /codex ──
   if (/^\/codex$/.test(body)) {
     if (activeAI === "codex") { await sendMessage(userId, "⚠️ 当前已是 Codex", ctx); return; }
-    activeAI = "codex";
+    setActiveAI("codex");
     saveSessions(); saveToken();
     await sendMessage(userId, `✅ 已切换到 Codex`, ctx);
     return;
@@ -2249,7 +1880,7 @@ async function mainLoop() {
         continue;
       }
       consecutiveFails = 0;
-      if (resp.get_updates_buf) { getUpdatesBuf = resp.get_updates_buf; saveToken(); }
+      if (resp.get_updates_buf) { setSyncBuf(resp.get_updates_buf); saveToken(); }
       for (const m of (resp.msgs || [])) {
         if (m.message_type === 1 && m.from_user_id) await handleMessage(m);
       }
@@ -2280,7 +1911,7 @@ setInterval(cleanupOldLogs, LOG_CLEANUP_INTERVAL_MS).unref();
 try {
   if (fs.existsSync(TOKEN_FILE)) {
     const d = JSON.parse(fs.readFileSync(TOKEN_FILE, "utf-8"));
-    if (d.lastActiveAI === "cc" || d.lastActiveAI === "codex") activeAI = d.lastActiveAI;
+    if (d.lastActiveAI === "cc" || d.lastActiveAI === "codex") setActiveAI(d.lastActiveAI);
   }
 } catch {}
 
@@ -2288,18 +1919,33 @@ loadModelNames();
 loadProfiles();
 loadSessions();
 
+// ─── Start GUI server first ──────────────────────────────────
+registerStatusRoutes();
+registerSessionRoutes();
+registerProfileRoutes();
+registerConfigRoutes();
+registerRagRoutes();
+registerMediaRoutes();
+registerLogRoutes();
+registerControlRoutes();
+startServer();
+
+process.on("SIGINT", () => { stopServer(); process.exit(0); });
+process.on("SIGTERM", () => { stopServer(); process.exit(0); });
+
+// ─── WeChat login ────────────────────────────────────────────
 if (!loadToken()) {
   await loginWithQr();
 } else {
   try {
     const resp = await apiPost("ilink/bot/getupdates", { get_updates_buf: "" }, 10_000);
     if (resp.errcode === -14 || (resp.ret && resp.ret !== 0 && resp.errcode)) {
-      log("⚠️", "Token 过期，重新登录..."); token = null; await loginWithQr();
+      log("⚠️", "Token 过期，重新登录..."); setToken(null); await loginWithQr();
     } else {
-      if (resp.get_updates_buf) getUpdatesBuf = resp.get_updates_buf;
+      if (resp.get_updates_buf) setSyncBuf(resp.get_updates_buf);
     }
   } catch {
-    log("⚠️", "Token 验证失败，重新登录..."); token = null; await loginWithQr();
+    log("⚠️", "Token 验证失败，重新登录..."); setToken(null); await loginWithQr();
   }
 }
 
