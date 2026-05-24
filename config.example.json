@@ -1,0 +1,42 @@
+{
+  "paths": {
+    "npmGlobal": "填写你的 npm 全局安装路径，例如 C:\\Users\\你的用户名\\AppData\\Roaming\\npm",
+    "claude": "填写 claude.exe 的完整路径",
+    "codex": "填写 codex.js 的完整路径",
+    "ragScript": "填写 rag.py 的完整路径，例如 D:\\path\\to\\weixin-aibot\\rag.py"
+  },
+  "proxy": {
+    "https": "http://127.0.0.1:7892"
+  },
+  "models": {
+    "claudeFast": "deepseek-v4-flash[1m]",
+    "claudeFallback": "deepseek-v4-flash[1m]"
+  },
+  "timeouts": {
+    "aiMs": 600000
+  },
+  "vision": {
+    "baseUrl": "https://api.siliconflow.cn/v1",
+    "apiKey": "填写你的 SiliconFlow API Key",
+    "model": "Qwen/Qwen3-VL-32B-Instruct",
+    "detail": "high",
+    "timeoutMs": 180000
+  },
+  "rag": {
+    "enabled": true,
+    "knowledgeDir": "knowledge",
+    "storeDir": "rag_vector_store",
+    "modelCacheDir": ".fastembed_cache",
+    "collectionName": "bangdream_knowledge",
+    "embedModel": "BAAI/bge-small-zh-v1.5",
+    "topK": 3,
+    "minScore": 0.48,
+    "scoreMargin": 0.16,
+    "chunkMaxChars": 1600,
+    "resultMaxChars": 1200,
+    "batchSize": 32
+  },
+  "logs": {
+    "retentionDays": 30
+  }
+}

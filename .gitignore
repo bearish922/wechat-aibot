@@ -1,0 +1,23 @@
+# Personal config (contains API keys, tokens, paths)
+config.json
+weixin-token.json
+weixin-sessions.json
+会话恢复指令.txt
+
+# Runtime
+.weixin-aibot.lock
+.rag_query_*
+
+# Logs and media (contain personal chat data)
+logs/
+inbound_media/
+
+# Dependencies
+node_modules/
+__pycache__/
+
+# Model cache (downloaded at first run)
+.fastembed_cache/
+
+# RAG vector store (built locally)
+rag_vector_store/
