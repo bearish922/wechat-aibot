@@ -39,7 +39,7 @@ async function render() {
       case "config": await renderConfig(); break;
     }
   } catch (e) {
-    content.innerHTML = `<div class="card"><p style="color:#dc2626">Error: ${e.message}</p></div>`;
+    content.innerHTML = `<div class="card"><p style="color:#dc2626">Error: ${escHtml(e.message)}</p></div>`;
   }
 }
 
@@ -51,8 +51,8 @@ async function renderStatus() {
       <h2>Status</h2>
       <p><span class="status-dot ${s.online ? 'online' : 'offline'}"></span>
       <strong>${s.online ? 'Online' : 'Offline'}</strong></p>
-      <p>AI: <strong>${s.currentAI === 'cc' ? 'Claude Code' : 'Codex'}</strong> (${s.currentModel})</p>
-      <p>Sessions: CC <strong>${s.sessions.cc}</strong> | Codex <strong>${s.sessions.codex}</strong></p>
+      <p>AI: <strong>${s.currentAI === 'cc' ? 'Claude Code' : 'Codex'}</strong> (${escHtml(s.currentModel)})</p>
+      <p>Sessions: CC <strong>${Number(s.sessions?.cc || 0)}</strong> | Codex <strong>${Number(s.sessions?.codex || 0)}</strong></p>
     </div>
   `;
 }
@@ -62,10 +62,10 @@ async function renderSessions() {
   const d = await get("/api/sessions");
   const rows = d.sessions.map(s => `
     <tr>
-      <td><span class="badge badge-${s.ai}">${s.ai === 'cc' ? 'CC' : 'Codex'}</span></td>
-      <td>${s.active ? '<strong>→</strong>' : ''} ${s.name}</td>
-      <td><span class="badge badge-default">${s.profile}</span></td>
-      <td>${s.busy ? 'Busy' : s.queue ? 'Queue(' + s.queue + ')' : 'Idle'}</td>
+      <td><span class="badge badge-${s.ai === 'cc' ? 'cc' : 'codex'}">${s.ai === 'cc' ? 'CC' : 'Codex'}</span></td>
+      <td>${s.active ? '<strong>→</strong>' : ''} ${escHtml(s.name)}</td>
+      <td><span class="badge badge-default">${escHtml(s.profile)}</span></td>
+      <td>${s.busy ? 'Busy' : s.queue ? 'Queue(' + Number(s.queue) + ')' : 'Idle'}</td>
     </tr>
   `).join("");
 
@@ -77,7 +77,7 @@ async function renderSessions() {
     </div>
     <div class="card">
       <h2>Resume Commands</h2>
-      <pre>${resume.text}</pre>
+      <pre>${escHtml(resume.text || "")}</pre>
     </div>
   `;
 }
@@ -87,12 +87,12 @@ async function renderProfiles() {
   const d = await get("/api/profiles");
   const rows = d.profiles.map(p => `
     <tr>
-      <td><strong>${p.name}</strong></td>
-      <td>${p.prompt.slice(0, 80)}${p.prompt.length > 80 ? '...' : ''}</td>
-      <td>${p.bindings} session${p.bindings !== 1 ? 's' : ''}</td>
+      <td><strong>${escHtml(p.name)}</strong></td>
+      <td>${escHtml(p.prompt.slice(0, 80))}${p.prompt.length > 80 ? '...' : ''}</td>
+      <td>${Number(p.bindings)} session${p.bindings !== 1 ? 's' : ''}</td>
       <td>
-        <button class="btn" onclick="editProfile('${escHtml(p.name)}')">Edit</button>
-        ${p.name !== '默认' ? `<button class="btn btn-danger" onclick="deleteProfile('${escHtml(p.name)}')">Del</button>` : ''}
+        <button class="btn" data-action="edit-profile" data-profile="${escAttr(p.name)}">Edit</button>
+        ${p.name !== '默认' ? `<button class="btn btn-danger" data-action="delete-profile" data-profile="${escAttr(p.name)}">Del</button>` : ''}
       </td>
     </tr>
   `).join("");
@@ -107,6 +107,12 @@ async function renderProfiles() {
       <div id="profileForm" class="mt"></div>
     </div>
   `;
+  content.querySelectorAll('[data-action="edit-profile"]').forEach(btn => {
+    btn.addEventListener("click", () => editProfile(btn.dataset.profile));
+  });
+  content.querySelectorAll('[data-action="delete-profile"]').forEach(btn => {
+    btn.addEventListener("click", () => deleteProfile(btn.dataset.profile));
+  });
 }
 
 window.editProfile = async (name) => {
@@ -115,11 +121,12 @@ window.editProfile = async (name) => {
   if (!p) return;
   document.getElementById("profileForm").innerHTML = `
     <div class="card" style="margin-top:14px">
-    <h3>Edit: ${name}</h3>
+    <h3>Edit: ${escHtml(name)}</h3>
     <div class="form-group"><label>Prompt</label><textarea id="editPrompt">${escHtml(p.prompt)}</textarea></div>
-    <button class="btn btn-primary" onclick="saveProfile('${escHtml(name)}')">Save</button>
+    <button class="btn btn-primary" id="saveProfileBtn">Save</button>
     </div>
   `;
+  document.getElementById("saveProfileBtn").addEventListener("click", () => saveProfile(name));
 };
 
 window.saveProfile = async (name) => {
@@ -167,7 +174,7 @@ async function renderConfig() {
   const c = d.config || {};
 
   const formHtml = [
-    S("Paths", F("paths.claude", "Claude Code Path", c.paths?.claude) + F("paths.codex", "Codex Path", c.paths?.codex)),
+    S("Paths", F("paths.npmGlobal", "NPM Global Directory", c.paths?.npmGlobal) + F("paths.claude", "Claude Code Path", c.paths?.claude) + F("paths.codex", "Codex Path", c.paths?.codex) + F("paths.ragScript", "RAG Script Path", c.paths?.ragScript) + F("paths.workDir", "AI Working Directory", c.paths?.workDir)),
     S("Proxy", F("proxy.https", "HTTPS Proxy", c.proxy?.https)),
     S("Models", F("models.claudeFast", "Claude Fast Model", c.models?.claudeFast) + F("models.claudeFallback", "Claude Fallback Model", c.models?.claudeFallback)),
     S("Timeouts", F("timeouts.aiMs", "AI Timeout (ms)", c.timeouts?.aiMs, "number")),
@@ -188,7 +195,7 @@ async function renderConfig() {
     const fd = new FormData(e.target);
     const obj = buildNested(fd);
     const r = await post("/api/config", obj);
-    toast(r.ok ? "Saved" : r.error, r.ok);
+    toast(r.ok ? "Saved. Restart bot to apply runtime settings." : r.error, r.ok);
   });
 }
 
@@ -210,7 +217,15 @@ function buildNested(fd) {
   return obj;
 }
 
-function escHtml(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+function escAttr(s) { return escHtml(s); }
 
 setInterval(() => { document.getElementById("clock").textContent = new Date().toLocaleString("zh-CN"); }, 1000);
 render();

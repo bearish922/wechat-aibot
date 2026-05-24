@@ -1,15 +1,25 @@
 {
   "name": "wechat-aibot",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "2.0.2",
+  "description": "Windows local WeChat AI bot powered by Claude Code or Codex",
+  "main": "bot.mjs",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node bot.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "node --check bot.mjs && node -e \"const {readdirSync}=require('node:fs');const {execFileSync}=require('node:child_process');for (const dir of ['lib','static']) for (const file of readdirSync(dir).filter(f=>f.endsWith(dir==='lib'?'.mjs':'.js'))) execFileSync(process.execPath,['--check',`${dir}/${file}`],{stdio:'inherit'});\""
   },
-  "keywords": [],
+  "keywords": [
+    "wechat",
+    "ai",
+    "claude-code",
+    "codex"
+  ],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "qrcode-terminal": "^0.12.0"
   }

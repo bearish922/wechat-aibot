@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.0.2 — Release Hardening (2026-05-25)
+- Harden local GUI static file serving and dynamic API route matching
+- Fix RAG GUI status and startup metadata lookup for `rag_meta.json`
+- Make AI working directory configurable through `paths.workDir` / `WECHAT_AI_WORK_DIR`
+- Avoid personal machine path defaults in runtime command execution
+- Improve GUI config save validation, API key preservation, and atomic writes
+- Escape GUI-rendered session/profile/config text to reduce injection risk
+- Align package metadata, scripts, license, README, changelog, and release archive contents
+- Keep Windows launch scripts portable while preserving a Program Files Node.js fallback
+
+## v2.0.1 — CI Fix (2026-05-25)
+- Use Node.js 22 in CI because `import.meta.dirname` requires Node.js 21.2+
+
+## v2.0.0 — GUI, Code Splitting, CI, and Release Packaging (2026-05-25)
+- Local web UI at `http://127.0.0.1:18720` with 4 panels: Status, Sessions, Profiles, Config
+- Auto-opens browser after bot startup
+- `launch.bat` — unified entry; `setup.bat` — one-click install
+- Removed old DEFAULT_PROFILES (毒舌/老师/简洁); profiles loaded from `wechat-profiles.json`
+- Extracted modules under `lib/` for config, state, WeChat API, replies, RAG, GUI routes, and static server
+- GitHub Actions CI and release archive workflow
+
 ## v1.2.0 — GUI (2026-05-25)
 - Local web UI at `http://127.0.0.1:18720` with 4 panels: Status, Sessions, Profiles, Config
 - Auto-opens browser after bot startup

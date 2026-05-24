@@ -6,10 +6,19 @@ import { spawn, spawnSync, execSync } from "node:child_process";
 // ─── CONFIG ───────────────────────────────────────────────────
 import { configValue, envOrConfig, configBool, configNumber } from "./lib/config.mjs";
 
-const NPM_GLOBAL = configValue("paths.npmGlobal", "C:\\Users\\25408\\AppData\\Roaming\\npm");
-const CLAUDE = envOrConfig("WECHAT_CLAUDE_PATH", "paths.claude", path.join(NPM_GLOBAL, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"));
-const CODEX = envOrConfig("WECHAT_CODEX_PATH", "paths.codex", path.join(NPM_GLOBAL, "node_modules", "@openai", "codex", "bin", "codex.js"));
+const USER_HOME = process.env.USERPROFILE || process.env.HOME || process.cwd();
+const DEFAULT_NPM_GLOBAL = process.env.APPDATA ? path.join(process.env.APPDATA, "npm") : path.join(USER_HOME, "AppData", "Roaming", "npm");
+function usableConfigString(value, fallback) {
+  const text = String(value ?? "").trim();
+  return text && !text.startsWith("填写") ? text : fallback;
+}
+const NPM_GLOBAL = usableConfigString(configValue("paths.npmGlobal", DEFAULT_NPM_GLOBAL), DEFAULT_NPM_GLOBAL);
+const DEFAULT_CLAUDE = path.join(NPM_GLOBAL, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
+const DEFAULT_CODEX = path.join(NPM_GLOBAL, "node_modules", "@openai", "codex", "bin", "codex.js");
+const CLAUDE = usableConfigString(envOrConfig("WECHAT_CLAUDE_PATH", "paths.claude", DEFAULT_CLAUDE), DEFAULT_CLAUDE);
+const CODEX = usableConfigString(envOrConfig("WECHAT_CODEX_PATH", "paths.codex", DEFAULT_CODEX), DEFAULT_CODEX);
 const NODE = process.execPath;
+const AI_WORK_DIR = usableConfigString(envOrConfig("WECHAT_AI_WORK_DIR", "paths.workDir", USER_HOME), USER_HOME);
 const HTTPS_PROXY = envOrConfig("WECHAT_HTTPS_PROXY", "proxy.https", "http://127.0.0.1:7892"); // Codex (Rust) doesn't read Windows system proxy
 const CLAUDE_FAST_MODEL = envOrConfig("WECHAT_CLAUDE_FAST_MODEL", "models.claudeFast", "deepseek-v4-flash[1m]");
 const CLAUDE_FALLBACK_MODEL = envOrConfig("WECHAT_CLAUDE_FALLBACK_MODEL", "models.claudeFallback", "deepseek-v4-flash[1m]");
@@ -59,7 +68,7 @@ const PROFILE_DELETE_CONFIRM_MS = 60_000;
 function loadModelNames() {
   // CC: read from ~/.claude/settings.json
   try {
-    const p = path.join(process.env.USERPROFILE || "C:\\Users\\25408", ".claude", "settings.json");
+    const p = path.join(USER_HOME, ".claude", "settings.json");
     if (fs.existsSync(p)) {
       const d = JSON.parse(fs.readFileSync(p, "utf-8"));
       modelNames.cc = d.env?.ANTHROPIC_MODEL || d.model || "unknown";
@@ -67,7 +76,7 @@ function loadModelNames() {
   } catch {}
   // Codex: read from ~/.codex/config.toml
   try {
-    const p = path.join(process.env.USERPROFILE || "C:\\Users\\25408", ".codex", "config.toml");
+    const p = path.join(USER_HOME, ".codex", "config.toml");
     if (fs.existsSync(p)) {
       const raw = fs.readFileSync(p, "utf-8");
       const m = raw.match(/^model\s*=\s*"([^"]+)"/m);
@@ -875,7 +884,7 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
     args.push("--append-system-prompt-file", systemPromptFile);
   }
   const proc = spawn(CLAUDE, args, {
-    cwd: "C:\\Users\\25408",
+    cwd: AI_WORK_DIR,
     timeout: CLAUDE_TIMEOUT_MS,
     shell: false,
     windowsHide: true,
@@ -959,7 +968,7 @@ function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragConte
       "exec",
       "--json",
       "--skip-git-repo-check",
-      "--cd", "C:\\Users\\25408",
+      "--cd", AI_WORK_DIR,
       "--sandbox", "workspace-write",
       "-",
     ];
@@ -973,7 +982,7 @@ function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragConte
   }
 
   const proc = spawn(NODE, [CODEX, ...args], {
-    cwd: "C:\\Users\\25408",
+    cwd: AI_WORK_DIR,
     timeout: CLAUDE_TIMEOUT_MS,
     shell: false,
     windowsHide: true,
@@ -1812,13 +1821,13 @@ function startupCheck() {
   // RAG index
   if (RAG_ENABLED) {
     const storeDir = configValue("rag.storeDir", "rag_vector_store");
-    const metaPath = path.join(storeDir, "meta.json");
+    const metaPath = path.join(storeDir, "rag_meta.json");
     if (fs.existsSync(metaPath)) {
       try {
         const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
         pass("RAG 知识库", `${storeDir} (索引存在)`);
       } catch {
-        warn("RAG 知识库", `${storeDir} (meta.json 解析失败，可运行 rebuild-rag.bat 重建)`);
+        warn("RAG 知识库", `${storeDir} (rag_meta.json 解析失败，可运行 rebuild-rag.bat 重建)`);
       }
     } else {
       warn("RAG 知识库", `${storeDir} (索引不存在，请运行 rebuild-rag.bat 初始化)`);
