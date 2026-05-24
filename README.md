@@ -174,7 +174,7 @@ rebuild-rag.bat
 
 角色模板保存在 `wechat-profiles.json`。线程绑定角色后，该线程会持续使用对应系统提示词；为了避免旧上下文污染，已绑定角色的线程不能直接切换成另一个角色，建议使用 `/new 角色名` 新建线程。
 
-默认角色模板中可能包含发布者自己的称呼或私有偏好。公开部署或分发前，请检查并按需要改写 `wechat-profiles.json`。
+你可以在 GUI 的 Profiles 页面直接编辑角色，也可以手动修改 `wechat-profiles.json`。修改后建议新建线程使用新角色，避免旧会话上下文影响效果。
 
 ## 知识库
 
@@ -184,7 +184,7 @@ rebuild-rag.bat
 rebuild-rag.bat
 ```
 
-构建结果默认写入 `rag_vector_store/`，模型缓存默认写入 `.fastembed_cache/`。这两个目录属于本地生成物，不应提交到公开仓库。
+构建结果默认写入 `rag_vector_store/`，模型缓存默认写入 `.fastembed_cache/`。如果知识库检索异常，可以删除 `rag_vector_store/` 后重新运行 `rebuild-rag.bat`。
 
 查询时会跳过短问候、纯寒暄等低价值检索；绑定角色的线程会在合适情况下把角色名加入查询，以提高召回准确率。
 
@@ -210,41 +210,27 @@ rebuild-rag.bat
 
 GUI 只监听 `127.0.0.1`，默认不对局域网开放。
 
-## 日志和本地状态
+## 本地数据
 
 每次 AI 调用会在 `logs/` 下生成：
 
 - `.jsonl`：原始事件流，适合精确排查。
 - `.txt`：可读摘要，包含用户输入、工具调用、结果和错误。
 
-以下文件通常包含个人数据、token、聊天记录或机器路径，已在 `.gitignore` 中排除，不建议提交或打包给他人：
+程序还会在本地保存一些运行数据：
 
-- `config.json`
-- `wechat-token.json`
-- `wechat-sessions.json`
-- `logs/`
-- `inbound_media/`
-- `.fastembed_cache/`
-- `rag_vector_store/`
+| 路径 | 内容 | 说明 |
+|---|---|---|
+| `config.json` | 本机配置 | 保存路径、代理、模型、视觉 API 等设置 |
+| `wechat-token.json` | 微信登录状态 | 删除后下次启动会重新扫码登录 |
+| `wechat-sessions.json` | 会话状态 | 保存线程、SID、角色绑定等信息 |
+| `wechat-profiles.json` | 角色模板 | 可通过 GUI 或文本编辑器修改 |
+| `logs/` | AI 调用日志 | 可用于排查问题；会按 `logs.retentionDays` 自动清理 |
+| `inbound_media/` | 收到的图片、文件、语音、视频 | 可用 `/cleanup media` 或 `cleanup-media.bat` 清理 |
+| `rag_vector_store/` | 知识库索引 | 可通过 `rebuild-rag.bat` 重建 |
+| `.fastembed_cache/` | embedding 模型缓存 | 首次构建知识库时自动下载和复用 |
 
-## 测试
-
-当前仓库使用 Node.js 内置测试框架：
-
-```bat
-node --test test/*.test.mjs
-```
-
-语法检查可运行：
-
-```bat
-node --check bot.mjs
-for %f in (lib\*.mjs static\*.js) do node --check "%f"
-```
-
-## 发布说明
-
-GitHub tag 推送会触发 release workflow，生成 `wechat-aibot-<tag>.zip`。发布包包含源码、静态资源、示例配置、知识库、脚本和文档，不包含个人配置、微信 token、会话状态、日志、媒体文件、向量库和模型缓存。
+升级新版时，通常保留 `config.json`、`wechat-token.json`、`wechat-sessions.json`、`wechat-profiles.json` 和自己的 `knowledge/` 即可继续使用原来的配置、登录状态、会话和角色。
 
 ## 许可
 
