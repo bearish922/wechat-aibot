@@ -72,7 +72,7 @@ const VISION_API_KEY = usableConfigString(process.env.WECHAT_VISION_API_KEY ?? p
 const VISION_MODEL = usableConfigString(envOrConfig("WECHAT_VISION_MODEL", "vision.model", DEFAULT_VISION_MODEL), DEFAULT_VISION_MODEL);
 const VISION_DETAIL = envOrConfig("WECHAT_VISION_DETAIL", "vision.detail", "high");
 const VISION_TIMEOUT_MS = configNumber("vision.timeoutMs", 180_000);
-import { COMMON_CHAT_STYLE_PROMPT, MAX_REPLY_LEN, SOCIAL_REPLY_MAX_PARTS, splitText, hasInboundAttachment, splitSocialReply, extractKaomoji, rememberRecentKaomoji, isInfoSeekingTurn, chooseReplyBudget, constrainCasualReply, buildStylePrompt } from "./lib/reply.mjs";
+import { COMMON_CHAT_STYLE_PROMPT, MAX_REPLY_LEN, SOCIAL_REPLY_MAX_PARTS, splitText, hasInboundAttachment, splitSocialReply, extractKaomoji, rememberRecentKaomoji, isInfoSeekingTurn, chooseReplyBudget, buildStylePrompt } from "./lib/reply.mjs";
 import { RAG_SKIP_PATTERNS, shouldSkipRag, buildRagBody } from "./lib/rag.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
@@ -1137,7 +1137,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
 
   async function flush(force, isFinal) {
     const raw = textBuf.trim();
-    const t = isFinal ? constrainCasualReply(raw, replyBudget) : raw;
+    const t = raw;
     if (!t || t === lastSent) { textBuf = ""; return; }
     if (!force && t.length < 300 && Date.now() - lastFlush < 3000) return;
     lastSent = t;

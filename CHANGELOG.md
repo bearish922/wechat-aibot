@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v2.0.4 — Remove hard reply truncation (2026-05-25)
+- Remove `constrainCasualReply` hard truncation from the reply pipeline; AI output is no longer forcibly cut off to fit the random length budget
+- Change length budget prompt from hard constraint ("硬约束") to soft style guidance ("风格指引"), so the AI can naturally exceed the suggested length when needed
+
 ## v2.0.3 — GUI polish and startup fixes (2026-05-25)
 - Add `vision.mode` (`auto` / `external` / `native` / `off`) so users with vision-capable Claude Code/Codex backends can skip the external vision API
 - Auto-detect `claude` and `codex` from PATH before falling back to common npm global install paths
