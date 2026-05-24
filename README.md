@@ -232,6 +232,14 @@ GUI 只监听 `127.0.0.1`，默认不对局域网开放。
 
 升级新版时，通常保留 `config.json`、`wechat-token.json`、`wechat-sessions.json`、`wechat-profiles.json` 和自己的 `knowledge/` 即可继续使用原来的配置、登录状态、会话和角色。
 
+## 打赏
+
+如果这个项目对你有帮助，欢迎请我喝杯奶茶 🧋
+
+<p align="center">
+  <img src="./assets/sponsor-alipay.jpg" width="220" alt="支付宝收款码" />
+</p>
+
 ## 许可
 
 MIT
