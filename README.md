@@ -35,28 +35,27 @@ WeChat AI Bot 监听微信消息，将文字、图片、语音、文件、视频
 ```bat
 setup.bat
 copy config.example.json config.json
-notepad config.json
 rebuild-rag.bat
 launch.bat
 ```
 
-启动后按终端提示扫码登录微信。登录完成后，浏览器会自动打开 `http://127.0.0.1:18720`。
+大多数情况下不需要先编辑 `config.json`。启动后按终端提示扫码登录微信。登录完成后，浏览器会自动打开 `http://127.0.0.1:18720`。
 
 ### 配置重点
 
-`config.json` 从 `config.example.json` 复制得到。常用字段如下：
+`config.json` 从 `config.example.json` 复制得到。能自动发现或使用默认值的字段可以保留原样：
 
 ```json
 {
   "paths": {
-    "npmGlobal": "C:\\Users\\你的用户名\\AppData\\Roaming\\npm",
-    "claude": "claude.exe 的完整路径",
-    "codex": "codex.js 的完整路径",
-    "ragScript": "rag.py 的完整路径",
-    "workDir": "填写 AI 命令运行目录，例如 C:\\Users\\你的用户名"
+    "npmGlobal": "可选；默认自动查找 npm 全局目录",
+    "claude": "可选；默认从 PATH 自动查找 claude",
+    "codex": "可选；默认从 PATH 自动查找 codex",
+    "ragScript": "可选；默认使用项目内 rag.py",
+    "workDir": "可选；默认使用当前 Windows 用户目录"
   },
   "proxy": {
-    "https": "http://127.0.0.1:7892"
+    "https": ""
   },
   "models": {
     "claudeFast": "闲聊快速模型",
@@ -66,8 +65,9 @@ launch.bat
     "aiMs": 600000
   },
   "vision": {
+    "mode": "auto",
     "baseUrl": "https://api.siliconflow.cn/v1",
-    "apiKey": "你的视觉模型 API Key",
+    "apiKey": "",
     "model": "Qwen/Qwen3-VL-32B-Instruct",
     "detail": "high",
     "timeoutMs": 180000
@@ -92,7 +92,59 @@ launch.bat
 }
 ```
 
-这些环境变量可覆盖配置：`WECHAT_CLAUDE_PATH`、`WECHAT_CODEX_PATH`、`WECHAT_AI_WORK_DIR`、`WECHAT_HTTPS_PROXY`、`WECHAT_VISION_BASE_URL`、`WECHAT_VISION_API_KEY`、`WECHAT_VISION_MODEL`、`WECHAT_LOG_RETENTION_DAYS`。
+这些环境变量可覆盖配置：`WECHAT_CLAUDE_PATH`、`WECHAT_CODEX_PATH`、`WECHAT_AI_WORK_DIR`、`WECHAT_HTTPS_PROXY`、`WECHAT_VISION_MODE`、`WECHAT_VISION_BASE_URL`、`WECHAT_VISION_API_KEY`、`WECHAT_VISION_MODEL`、`WECHAT_LOG_RETENTION_DAYS`。
+
+`paths.claude` 和 `paths.codex` 可以留空或保留示例占位；程序会先从环境变量读取，再从 PATH 自动查找 `claude` / `codex`。找不到时才使用 npm 全局安装目录下的常见路径。
+
+### 哪些需要填写
+
+| 配置 | 默认行为 | 什么时候需要填写 |
+|---|---|---|
+| `paths.claude` / `paths.codex` | 自动从 PATH 和 npm 全局目录查找 | 只有自动查找失败，或你想指定某个固定安装路径 |
+| `proxy.https` | 空值，不使用代理 | 网络环境需要代理访问 Claude/Codex/API 时 |
+| `vision.apiKey` | 空值，不调用外部视觉 API | AI 后端本身不支持视觉，但你希望它能看图/看视频首帧时 |
+| `vision.baseUrl` / `vision.model` | 默认 SiliconFlow + Qwen vision 模型 | 使用其他 OpenAI-compatible 视觉服务时 |
+| `rag.knowledgeDir` | 使用项目内 `knowledge/` | 想换成自己的 Markdown 知识库目录时 |
+| `paths.workDir` | 当前 Windows 用户目录 | 希望 Claude/Codex 在指定项目目录或工作区运行时 |
+
+### AI 后端登录
+
+至少安装并登录 Claude Code 或 Codex 中的一个。安装完成后，先在普通终端里运行一次：
+
+```bat
+claude
+```
+
+或：
+
+```bat
+codex
+```
+
+确认能正常进入对应 CLI 后，再启动 bot。路径通常不需要填写。
+
+### 图片识别模式
+
+`vision.mode` 支持：
+
+- `auto`：默认值；配置了外部视觉 API 时先生成图片/视频首帧描述，否则把本地图片路径交给 AI 后端处理。
+- `external`：强制使用 OpenAI-compatible 视觉 API，适合 Claude Code 后端本身不支持视觉、但另配视觉模型的场景。
+- `native`：不调用外部视觉 API，只把本地媒体路径交给支持视觉的 AI 后端。
+- `off`：不调用外部视觉 API，也不要求后端读取图片，只保留媒体路径和基础信息。
+
+如果你的 Claude Code/Codex 后端模型本身支持 vision，保留 `auto` 且不填写 `vision.apiKey` 即可；也可以显式设为 `native`。如果你的后端是 DeepSeek 这类不支持 vision 的模型，则保留 `auto` 并填写 `vision.apiKey`，或把 `vision.mode` 设为 `external`。
+
+### 代理、自定义知识库和工作目录
+
+没有代理就让 `proxy.https` 保持空字符串。需要代理时填写形如 `http://127.0.0.1:7892` 的地址。
+
+默认知识库是项目内 `knowledge/`。如果要改用自己的 Markdown 知识库，把 `rag.knowledgeDir` 改成绝对路径或相对项目目录的路径，然后重新运行：
+
+```bat
+rebuild-rag.bat
+```
+
+`paths.workDir` 控制 Claude/Codex 的运行目录。默认是当前 Windows 用户目录；如果你希望工具读写某个固定项目，把它改成对应目录即可。
 
 ## 微信命令
 
@@ -138,10 +190,10 @@ rebuild-rag.bat
 
 ## 附件处理
 
-- **图片**：下载到 `inbound_media/`，可调用视觉模型生成中文描述。
+- **图片**：下载到 `inbound_media/`；可按 `vision.mode` 调用外部视觉模型，或把本地路径交给支持视觉的 AI 后端。
 - **语音**：保存语音文件，并使用微信返回的语音转文字内容。
 - **文件**：保存文件，并尝试抽取 PDF、DOCX、PPTX、XLSX 的文本预览。
-- **视频**：保存视频，可用 ffmpeg 截取首帧后调用视觉模型描述。
+- **视频**：保存视频，可用 ffmpeg 截取首帧；首帧同样遵循 `vision.mode`。
 
 图片、视频、文件发送后有 30 秒合并窗口，窗口内追加的文字会作为附件补充说明一起交给 AI。
 

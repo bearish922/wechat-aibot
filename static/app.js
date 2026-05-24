@@ -164,8 +164,13 @@ window.deleteProfile = async (name) => {
 };
 
 // ── Config ──
-function F(key, label, value, type) {
-  return `<div class="form-group"><label>${label}</label><input name="${key}" value="${escHtml(String(value ?? ''))}" type="${type || 'text'}"></div>`;
+function F(key, label, value, type, placeholder = "") {
+  return `<div class="form-group"><label>${label}</label><input name="${key}" value="${escHtml(String(value ?? ''))}" type="${type || 'text'}" placeholder="${escAttr(placeholder)}"></div>`;
+}
+function Select(key, label, value, options) {
+  const selected = String(value ?? "");
+  const opts = options.map(([val, text]) => `<option value="${escAttr(val)}"${selected === val ? " selected" : ""}>${escHtml(text)}</option>`).join("");
+  return `<div class="form-group"><label>${label}</label><select name="${key}">${opts}</select></div>`;
 }
 function S(title, body) { return `<h3>${title}</h3>${body}`; }
 
@@ -174,11 +179,11 @@ async function renderConfig() {
   const c = d.config || {};
 
   const formHtml = [
-    S("Paths", F("paths.npmGlobal", "NPM Global Directory", c.paths?.npmGlobal) + F("paths.claude", "Claude Code Path", c.paths?.claude) + F("paths.codex", "Codex Path", c.paths?.codex) + F("paths.ragScript", "RAG Script Path", c.paths?.ragScript) + F("paths.workDir", "AI Working Directory", c.paths?.workDir)),
-    S("Proxy", F("proxy.https", "HTTPS Proxy", c.proxy?.https)),
+    S("Paths", F("paths.npmGlobal", "NPM Global Directory", c.paths?.npmGlobal, "text", "Auto") + F("paths.claude", "Claude Code Path", c.paths?.claude, "text", "Auto") + F("paths.codex", "Codex Path", c.paths?.codex, "text", "Auto") + F("paths.ragScript", "RAG Script Path", c.paths?.ragScript, "text", "Auto") + F("paths.workDir", "AI Working Directory", c.paths?.workDir, "text", "Auto")),
+    S("Proxy", F("proxy.https", "HTTPS Proxy", c.proxy?.https, "text", "Optional")),
     S("Models", F("models.claudeFast", "Claude Fast Model", c.models?.claudeFast) + F("models.claudeFallback", "Claude Fallback Model", c.models?.claudeFallback)),
     S("Timeouts", F("timeouts.aiMs", "AI Timeout (ms)", c.timeouts?.aiMs, "number")),
-    S("Vision", F("vision.baseUrl", "API Base URL", c.vision?.baseUrl) + F("vision.apiKey", "API Key", c.vision?.apiKey, "password") + F("vision.model", "Model Name", c.vision?.model) + F("vision.detail", "Detail Level", c.vision?.detail) + F("vision.timeoutMs", "Timeout (ms)", c.vision?.timeoutMs, "number")),
+    S("Vision", Select("vision.mode", "Mode", c.vision?.mode || "auto", [["auto", "Auto"], ["external", "External API"], ["native", "Native backend"], ["off", "Off"]]) + F("vision.baseUrl", "API Base URL", c.vision?.baseUrl, "text", "Default SiliconFlow") + F("vision.apiKey", "API Key", c.vision?.apiKey, "password", "Only for External API") + F("vision.model", "Model Name", c.vision?.model, "text", "Default Qwen/Qwen3-VL-32B-Instruct") + F("vision.detail", "Detail Level", c.vision?.detail) + F("vision.timeoutMs", "Timeout (ms)", c.vision?.timeoutMs, "number")),
     S("RAG", F("rag.knowledgeDir", "Knowledge Directory", c.rag?.knowledgeDir) + F("rag.collectionName", "Collection Name", c.rag?.collectionName) + F("rag.embedModel", "Embedding Model", c.rag?.embedModel) + F("rag.storeDir", "Vector Store Dir", c.rag?.storeDir) + F("rag.modelCacheDir", "Model Cache Dir", c.rag?.modelCacheDir) + F("rag.topK", "Top K Results", c.rag?.topK, "number") + F("rag.minScore", "Min Score", c.rag?.minScore, "number") + F("rag.scoreMargin", "Score Margin", c.rag?.scoreMargin, "number") + F("rag.chunkMaxChars", "Chunk Max Chars", c.rag?.chunkMaxChars, "number") + F("rag.resultMaxChars", "Result Max Chars", c.rag?.resultMaxChars, "number") + F("rag.batchSize", "Batch Size", c.rag?.batchSize, "number") + F("rag.enabled", "Enabled (true/false)", c.rag?.enabled)),
     S("Logs", F("logs.retentionDays", "Retention (days, 0=never)", c.logs?.retentionDays, "number")),
   ].join("");

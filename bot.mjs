@@ -10,11 +10,33 @@ const USER_HOME = process.env.USERPROFILE || process.env.HOME || process.cwd();
 const DEFAULT_NPM_GLOBAL = process.env.APPDATA ? path.join(process.env.APPDATA, "npm") : path.join(USER_HOME, "AppData", "Roaming", "npm");
 function usableConfigString(value, fallback) {
   const text = String(value ?? "").trim();
-  return text && !text.startsWith("填写") ? text : fallback;
+  return text && !/^(填写|可选)/u.test(text) ? text : fallback;
+}
+function firstExisting(paths) {
+  return paths.find(p => p && fs.existsSync(p)) || null;
+}
+function commandOnPath(command) {
+  const finder = process.platform === "win32" ? "where.exe" : "which";
+  const result = spawnSync(finder, [command], { encoding: "utf8", timeout: 3000, windowsHide: true });
+  if (result.status !== 0) return null;
+  const found = (result.stdout || "").split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  return firstExisting([
+    ...found.filter(p => /\.exe$/i.test(p)),
+    ...found.filter(p => /\.(cmd|bat)$/i.test(p)),
+    ...found,
+  ]);
 }
 const NPM_GLOBAL = usableConfigString(configValue("paths.npmGlobal", DEFAULT_NPM_GLOBAL), DEFAULT_NPM_GLOBAL);
-const DEFAULT_CLAUDE = path.join(NPM_GLOBAL, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
-const DEFAULT_CODEX = path.join(NPM_GLOBAL, "node_modules", "@openai", "codex", "bin", "codex.js");
+const DEFAULT_CLAUDE = commandOnPath("claude") || firstExisting([
+  path.join(NPM_GLOBAL, "claude.cmd"),
+  path.join(NPM_GLOBAL, "claude.exe"),
+  path.join(NPM_GLOBAL, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe"),
+]) || "claude";
+const DEFAULT_CODEX = commandOnPath("codex") || firstExisting([
+  path.join(NPM_GLOBAL, "codex.cmd"),
+  path.join(NPM_GLOBAL, "codex.exe"),
+  path.join(NPM_GLOBAL, "node_modules", "@openai", "codex", "bin", "codex.js"),
+]) || "codex";
 const CLAUDE = usableConfigString(envOrConfig("WECHAT_CLAUDE_PATH", "paths.claude", DEFAULT_CLAUDE), DEFAULT_CLAUDE);
 const CODEX = usableConfigString(envOrConfig("WECHAT_CODEX_PATH", "paths.codex", DEFAULT_CODEX), DEFAULT_CODEX);
 const NODE = process.execPath;
@@ -41,9 +63,12 @@ const INBOUND_MEDIA_DIR = path.join(import.meta.dirname, "inbound_media");
 const INSTANCE_LOCK_FILE = path.join(import.meta.dirname, ".wechat-aibot.lock");
 const WECHAT_MEDIA_MAX_BYTES = 100 * 1024 * 1024;
 const FILE_TEXT_PREVIEW_CHARS = 6000;
-const VISION_BASE_URL = process.env.WECHAT_VISION_BASE_URL ?? process.env.OPENAI_BASE_URL ?? configValue("vision.baseUrl", "https://api.siliconflow.cn/v1");
-const VISION_API_KEY = process.env.WECHAT_VISION_API_KEY ?? process.env.OPENAI_API_KEY ?? configValue("vision.apiKey", "");
-const VISION_MODEL = envOrConfig("WECHAT_VISION_MODEL", "vision.model", "Qwen/Qwen3-VL-32B-Instruct");
+const DEFAULT_VISION_BASE_URL = "https://api.siliconflow.cn/v1";
+const DEFAULT_VISION_MODEL = "Qwen/Qwen3-VL-32B-Instruct";
+const VISION_MODE = String(envOrConfig("WECHAT_VISION_MODE", "vision.mode", "auto")).trim().toLowerCase();
+const VISION_BASE_URL = usableConfigString(process.env.WECHAT_VISION_BASE_URL ?? process.env.OPENAI_BASE_URL ?? configValue("vision.baseUrl", DEFAULT_VISION_BASE_URL), DEFAULT_VISION_BASE_URL);
+const VISION_API_KEY = usableConfigString(process.env.WECHAT_VISION_API_KEY ?? process.env.OPENAI_API_KEY ?? configValue("vision.apiKey", ""), "");
+const VISION_MODEL = usableConfigString(envOrConfig("WECHAT_VISION_MODEL", "vision.model", DEFAULT_VISION_MODEL), DEFAULT_VISION_MODEL);
 const VISION_DETAIL = envOrConfig("WECHAT_VISION_DETAIL", "vision.detail", "high");
 const VISION_TIMEOUT_MS = configNumber("vision.timeoutMs", 180_000);
 import { COMMON_CHAT_STYLE_PROMPT, MAX_REPLY_LEN, SOCIAL_REPLY_MAX_PARTS, splitText, hasInboundAttachment, splitSocialReply, extractKaomoji, rememberRecentKaomoji, isInfoSeekingTurn, chooseReplyBudget, constrainCasualReply, buildStylePrompt } from "./lib/reply.mjs";
@@ -611,10 +636,23 @@ function extractVisionContent(messageContent) {
   return "";
 }
 
+function hasExternalVisionConfig() {
+  return Boolean(VISION_BASE_URL && VISION_API_KEY && VISION_MODEL);
+}
+
+function shouldUseExternalVision() {
+  if (VISION_MODE === "off" || VISION_MODE === "none" || VISION_MODE === "native") return false;
+  if (VISION_MODE === "external" || VISION_MODE === "cloud") return true;
+  return hasExternalVisionConfig();
+}
+
 async function captionImageCloud(filePath, hint = "") {
   if (!filePath || !fs.existsSync(filePath)) return null;
-  if (!VISION_BASE_URL || !VISION_API_KEY || !VISION_MODEL) {
-    log("\u{1F441}", "cloud vision skipped: WECHAT_VISION_BASE_URL/API_KEY/MODEL not configured");
+  if (!shouldUseExternalVision()) {
+    return null;
+  }
+  if (!hasExternalVisionConfig()) {
+    log("\u{1F441}", "external vision skipped: WECHAT_VISION_BASE_URL/API_KEY/MODEL not configured");
     return null;
   }
   const imageBuffer = fs.readFileSync(filePath);
@@ -647,11 +685,11 @@ async function captionImageCloud(filePath, hint = "") {
     }, VISION_TIMEOUT_MS, { Authorization: `Bearer ${VISION_API_KEY}` });
     const caption = extractVisionContent(result.choices?.[0]?.message?.content).trim();
     if (caption) {
-      log("\u{1F441}", `cloud vision caption ok (${caption.length} chars, model=${VISION_MODEL})`);
+      log("\u{1F441}", `external vision caption ok (${caption.length} chars, model=${VISION_MODEL})`);
       return caption;
     }
   } catch (e) {
-    log("⚠️", `cloud vision caption skipped: ${e.message?.slice(0, 120) || e}`);
+    log("⚠️", `external vision caption skipped: ${e.message?.slice(0, 120) || e}`);
   }
   return null;
 }
@@ -726,8 +764,10 @@ function mediaInfoToPrompt(info) {
   if (info.error && !info.path && !info.framePath) return `[${info.kind || "媒体"}：${info.error}]`;
   if (info.kind === "image") {
     const dims = info.dimensions ? `\n尺寸: ${info.dimensions.width}x${info.dimensions.height}` : "";
-    const caption = info.caption ? `\n云端视觉模型描述:\n${info.caption}` : "\n云端视觉模型描述: 未生成，请不要根据图片分量或细节做肯定判断。";
-    return `[图片]\n本地路径: ${info.path}\nMIME: ${info.mime}${dims}${caption}\n请优先依据“云端视觉模型描述”回复；不要仅凭用户补充文字脑补图片细节。若视觉描述把不确定内容写成事实，也要保守处理；看不清标题或细节时要直接说不确定。`;
+    const caption = info.caption
+      ? `\n外部视觉模型描述:\n${info.caption}`
+      : "\n外部视觉模型描述: 未生成。若当前 AI 后端支持视觉，请直接查看本地路径中的图片；否则请说明无法确认图片细节。";
+    return `[图片]\n本地路径: ${info.path}\nMIME: ${info.mime}${dims}${caption}\n回复时不要仅凭用户补充文字脑补图片细节。若已有外部视觉描述，请优先依据它，但仍要保守处理不确定内容；若后端支持视觉，也可以直接查看本地图片文件。`;
   }
   if (info.kind === "voice") {
     const transcript = info.transcript ? `\n语音转文字: ${info.transcript}` : "";
@@ -739,10 +779,12 @@ function mediaInfoToPrompt(info) {
   }
   if (info.kind === "video") {
     const frame = info.framePath ? `\n首帧截图: ${info.framePath}` : "";
-    const frameCaption = info.frameCaption ? `\n首帧云端视觉模型描述:\n${info.frameCaption}` : "";
+    const frameCaption = info.frameCaption
+      ? `\n首帧外部视觉模型描述:\n${info.frameCaption}`
+      : (info.framePath ? "\n首帧外部视觉模型描述: 未生成。若当前 AI 后端支持视觉，请直接查看首帧截图。" : "");
     const videoPath = info.path ? `\n本地路径: ${info.path}` : "";
     const err = info.error ? `\n备注: ${info.error}` : "";
-    return `[视频]${videoPath}\nMIME: ${info.mime || "unknown"}\n大小: ${info.size ?? "unknown"} bytes${frame}${frameCaption}${err}\n请优先依据首帧云端视觉模型描述回复；不要脑补视频中不可见的内容。`;
+    return `[视频]${videoPath}\nMIME: ${info.mime || "unknown"}\n大小: ${info.size ?? "unknown"} bytes${frame}${frameCaption}${err}\n请优先依据可见首帧信息回复；不要脑补视频中不可见的内容。`;
   }
   return `[媒体]\n${JSON.stringify(info)}`;
 }
@@ -851,6 +893,17 @@ function replyPrefix(sessionName, ai = activeAI) {
   return `${aiName}-${sessionName}`;
 }
 
+function needsWindowsShell(command) {
+  return process.platform === "win32" && (!path.extname(command) || /\.(cmd|bat)$/i.test(command));
+}
+
+function spawnCli(command, args, options = {}) {
+  return spawn(command, args, {
+    ...options,
+    shell: options.shell ?? needsWindowsShell(command),
+  });
+}
+
 // ─── RUN CLAUDE (stream-json) ────────────────────────────────
 function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePrompt, profileOverride = null) {
   const profile = profileOverride;
@@ -883,10 +936,9 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
     fs.writeFileSync(systemPromptFile, systemPromptParts.join("\n\n---\n\n"), "utf-8");
     args.push("--append-system-prompt-file", systemPromptFile);
   }
-  const proc = spawn(CLAUDE, args, {
+  const proc = spawnCli(CLAUDE, args, {
     cwd: AI_WORK_DIR,
     timeout: CLAUDE_TIMEOUT_MS,
-    shell: false,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, HTTP_PROXY: HTTPS_PROXY, HTTPS_PROXY, http_proxy: HTTPS_PROXY, https_proxy: HTTPS_PROXY },
@@ -981,10 +1033,11 @@ function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragConte
     ];
   }
 
-  const proc = spawn(NODE, [CODEX, ...args], {
+  const codexCommand = /\.js$/i.test(CODEX) ? NODE : CODEX;
+  const codexArgs = /\.js$/i.test(CODEX) ? [CODEX, ...args] : args;
+  const proc = spawnCli(codexCommand, codexArgs, {
     cwd: AI_WORK_DIR,
     timeout: CLAUDE_TIMEOUT_MS,
-    shell: false,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, HTTP_PROXY: HTTPS_PROXY, HTTPS_PROXY, http_proxy: HTTPS_PROXY, https_proxy: HTTPS_PROXY },
@@ -1834,15 +1887,17 @@ function startupCheck() {
     }
   }
 
-  // Vision API
-  if (VISION_BASE_URL) {
-    if (VISION_API_KEY) {
-      pass("视觉模型", `${VISION_MODEL} @ ${VISION_BASE_URL}`);
+  // Vision handling
+  if (shouldUseExternalVision()) {
+    if (hasExternalVisionConfig()) {
+      pass("视觉模式", `${VISION_MODE} -> external: ${VISION_MODEL} @ ${VISION_BASE_URL}`);
     } else {
-      warn("视觉模型", "API key 未配置 (图片理解将不可用)");
+      warn("视觉模式", `${VISION_MODE}: 外部视觉 API 未完整配置，将仅传递本地媒体路径`);
     }
+  } else if (VISION_MODE === "off" || VISION_MODE === "none") {
+    warn("视觉模式", "off (仅保存媒体路径，不生成视觉描述)");
   } else {
-    warn("视觉模型", "base URL 未配置 (图片理解将不可用)");
+    pass("视觉模式", `${VISION_MODE || "native"} (交给 AI 后端读取本地媒体路径)`);
   }
 
   // node_modules
