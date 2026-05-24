@@ -30,7 +30,7 @@ function toast(msg, ok = true) {
 }
 
 async function render() {
-  content.innerHTML = '<div class="card"><p>Loading...</p></div>';
+  content.innerHTML = '<div class="panel"><p>Loading...</p></div>';
   try {
     switch (activeTab) {
       case "status": await renderStatus(); break;
@@ -39,58 +39,155 @@ async function render() {
       case "config": await renderConfig(); break;
     }
   } catch (e) {
-    content.innerHTML = `<div class="card"><p style="color:#dc2626">Error: ${escHtml(e.message)}</p></div>`;
+    content.innerHTML = `<div class="panel"><p class="error-text">Error: ${escHtml(e.message)}</p></div>`;
   }
 }
 
-// ── Status ──
+// Status
 async function renderStatus() {
   const s = await get("/api/status");
   content.innerHTML = `
-    <div class="card">
-      <h2>Status</h2>
-      <p><span class="status-dot ${s.online ? 'online' : 'offline'}"></span>
-      <strong>${s.online ? 'Online' : 'Offline'}</strong></p>
-      <p>AI: <strong>${s.currentAI === 'cc' ? 'Claude Code' : 'Codex'}</strong> (${escHtml(s.currentModel)})</p>
-      <p>Sessions: CC <strong>${Number(s.sessions?.cc || 0)}</strong> | Codex <strong>${Number(s.sessions?.codex || 0)}</strong></p>
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Status</h2>
+        <span class="status-pill ${s.online ? 'online' : 'offline'}">${s.online ? 'Online' : 'Offline'}</span>
+      </div>
+      <div class="stat-grid">
+        <div class="stat-tile"><span>AI</span><strong>${s.currentAI === 'cc' ? 'Claude Code' : 'Codex'}</strong></div>
+        <div class="stat-tile"><span>Model</span><strong>${escHtml(s.currentModel)}</strong></div>
+        <div class="stat-tile"><span>CC Sessions</span><strong>${Number(s.sessions?.cc || 0)}</strong></div>
+        <div class="stat-tile"><span>Codex Sessions</span><strong>${Number(s.sessions?.codex || 0)}</strong></div>
+      </div>
     </div>
   `;
 }
 
-// ── Sessions ──
+// Sessions
 async function renderSessions() {
   const d = await get("/api/sessions");
   const rows = d.sessions.map(s => `
     <tr>
       <td><span class="badge badge-${s.ai === 'cc' ? 'cc' : 'codex'}">${s.ai === 'cc' ? 'CC' : 'Codex'}</span></td>
-      <td>${s.active ? '<strong>→</strong>' : ''} ${escHtml(s.name)}</td>
+      <td>${s.active ? '<strong class="active-mark">→</strong>' : ''} ${escHtml(s.name)}</td>
       <td><span class="badge badge-default">${escHtml(s.profile)}</span></td>
       <td>${s.busy ? 'Busy' : s.queue ? 'Queue(' + Number(s.queue) + ')' : 'Idle'}</td>
     </tr>
   `).join("");
 
   const resume = await get("/api/sessions/resume");
+  const resumeCommands = resumeCommandList(resume);
   content.innerHTML = `
-    <div class="card">
-      <h2>Sessions (${d.currentAI === 'cc' ? 'Claude Code' : 'Codex'})</h2>
-      <table>${rows || '<tr><td colspan="4">No sessions</td></tr>'}</table>
+    <div class="panel">
+      <div class="panel-head"><h2>Sessions (${d.currentAI === 'cc' ? 'Claude Code' : 'Codex'})</h2></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>AI</th><th>Name</th><th>Profile</th><th>Status</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="4">No sessions</td></tr>'}</tbody>
+      </table></div>
     </div>
-    <div class="card">
-      <h2>Resume Commands</h2>
-      <pre>${escHtml(resume.text || "")}</pre>
+    <div class="panel">
+      <div class="panel-head"><h2>Resume Commands</h2></div>
+      ${renderResumeCommands(resumeCommands)}
+    </div>
+  `;
+  content.querySelectorAll('[data-action="copy-resume"]').forEach(btn => {
+    btn.addEventListener("click", () => copyResumeCommand(btn));
+  });
+}
+
+function resumeCommandList(resume) {
+  if (Array.isArray(resume?.commands)) return resume.commands.filter(x => x?.command);
+  const items = [];
+  let aiLabel = "";
+  let name = "";
+  let profile = "";
+  let active = false;
+  for (const rawLine of String(resume?.text || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (line.startsWith("## ")) {
+      aiLabel = line.slice(3).trim();
+      name = "";
+      profile = "";
+      active = false;
+      continue;
+    }
+    if (/^(claude\s+--resume|codex\s+resume)\s+/.test(line)) {
+      items.push({ aiLabel, name, profile, active, command: line });
+      continue;
+    }
+    const role = line.match(/^(?:角色|Profile):\s*(.+)$/i);
+    if (role) {
+      profile = role[1].trim();
+      continue;
+    }
+    if (!line.startsWith("#")) {
+      active = /\[(当前|current)\]/i.test(line);
+      name = line.replace(/\s*\[(当前|current)\]\s*$/i, "").trim();
+    }
+  }
+  return items;
+}
+
+function renderResumeCommands(commands) {
+  if (!commands.length) return '<p class="empty-text">No resume commands</p>';
+  return `
+    <div class="resume-list">
+      ${commands.map((item, index) => `
+        <div class="resume-item">
+          <div class="resume-meta">
+            <span class="badge badge-${item.ai === 'cc' ? 'cc' : item.ai === 'codex' ? 'codex' : 'default'}">${escHtml(item.aiLabel || item.ai || 'AI')}</span>
+            <strong>${escHtml(item.name || `Session ${index + 1}`)}</strong>
+            ${item.active ? '<span class="resume-current">Current</span>' : ''}
+            ${item.profile ? `<span class="resume-profile">${escHtml(item.profile)}</span>` : ''}
+          </div>
+          <code class="resume-command">${escHtml(item.command)}</code>
+          <button class="btn resume-copy" data-action="copy-resume" data-command="${escAttr(item.command)}">Copy</button>
+        </div>
+      `).join("")}
     </div>
   `;
 }
 
-// ── Profiles ──
+async function copyResumeCommand(btn) {
+  const command = btn.dataset.command || "";
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(command);
+    } else {
+      copyTextFallback(command);
+    }
+    btn.textContent = "Copied";
+    toast("Command copied");
+    setTimeout(() => { btn.textContent = "Copy"; }, 1400);
+  } catch {
+    copyTextFallback(command);
+    btn.textContent = "Copied";
+    toast("Command copied");
+    setTimeout(() => { btn.textContent = "Copy"; }, 1400);
+  }
+}
+
+function copyTextFallback(text) {
+  const el = document.createElement("textarea");
+  el.value = text;
+  el.setAttribute("readonly", "");
+  el.style.position = "fixed";
+  el.style.left = "-9999px";
+  document.body.appendChild(el);
+  el.select();
+  document.execCommand("copy");
+  el.remove();
+}
+
+// Profiles
 async function renderProfiles() {
   const d = await get("/api/profiles");
   const rows = d.profiles.map(p => `
     <tr>
-      <td><strong>${escHtml(p.name)}</strong></td>
-      <td>${escHtml(p.prompt.slice(0, 80))}${p.prompt.length > 80 ? '...' : ''}</td>
+      <td class="profile-name"><strong>${escHtml(p.name)}</strong></td>
+      <td class="prompt-preview">${escHtml(p.prompt.slice(0, 110))}${p.prompt.length > 110 ? '...' : ''}</td>
       <td>${Number(p.bindings)} session${p.bindings !== 1 ? 's' : ''}</td>
-      <td>
+      <td class="actions-cell">
         <button class="btn" data-action="edit-profile" data-profile="${escAttr(p.name)}">Edit</button>
         ${p.name !== '默认' ? `<button class="btn btn-danger" data-action="delete-profile" data-profile="${escAttr(p.name)}">Del</button>` : ''}
       </td>
@@ -98,12 +195,15 @@ async function renderProfiles() {
   `).join("");
 
   content.innerHTML = `
-    <div class="card">
-      <div class="flex-between mb">
+    <div class="panel">
+      <div class="panel-head">
         <h2>Profiles</h2>
         <button class="btn btn-primary" onclick="showAddProfile()">+ Add</button>
       </div>
-      <table>${rows}</table>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Name</th><th>Prompt</th><th>Bindings</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
       <div id="profileForm" class="mt"></div>
     </div>
   `;
@@ -120,13 +220,17 @@ window.editProfile = async (name) => {
   const p = d.profiles.find(x => x.name === name);
   if (!p) return;
   document.getElementById("profileForm").innerHTML = `
-    <div class="card" style="margin-top:14px">
-    <h3>Edit: ${escHtml(name)}</h3>
-    <div class="form-group"><label>Prompt</label><textarea id="editPrompt">${escHtml(p.prompt)}</textarea></div>
-    <button class="btn btn-primary" id="saveProfileBtn">Save</button>
+    <div class="profile-editor">
+    <div class="editor-head">
+      <h3>Edit: ${escHtml(name)}</h3>
+      <span>${p.prompt.length.toLocaleString()} chars</span>
+    </div>
+    <div class="form-group"><label>Prompt</label><textarea id="editPrompt" class="profile-prompt-editor" spellcheck="false">${escHtml(p.prompt)}</textarea></div>
+    <div class="editor-actions"><button class="btn btn-primary" id="saveProfileBtn">Save</button></div>
     </div>
   `;
   document.getElementById("saveProfileBtn").addEventListener("click", () => saveProfile(name));
+  document.getElementById("editPrompt").focus();
 };
 
 window.saveProfile = async (name) => {
@@ -138,13 +242,14 @@ window.saveProfile = async (name) => {
 
 window.showAddProfile = () => {
   document.getElementById("profileForm").innerHTML = `
-    <div class="card" style="margin-top:14px">
-    <h3>New Profile</h3>
-    <div class="form-group"><label>Name</label><input id="newName"></div>
-    <div class="form-group"><label>Prompt</label><textarea id="newPrompt"></textarea></div>
-    <button class="btn btn-primary" onclick="addProfile()">Add</button>
+    <div class="profile-editor">
+    <div class="editor-head"><h3>New Profile</h3></div>
+    <div class="form-grid one"><div class="form-group"><label>Name</label><input id="newName"></div></div>
+    <div class="form-group"><label>Prompt</label><textarea id="newPrompt" class="profile-prompt-editor" spellcheck="false"></textarea></div>
+    <div class="editor-actions"><button class="btn btn-primary" onclick="addProfile()">Add</button></div>
     </div>
   `;
+  document.getElementById("newName").focus();
 };
 
 window.addProfile = async () => {
@@ -163,7 +268,7 @@ window.deleteProfile = async (name) => {
   if (r.ok) render();
 };
 
-// ── Config ──
+// Config
 function F(key, label, value, type, placeholder = "") {
   return `<div class="form-group"><label>${label}</label><input name="${key}" value="${escHtml(String(value ?? ''))}" type="${type || 'text'}" placeholder="${escAttr(placeholder)}"></div>`;
 }
@@ -189,9 +294,9 @@ async function renderConfig() {
   ].join("");
 
   content.innerHTML = `
-    <div class="card">
-      <h2>Configuration</h2>
-      <form id="configForm">${formHtml}<button type="submit" class="btn btn-primary mt">Save</button></form>
+    <div class="panel">
+      <div class="panel-head"><h2>Configuration</h2></div>
+      <form id="configForm" class="config-form">${formHtml}<button type="submit" class="btn btn-primary mt">Save</button></form>
     </div>
   `;
 

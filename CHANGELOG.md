@@ -1,12 +1,18 @@
 # Changelog
 
 ## Unreleased
+
+## v2.0.3 — GUI polish and startup fixes (2026-05-25)
 - Add `vision.mode` (`auto` / `external` / `native` / `off`) so users with vision-capable Claude Code/Codex backends can skip the external vision API
 - Auto-detect `claude` and `codex` from PATH before falling back to common npm global install paths
 - Treat placeholder config strings as unset, reducing first-run setup friction
 - Make proxy, RAG script, AI working directory, and external vision API key optional in the example config
 - Add README setup notes for AI backend login, vision mode, proxy, custom knowledge base, and AI working directory
 - Update the GUI Config page with a vision mode selector and optional-field placeholders
+- Make single-instance startup open the existing GUI instead of failing, and add restart/open options to `launch.bat`
+- Stop the bot when the GUI port is already in use so it does not keep running without a visible UI
+- Redesign the local GUI with a sidebar layout, clearer status/session/profile/config panels, and a larger profile editor
+- Show resume commands as individual copyable command rows in the Sessions page
 
 ## v2.0.2 — Release Hardening (2026-05-25)
 - Harden local GUI static file serving and dynamic API route matching

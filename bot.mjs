@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn, spawnSync, execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 // ─── CONFIG ───────────────────────────────────────────────────
 import { configValue, envOrConfig, configBool, configNumber } from "./lib/config.mjs";
@@ -136,8 +137,11 @@ function acquireInstanceLock() {
     if (fs.existsSync(INSTANCE_LOCK_FILE)) {
       const oldPid = Number(fs.readFileSync(INSTANCE_LOCK_FILE, "utf-8").trim());
       if (oldPid !== process.pid && isPidRunning(oldPid)) {
-        process.stderr.write(`Another bot.mjs instance is already running: PID ${oldPid}\n`);
-        process.exit(1);
+        const guiUrl = "http://127.0.0.1:18720";
+        process.stdout.write(`WeChat AI Bot is already running: PID ${oldPid}\n`);
+        process.stdout.write(`Opening GUI: ${guiUrl}\n`);
+        try { execSync(`cmd /c start ${guiUrl}`, { timeout: 5000, windowsHide: true }); } catch {}
+        process.exit(0);
       }
     }
     fs.writeFileSync(INSTANCE_LOCK_FILE, String(process.pid));
@@ -1957,61 +1961,64 @@ async function mainLoop() {
   }
 }
 
-// ─── CRASH GUARDS ────────────────────────────────────────────
-process.on("uncaughtException", (e) => { log("\u{1F4A5}", `uncaught: ${e.message}\n${e.stack?.slice(0, 300)}`); });
-process.on("unhandledRejection", (r) => { log("\u{1F4A5}", `unhandled rejection: ${r}`); });
-process.on("exit", releaseInstanceLock);
-process.on("SIGINT", () => { releaseInstanceLock(); process.exit(0); });
-process.on("SIGTERM", () => { releaseInstanceLock(); process.exit(0); });
+async function main() {
+  // ─── CRASH GUARDS ────────────────────────────────────────────
+  process.on("uncaughtException", (e) => { log("\u{1F4A5}", `uncaught: ${e.message}\n${e.stack?.slice(0, 300)}`); });
+  process.on("unhandledRejection", (r) => { log("\u{1F4A5}", `unhandled rejection: ${r}`); });
+  process.on("exit", releaseInstanceLock);
+  process.on("SIGINT", () => { stopServer(); releaseInstanceLock(); process.exit(0); });
+  process.on("SIGTERM", () => { stopServer(); releaseInstanceLock(); process.exit(0); });
 
-// ─── STARTUP ────────────────────────────────────────────────
-acquireInstanceLock();
-process.stdout.write("\nWeChat AI Bot\n=============\n");
-startupCheck();
-cleanupOldLogs();
-setInterval(cleanupOldLogs, LOG_CLEANUP_INTERVAL_MS).unref();
+  // ─── STARTUP ────────────────────────────────────────────────
+  acquireInstanceLock();
+  process.stdout.write("\nWeChat AI Bot\n=============\n");
+  startupCheck();
+  cleanupOldLogs();
+  setInterval(cleanupOldLogs, LOG_CLEANUP_INTERVAL_MS).unref();
 
-// Restore last active AI before loading profiles (so profile display is correct).
-try {
-  if (fs.existsSync(TOKEN_FILE)) {
-    const d = JSON.parse(fs.readFileSync(TOKEN_FILE, "utf-8"));
-    if (d.lastActiveAI === "cc" || d.lastActiveAI === "codex") setActiveAI(d.lastActiveAI);
-  }
-} catch {}
-
-loadModelNames();
-loadProfiles();
-loadSessions();
-
-// ─── Start GUI server first ──────────────────────────────────
-registerStatusRoutes();
-registerSessionRoutes();
-registerProfileRoutes();
-registerConfigRoutes();
-registerRagRoutes();
-registerMediaRoutes();
-registerLogRoutes();
-registerControlRoutes();
-startServer();
-
-process.on("SIGINT", () => { stopServer(); process.exit(0); });
-process.on("SIGTERM", () => { stopServer(); process.exit(0); });
-
-// ─── WeChat login ────────────────────────────────────────────
-if (!loadToken()) {
-  await loginWithQr();
-} else {
+  // Restore last active AI before loading profiles (so profile display is correct).
   try {
-    const resp = await apiPost("ilink/bot/getupdates", { get_updates_buf: "" }, 10_000);
-    if (resp.errcode === -14 || (resp.ret && resp.ret !== 0 && resp.errcode)) {
-      log("⚠️", "Token 过期，重新登录..."); setToken(null); await loginWithQr();
-    } else {
-      if (resp.get_updates_buf) setSyncBuf(resp.get_updates_buf);
+    if (fs.existsSync(TOKEN_FILE)) {
+      const d = JSON.parse(fs.readFileSync(TOKEN_FILE, "utf-8"));
+      if (d.lastActiveAI === "cc" || d.lastActiveAI === "codex") setActiveAI(d.lastActiveAI);
     }
-  } catch {
-    log("⚠️", "Token 验证失败，重新登录..."); setToken(null); await loginWithQr();
+  } catch {}
+
+  loadModelNames();
+  loadProfiles();
+  loadSessions();
+
+  // ─── Start GUI server first ──────────────────────────────────
+  registerStatusRoutes();
+  registerSessionRoutes();
+  registerProfileRoutes();
+  registerConfigRoutes();
+  registerRagRoutes();
+  registerMediaRoutes();
+  registerLogRoutes();
+  registerControlRoutes();
+  startServer();
+
+  // ─── WeChat login ────────────────────────────────────────────
+  if (!loadToken()) {
+    await loginWithQr();
+  } else {
+    try {
+      const resp = await apiPost("ilink/bot/getupdates", { get_updates_buf: "" }, 10_000);
+      if (resp.errcode === -14 || (resp.ret && resp.ret !== 0 && resp.errcode)) {
+        log("⚠️", "Token 过期，重新登录..."); setToken(null); await loginWithQr();
+      } else {
+        if (resp.get_updates_buf) setSyncBuf(resp.get_updates_buf);
+      }
+    } catch {
+      log("⚠️", "Token 验证失败，重新登录..."); setToken(null); await loginWithQr();
+    }
   }
+
+  log("\u{1F680}", `开始监听微信消息... (当前: ${activeAI === "cc" ? "Claude Code" : "Codex"})`);
+  await mainLoop();
 }
 
-log("\u{1F680}", `开始监听微信消息... (当前: ${activeAI === "cc" ? "Claude Code" : "Codex"})`);
-await mainLoop();
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  await main();
+}
