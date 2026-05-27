@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 // ─── CONFIG ───────────────────────────────────────────────────
 import { configValue, envOrConfig, configBool, configNumber } from "./lib/config.mjs";
+import { DATA_DIR, RUNTIME_DIR, appPath, dataPath, rootPath, ensureDir, resolveProjectPath } from "./lib/paths.mjs";
 
 const USER_HOME = process.env.USERPROFILE || process.env.HOME || process.cwd();
 const DEFAULT_NPM_GLOBAL = process.env.APPDATA ? path.join(process.env.APPDATA, "npm") : path.join(USER_HOME, "AppData", "Roaming", "npm");
@@ -15,6 +16,20 @@ function usableConfigString(value, fallback) {
 }
 function firstExisting(paths) {
   return paths.find(p => p && fs.existsSync(p)) || null;
+}
+function listDirs(parent) {
+  try {
+    return fs.readdirSync(parent, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .map(d => d.name);
+  } catch {
+    return [];
+  }
+}
+function latestExisting(paths) {
+  return paths
+    .filter(p => p && fs.existsSync(p))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0] || null;
 }
 function commandOnPath(command) {
   const finder = process.platform === "win32" ? "where.exe" : "which";
@@ -28,6 +43,43 @@ function commandOnPath(command) {
   ]);
 }
 const NPM_GLOBAL = usableConfigString(configValue("paths.npmGlobal", DEFAULT_NPM_GLOBAL), DEFAULT_NPM_GLOBAL);
+function claudeNativeFallback() {
+  if (process.platform !== "win32") return null;
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  const anthropicDir = path.join(NPM_GLOBAL, "node_modules", "@anthropic-ai");
+  const tempCandidates = listDirs(anthropicDir)
+    .filter(name => name.startsWith(".claude-code-"))
+    .map(name => path.join(anthropicDir, name, "node_modules", "@anthropic-ai", `claude-code-win32-${arch}`, "claude.exe"));
+  const claudeDesktopCache = path.join(
+    process.env.LOCALAPPDATA || path.join(USER_HOME, "AppData", "Local"),
+    "Packages",
+    "Claude_pzs8sxrjxfjjc",
+    "LocalCache",
+    "Roaming",
+    "Claude",
+    "claude-code",
+  );
+  const desktopCandidates = listDirs(claudeDesktopCache).map(name => path.join(claudeDesktopCache, name, "claude.exe"));
+  return latestExisting([
+    path.join(anthropicDir, "claude-code", "node_modules", "@anthropic-ai", `claude-code-win32-${arch}`, "claude.exe"),
+    ...tempCandidates,
+    ...desktopCandidates,
+  ]);
+}
+function isNpmClaudeStub(command) {
+  try {
+    const normalized = path.normalize(command).toLowerCase();
+    return process.platform === "win32"
+      && normalized.endsWith(path.normalize("@anthropic-ai/claude-code/bin/claude.exe").toLowerCase())
+      && fs.statSync(command).size < 4096;
+  } catch {
+    return false;
+  }
+}
+function resolveClaudeCommand(command) {
+  if (!isNpmClaudeStub(command)) return command;
+  return claudeNativeFallback() || command;
+}
 const DEFAULT_CLAUDE = commandOnPath("claude") || firstExisting([
   path.join(NPM_GLOBAL, "claude.cmd"),
   path.join(NPM_GLOBAL, "claude.exe"),
@@ -38,7 +90,8 @@ const DEFAULT_CODEX = commandOnPath("codex") || firstExisting([
   path.join(NPM_GLOBAL, "codex.exe"),
   path.join(NPM_GLOBAL, "node_modules", "@openai", "codex", "bin", "codex.js"),
 ]) || "codex";
-const CLAUDE = usableConfigString(envOrConfig("WECHAT_CLAUDE_PATH", "paths.claude", DEFAULT_CLAUDE), DEFAULT_CLAUDE);
+const CLAUDE_CONFIGURED = usableConfigString(envOrConfig("WECHAT_CLAUDE_PATH", "paths.claude", DEFAULT_CLAUDE), DEFAULT_CLAUDE);
+const CLAUDE = resolveClaudeCommand(CLAUDE_CONFIGURED);
 const CODEX = usableConfigString(envOrConfig("WECHAT_CODEX_PATH", "paths.codex", DEFAULT_CODEX), DEFAULT_CODEX);
 const NODE = process.execPath;
 const AI_WORK_DIR = usableConfigString(envOrConfig("WECHAT_AI_WORK_DIR", "paths.workDir", USER_HOME), USER_HOME);
@@ -46,22 +99,22 @@ const HTTPS_PROXY = envOrConfig("WECHAT_HTTPS_PROXY", "proxy.https", "http://127
 const CLAUDE_FAST_MODEL = envOrConfig("WECHAT_CLAUDE_FAST_MODEL", "models.claudeFast", "deepseek-v4-flash[1m]");
 const CLAUDE_FALLBACK_MODEL = envOrConfig("WECHAT_CLAUDE_FALLBACK_MODEL", "models.claudeFallback", "deepseek-v4-flash[1m]");
 const CLAUDE_TIMEOUT_MS = configNumber("timeouts.aiMs", 600_000);
-const RAG_SCRIPT = configValue("paths.ragScript", path.join(import.meta.dirname, "rag.py"));
+const RAG_SCRIPT = resolveProjectPath(configValue("paths.ragScript", "app/rag.py"));
 const RAG_ENABLED = configBool("rag.enabled", true);
 const INPUT_BATCH_MS = 30_000;
 const DUPLICATE_INPUT_MS = 5000;
 const SESSION_LOCK_RETRIES = 3;
 const SESSION_LOCK_RETRY_MS = 2_000;
 const SESSION_RELEASE_GRACE_MS = 800;
-const TOKEN_FILE = path.join(import.meta.dirname, "wechat-token.json");
-const PROFILE_FILE = path.join(import.meta.dirname, "wechat-profiles.json");
-const SESSION_FILE = path.join(import.meta.dirname, "wechat-sessions.json");
-const SESSION_REF_FILE = path.join(import.meta.dirname, "会话恢复指令.txt");
-const LOGS_DIR = path.join(import.meta.dirname, "logs");
+const TOKEN_FILE = dataPath("wechat-token.json");
+const PROFILE_FILE = rootPath("wechat-profiles.json");
+const SESSION_FILE = dataPath("wechat-sessions.json");
+const SESSION_REF_FILE = dataPath("会话恢复指令.txt");
+const LOGS_DIR = dataPath("logs");
 const LOG_RETENTION_DAYS = Number(process.env.WECHAT_LOG_RETENTION_DAYS ?? configValue("logs.retentionDays", 30));
 const LOG_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const INBOUND_MEDIA_DIR = path.join(import.meta.dirname, "inbound_media");
-const INSTANCE_LOCK_FILE = path.join(import.meta.dirname, ".wechat-aibot.lock");
+const INBOUND_MEDIA_DIR = dataPath("inbound_media");
+const INSTANCE_LOCK_FILE = dataPath("runtime", ".wechat-aibot.lock");
 const WECHAT_MEDIA_MAX_BYTES = 100 * 1024 * 1024;
 const FILE_TEXT_PREVIEW_CHARS = 6000;
 const DEFAULT_VISION_BASE_URL = "https://api.siliconflow.cn/v1";
@@ -85,11 +138,13 @@ import { registerLogRoutes } from "./lib/gui-logs.mjs";
 import { registerControlRoutes } from "./lib/gui-control.mjs";
 
 // ─── STATE ──────────────────────────────────────────────────
-import { token, getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, recentInputs, pendingProfileDeletes, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
+import { token, getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, recentInputs, pendingProfileDeletes, pendingMemoryClears, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
 import { uuid, shortId, sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost, apiGet } from "./lib/wechat.mjs";
+import { addMemoryItem, applyMemoryOps, buildMemoryWriterPrompt, clearMemory, forgetMemoryItems, isMemoryEnabled, looksLikeMemoryCandidate, memoryListText, memoryMaintenanceNotice, normalizeMemoryCategory, parseMemoryWriterOutput, renderMemoryPrompt, setMemoryEnabled } from "./lib/memory.mjs";
 const LONG_POLL_TIMEOUT_MS = 35_000;
 const PROFILE_DELETE_CONFIRM_MS = 60_000;
+const MEMORY_CLEAR_CONFIRM_MS = 60_000;
 
 function loadModelNames() {
   // CC: read from ~/.claude/settings.json
@@ -134,6 +189,7 @@ function cleanupOldLogs() {
 
 function acquireInstanceLock() {
   try {
+    ensureDir(RUNTIME_DIR);
     if (fs.existsSync(INSTANCE_LOCK_FILE)) {
       const oldPid = Number(fs.readFileSync(INSTANCE_LOCK_FILE, "utf-8").trim());
       if (oldPid !== process.pid && isPidRunning(oldPid)) {
@@ -174,6 +230,7 @@ function loadProfiles() {
 }
 
 function saveProfiles() {
+  ensureDir(rootPath());
   fs.writeFileSync(PROFILE_FILE, JSON.stringify({
     templates: profileTemplates,
   }, null, 2), "utf-8");
@@ -196,7 +253,8 @@ function queryRag(userMessage, profile = null) {
     return null;
   }
   const queryText = (profile && profile !== "默认") ? `${profile} ${userMessage}` : userMessage;
-  const queryFile = path.join(import.meta.dirname, `.rag_query_${crypto.randomUUID()}.txt`);
+  ensureDir(RUNTIME_DIR);
+  const queryFile = path.join(RUNTIME_DIR, `.rag_query_${crypto.randomUUID()}.txt`);
   const started = Date.now();
   try {
     fs.writeFileSync(queryFile, queryText, "utf-8");
@@ -259,13 +317,14 @@ function profileBindingListText(bindings) {
 
 // ─── SESSION PERSISTENCE ─────────────────────────────────────
 function saveSessions() {
+  ensureDir(DATA_DIR);
   const data = {};
   for (const [ai, map] of Object.entries(sessions)) {
     const aiData = {};
     for (const [userId, u] of map) {
       aiData[userId] = {
         activeId: u.activeId,
-        list: u.list.map(s => ({ id: s.id, name: s.name, sid: s.sid, _firstTurn: s._firstTurn, _recentKaomoji: s._recentKaomoji || [], _profile: s._profile ?? null })),
+        list: u.list.map(s => ({ id: s.id, name: s.name, sid: s.sid, _firstTurn: s._firstTurn, _recentKaomoji: s._recentKaomoji || [], _kaomojiTurn: s._kaomojiTurn || 0, _profile: s._profile ?? null })),
       };
     }
     data[ai] = aiData;
@@ -312,7 +371,7 @@ function loadSessions() {
             activeId: u.activeId,
             list: (u.list || []).map(s => ({
               id: s.id, name: s.name, sid: s.sid, _firstTurn: s._firstTurn,
-              busy: false, queue: [], _closing: false, _lastEnd: 0, _recentKaomoji: s._recentKaomoji || [], _profile: s._profile ?? null,
+              busy: false, queue: [], _closing: false, _lastEnd: 0, _recentKaomoji: s._recentKaomoji || [], _kaomojiTurn: s._kaomojiTurn || 0, _profile: s._profile ?? null,
             })),
           });
         }
@@ -326,7 +385,7 @@ function loadSessions() {
               activeId: u.activeId,
               list: (u.list || []).map(s => ({
               id: s.id, name: s.name, sid: s.sid, _firstTurn: s._firstTurn,
-                busy: false, queue: [], _closing: false, _lastEnd: 0, _recentKaomoji: s._recentKaomoji || [], _profile: s._profile ?? null,
+                busy: false, queue: [], _closing: false, _lastEnd: 0, _recentKaomoji: s._recentKaomoji || [], _kaomojiTurn: s._kaomojiTurn || 0, _profile: s._profile ?? null,
               })),
             });
           }
@@ -846,7 +905,7 @@ function ensureUser(userId, ai = activeAI) {
   const sMap = sessionMap(ai);
   if (!sMap.has(userId)) {
     const id = uuid();
-    sMap.set(userId, { activeId: id, list: [{ id, name: "S1", busy: false, queue: [], _closing: false, _lastEnd: 0, sid: uuid(), _firstTurn: true, _recentKaomoji: [], _profile: null }] });
+    sMap.set(userId, { activeId: id, list: [{ id, name: "S1", busy: false, queue: [], _closing: false, _lastEnd: 0, sid: uuid(), _firstTurn: true, _recentKaomoji: [], _kaomojiTurn: 0, _profile: null }] });
   }
   return sMap.get(userId);
 }
@@ -898,7 +957,7 @@ function replyPrefix(sessionName, ai = activeAI) {
 }
 
 function needsWindowsShell(command) {
-  return process.platform === "win32" && (!path.extname(command) || /\.(cmd|bat)$/i.test(command));
+  return process.platform === "win32" && (!path.extname(command) || /\.(cmd|bat|ps1)$/i.test(command));
 }
 
 function spawnCli(command, args, options = {}) {
@@ -908,15 +967,35 @@ function spawnCli(command, args, options = {}) {
   });
 }
 
+function commandExists(command) {
+  return fs.existsSync(command) || Boolean(commandOnPath(command));
+}
+
+const TRANSIENT_GETUPDATES_CODES = new Set([
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ENETRESET",
+  "EPIPE",
+]);
+
+function isTransientGetUpdatesError(e) {
+  const code = e?.cause?.code || e?.code || "";
+  return (e?.message === "fetch failed" || e?.name === "TypeError") && TRANSIENT_GETUPDATES_CODES.has(code);
+}
+
 // ─── RUN CLAUDE (stream-json) ────────────────────────────────
-function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePrompt, profileOverride = null) {
+function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePrompt, memoryPrompt = "", profileOverride = null) {
   const profile = profileOverride;
   const fastCasual = shouldSkipRag(body);
   const systemPromptParts = [];
   if (profile && profileTemplates[profile]) systemPromptParts.push(profileTemplates[profile]);
+  if (memoryPrompt) systemPromptParts.push(memoryPrompt);
   if (stylePrompt) systemPromptParts.push(stylePrompt);
   const systemPromptFile = systemPromptParts.length
-    ? path.join(import.meta.dirname, `.claude_system_${crypto.randomUUID()}.txt`)
+    ? path.join(RUNTIME_DIR, `.claude_system_${crypto.randomUUID()}.txt`)
     : null;
 
   const args = [
@@ -937,6 +1016,7 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
     args.push("--fallback-model", CLAUDE_FALLBACK_MODEL);
   }
   if (systemPromptFile) {
+    ensureDir(RUNTIME_DIR);
     fs.writeFileSync(systemPromptFile, systemPromptParts.join("\n\n---\n\n"), "utf-8");
     args.push("--append-system-prompt-file", systemPromptFile);
   }
@@ -992,12 +1072,13 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
 }
 
 // ─── RUN CODEX (JSONL) ───────────────────────────────────────
-function buildCodexPrompt(ai, userBody, ragContext, stylePrompt, profileOverride = null) {
+function buildCodexPrompt(ai, userBody, ragContext, stylePrompt, memoryPrompt = "", profileOverride = null) {
   const profile = profileOverride;
   const systemParts = [];
   if (profile && profileTemplates[profile]) {
     systemParts.push(profileTemplates[profile]);
   }
+  if (memoryPrompt) systemParts.push(memoryPrompt);
   if (stylePrompt) systemParts.push(stylePrompt);
   let prompt = systemParts.length ? `${systemParts.join("\n\n---\n\n")}\n\n---\n\n${userBody}` : userBody;
   if (ragContext) {
@@ -1016,8 +1097,8 @@ function buildCodexPrompt(ai, userBody, ragContext, stylePrompt, profileOverride
   return prompt;
 }
 
-function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragContext, stylePrompt, profileOverride = null) {
-  const prompt = buildCodexPrompt(ai, body, ragContext, stylePrompt, profileOverride);
+function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragContext, stylePrompt, memoryPrompt = "", profileOverride = null) {
+  const prompt = buildCodexPrompt(ai, body, ragContext, stylePrompt, memoryPrompt, profileOverride);
   let args;
   if (firstTurn) {
     args = [
@@ -1088,6 +1169,57 @@ function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragConte
   return promise;
 }
 
+async function updateUserMemoryFromTurn(userId, userBody) {
+  if (!isMemoryEnabled(userId)) return [];
+  if (!looksLikeMemoryCandidate(userBody)) return [];
+  if (!commandExists(CLAUDE)) return [];
+  const prompt = buildMemoryWriterPrompt(userBody, renderMemoryPrompt(userId));
+  const args = [
+    "-p",
+    "--output-format", "stream-json",
+    "--permission-mode", "bypassPermissions",
+    "--model", CLAUDE_FAST_MODEL,
+    "--effort", "low",
+  ];
+  const proc = spawnCli(CLAUDE, args, {
+    cwd: AI_WORK_DIR,
+    timeout: 60_000,
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, HTTP_PROXY: HTTPS_PROXY, HTTPS_PROXY, http_proxy: HTTPS_PROXY, https_proxy: HTTPS_PROXY },
+  });
+  proc.stdin.on("error", () => {});
+  proc.stdin.end(prompt, "utf8");
+
+  let stdout = "";
+  let stderr = "";
+  await new Promise(resolve => {
+    proc.stdout.on("data", d => { stdout += d; });
+    proc.stderr.on("data", d => { stderr += d; if (stderr.length > 2000) stderr = stderr.slice(-2000); });
+    proc.on("close", resolve);
+    proc.on("error", resolve);
+  });
+
+  let text = "";
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const evt = JSON.parse(trimmed);
+      if (evt.type === "assistant" && evt.message?.content) {
+        for (const block of evt.message.content) {
+          if (block.type === "text" && block.text) text += block.text;
+        }
+      } else if (evt.type === "result" && evt.result) {
+        text += String(evt.result);
+      }
+    } catch {}
+  }
+  const applied = applyMemoryOps(userId, parseMemoryWriterOutput(text), "auto");
+  if (applied.length) log("\u{1F9E0}", `memory updated: ${applied.map(x => x.op).join(",")}`);
+  return applied;
+}
+
 // ─── KILL PROCESS TREE (Windows) ─────────────────────────────
 function killProc(proc) {
   if (!proc || !proc.pid) return;
@@ -1110,6 +1242,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   const turnProfile = sessionProfile(styleState);
   const replyBudget = chooseReplyBudget(body);
   const stylePrompt = buildStylePrompt(styleState?._recentKaomoji || [], body, replyBudget);
+  const memoryPrompt = turnProfile && turnProfile !== "默认" ? renderMemoryPrompt(userId) : "";
   log("\u{1F4E4}", `[${ai}] [${sessionName}] ${body.slice(0, 80)}`);
 
   // ── log files ──
@@ -1226,7 +1359,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     const profile = turnProfile;
     const useRagCdx = RAG_ENABLED && !hasInboundAttachment(body) && profile && profile !== "默认" && profileTemplates[profile];
     const ragContext = useRagCdx ? queryRag(body, profile) : null;
-    const task = runCodexStream(ai, sid, sessionName, body, firstTurn, handleCodexEvent, ragContext, stylePrompt, profile);
+    const task = runCodexStream(ai, sid, sessionName, body, firstTurn, handleCodexEvent, ragContext, stylePrompt, memoryPrompt, profile);
     if (onProc) onProc(task.proc);
 
     let { code, stderr, killed } = await task;
@@ -1237,7 +1370,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       await sleep(SESSION_LOCK_RETRY_MS);
       hasOutput = false; textBuf = ""; lastSent = ""; lastFlush = Date.now();
       writeFmt(`\n--- Retry ${retry + 1} ---`);
-      const retryTask = runCodexStream(ai, newSid || sid, sessionName, body, firstTurn, handleCodexEvent, ragContext, stylePrompt, profile);
+      const retryTask = runCodexStream(ai, newSid || sid, sessionName, body, firstTurn, handleCodexEvent, ragContext, stylePrompt, memoryPrompt, profile);
       if (onProc) onProc(retryTask.proc);
       ({ code, stderr, killed } = await retryTask);
     }
@@ -1303,7 +1436,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     const profile = turnProfile;
     const useRag = RAG_ENABLED && !hasInboundAttachment(body) && profile && profile !== "默认" && profileTemplates[profile];
     const ragBody = useRag ? buildRagBody(body, queryRag(body, profile)) : body;
-    const task = runClaudeStream(ai, sid, sessionName, ragBody, firstTurn, handleClaudeEvent, stylePrompt, profile);
+    const task = runClaudeStream(ai, sid, sessionName, ragBody, firstTurn, handleClaudeEvent, stylePrompt, memoryPrompt, profile);
     if (onProc) onProc(task.proc);
 
     let { code, stderr, killed } = await task;
@@ -1313,7 +1446,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       await sleep(SESSION_LOCK_RETRY_MS);
       hasOutput = false; textBuf = ""; lastSent = ""; lastFlush = Date.now();
       writeFmt(`\n--- Retry ${retry + 1} ---`);
-      const retryTask = runClaudeStream(ai, newSid || sid, sessionName, ragBody, firstTurn, handleClaudeEvent, stylePrompt, profile);
+      const retryTask = runClaudeStream(ai, newSid || sid, sessionName, ragBody, firstTurn, handleClaudeEvent, stylePrompt, memoryPrompt, profile);
       if (onProc) onProc(retryTask.proc);
       ({ code, stderr, killed } = await retryTask);
     }
@@ -1332,6 +1465,13 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
 
   writeFmt(`\n=== End ===`);
   if (styleState && assistantFullText) rememberRecentKaomoji(styleState, assistantFullText);
+  try {
+    await updateUserMemoryFromTurn(userId, body);
+    const notice = memoryMaintenanceNotice(userId, { mark: true });
+    if (notice) await sendMessage(userId, notice, contextToken);
+  } catch (e) {
+    log("⚠️", `memory writer skipped: ${e.message}`);
+  }
   log("\u{23F1}", `[${ai}] [${sessionName}] turn done in ${Date.now() - turnStarted}ms`);
   try { if (logStream) logStream.end(); } catch {}
   try { if (fmtStream) fmtStream.end(); } catch {}
@@ -1448,6 +1588,80 @@ function clearPendingInput(userId) {
   return true;
 }
 
+async function handleMemoryCommand(userId, body, ctx) {
+  const rest = body.replace(/^\/memory\s*/i, "").trim();
+  const help = [
+    "Memory commands:",
+    "/memory                  查看记忆",
+    "/memory on               启用记忆",
+    "/memory off              暂停注入和自动写入",
+    "/memory add 偏好 | 用户喜欢黄瓜味薯片",
+    "/memory add 事实 | 用户住在上海 [sensitive]",
+    "/memory forget <id或关键词>",
+    "/memory clear            清空前先确认",
+    "/memory clear confirm    确认清空",
+  ].join("\n");
+
+  if (!rest || /^list$/i.test(rest) || rest === "查看") {
+    const notice = memoryMaintenanceNotice(userId);
+    await sendMessage(userId, [memoryListText(userId), notice].filter(Boolean).join("\n\n"), ctx);
+    return;
+  }
+  if (/^help$/i.test(rest) || rest === "帮助") {
+    await sendMessage(userId, help, ctx);
+    return;
+  }
+  if (/^on$/i.test(rest) || rest === "开启" || rest === "启用") {
+    setMemoryEnabled(userId, true);
+    await sendMessage(userId, "✅ Memory 已启用", ctx);
+    return;
+  }
+  if (/^off$/i.test(rest) || rest === "关闭" || rest === "暂停") {
+    setMemoryEnabled(userId, false);
+    await sendMessage(userId, "✅ Memory 已暂停", ctx);
+    return;
+  }
+
+  const addMatch = rest.match(/^(?:add|添加)\s+([^|]+)\|\s*([\s\S]+)$/i);
+  if (addMatch) {
+    const category = normalizeMemoryCategory(addMatch[1]);
+    let text = addMatch[2].trim();
+    const sensitive = /\[(?:sensitive|敏感)\]|sensitive\s*[:=]\s*true|敏感\s*[:：]\s*true/i.test(text);
+    text = text.replace(/\[(?:sensitive|敏感)\]/ig, "").replace(/sensitive\s*[:=]\s*true/ig, "").replace(/敏感\s*[:：]\s*true/g, "").trim();
+    if (!category || !text) {
+      await sendMessage(userId, "格式: /memory add 性格|偏好|事实 | 记忆内容", ctx);
+      return;
+    }
+    const result = addMemoryItem(userId, category, text, { sensitive, source: "manual" });
+    const notice = memoryMaintenanceNotice(userId, { mark: true });
+    await sendMessage(userId, [`✅ ${result.updated ? "已更新" : "已添加"}: ${result.item.text}${result.item.sensitive ? " [sensitive]" : ""}`, notice].filter(Boolean).join("\n"), ctx);
+    return;
+  }
+
+  const forgetMatch = rest.match(/^(?:forget|delete|remove|删除|忘记)\s+(.+)$/i);
+  if (forgetMatch) {
+    const result = forgetMemoryItems(userId, forgetMatch[1]);
+    await sendMessage(userId, result.removed.length ? `✅ 已删除 ${result.removed.length} 条` : "未找到匹配的 memory", ctx);
+    return;
+  }
+
+  if (/^(?:clear|清空)(?:\s+(?:confirm|确认))?$/i.test(rest)) {
+    const confirmed = /(?:confirm|确认)$/i.test(rest);
+    const pending = pendingMemoryClears.get(userId);
+    if (!confirmed && !(pending && pending > Date.now())) {
+      pendingMemoryClears.set(userId, Date.now() + MEMORY_CLEAR_CONFIRM_MS);
+      await sendMessage(userId, "⚠️ 如果确认清空 memory，请在 60 秒内发送：/memory clear confirm", ctx);
+      return;
+    }
+    pendingMemoryClears.delete(userId);
+    const count = clearMemory(userId);
+    await sendMessage(userId, `✅ 已清空 ${count} 条 memory`, ctx);
+    return;
+  }
+
+  await sendMessage(userId, help, ctx);
+}
+
 // ─── MESSAGE HANDLER ───────────────────────────────────────
 async function handleMessage(msg) {
   const userId = msg.from_user_id;
@@ -1481,6 +1695,7 @@ async function handleMessage(msg) {
       `/close [序号|名称]   关闭线程 (排空中)`,
       `/cancel             取消当前运行的任务`,
       `/cleanup media      查看/清理媒体文件`,
+      `/memory             查看/管理长期记忆`,
       `/status             查看当前状态`,
       ``,
       `【角色管理】`,
@@ -1492,6 +1707,12 @@ async function handleMessage(msg) {
       ``,
       `当前 AI: ${activeAI === "cc" ? "Claude Code" : "Codex"}`,
     ].join("\n"), ctx);
+    return;
+  }
+
+  // ── /memory ──
+  if (/^\/memory(\s|$)/i.test(body)) {
+    await handleMemoryCommand(userId, body, ctx);
     return;
   }
 
@@ -1523,7 +1744,7 @@ async function handleMessage(msg) {
     const boundProfile = name === "默认" ? null : (profileTemplates[name] && name !== "默认" ? name : null);
     const id = uuid();
     const u = ensureUser(userId);
-    u.list.push({ id, name, busy: false, queue: [], _closing: false, _lastEnd: 0, sid: uuid(), _firstTurn: true, _recentKaomoji: [], _profile: boundProfile });
+    u.list.push({ id, name, busy: false, queue: [], _closing: false, _lastEnd: 0, sid: uuid(), _firstTurn: true, _recentKaomoji: [], _kaomojiTurn: 0, _profile: boundProfile });
     u.activeId = id;
     saveSessions();
     await sendMessage(userId, `✅ 新线程: ${name}${boundProfile ? `（角色: ${boundProfile}）` : ""}`, ctx);
@@ -1764,7 +1985,7 @@ async function handleMessage(msg) {
       const isConfirm = rest.includes("confirm");
       const days = parseInt(mediaMatch[1]) || 30;
       if (!fs.existsSync(INBOUND_MEDIA_DIR)) {
-        await sendMessage(userId, "📁 inbound_media 目录不存在", ctx);
+        await sendMessage(userId, "📁 data/inbound_media 目录不存在", ctx);
         return;
       }
       const files = fs.readdirSync(INBOUND_MEDIA_DIR, { withFileTypes: true })
@@ -1846,14 +2067,14 @@ function startupCheck() {
   const fail = (label, detail = "") => checks.push({ ok: false, label, detail, critical: true });
 
   // Claude Code
-  if (fs.existsSync(CLAUDE)) {
+  if (commandExists(CLAUDE)) {
     pass("Claude Code", CLAUDE);
   } else {
     fail("Claude Code", `${CLAUDE} 不存在`);
   }
 
   // Codex
-  if (fs.existsSync(CODEX)) {
+  if (commandExists(CODEX)) {
     pass("Codex", CODEX);
   } else {
     warn("Codex", `${CODEX} 不存在 (Codex 功能将不可用)`);
@@ -1877,17 +2098,17 @@ function startupCheck() {
 
   // RAG index
   if (RAG_ENABLED) {
-    const storeDir = configValue("rag.storeDir", "rag_vector_store");
+    const storeDir = resolveProjectPath(configValue("rag.storeDir", "data/rag_vector_store"));
     const metaPath = path.join(storeDir, "rag_meta.json");
     if (fs.existsSync(metaPath)) {
       try {
         const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
         pass("RAG 知识库", `${storeDir} (索引存在)`);
       } catch {
-        warn("RAG 知识库", `${storeDir} (rag_meta.json 解析失败，可运行 rebuild-rag.bat 重建)`);
+        warn("RAG 知识库", `${storeDir} (rag_meta.json 解析失败，可运行 scripts\\rebuild-rag.bat 重建)`);
       }
     } else {
-      warn("RAG 知识库", `${storeDir} (索引不存在，请运行 rebuild-rag.bat 初始化)`);
+      warn("RAG 知识库", `${storeDir} (索引不存在，请运行 scripts\\rebuild-rag.bat 初始化)`);
     }
   }
 
@@ -1905,7 +2126,7 @@ function startupCheck() {
   }
 
   // node_modules
-  if (fs.existsSync(path.join(import.meta.dirname, "node_modules", "qrcode-terminal"))) {
+  if (fs.existsSync(appPath("node_modules", "qrcode-terminal"))) {
     pass("Node 依赖", "qrcode-terminal 已安装");
   } else {
     warn("Node 依赖", "qrcode-terminal 未安装 (二维码终端显示将降级)");
@@ -1923,7 +2144,7 @@ function startupCheck() {
   }
 
   if (criticalCount > 0) {
-    process.stderr.write(`\n${criticalCount} 个严重问题：关键依赖缺失，bot 可能无法正常工作。请检查 config.json 中的路径配置。\n`);
+    process.stderr.write(`\n${criticalCount} 个严重问题：关键依赖缺失，bot 可能无法正常工作。请检查 data/config.json 中的路径配置。\n`);
   }
   if (warnCount > 0) {
     process.stdout.write(`${warnCount} 个警告：部分功能将降级或不可用。\n`);
@@ -1937,6 +2158,8 @@ function startupCheck() {
 // ─── MAIN LOOP ─────────────────────────────────────────────
 async function mainLoop() {
   let consecutiveFails = 0;
+  let transientGetUpdatesFails = 0;
+  let lastTransientGetUpdatesLog = 0;
   while (true) {
     try {
       const resp = await apiPost("ilink/bot/getupdates", { get_updates_buf: getUpdatesBuf || "" }, LONG_POLL_TIMEOUT_MS + 5000);
@@ -1948,11 +2171,27 @@ async function mainLoop() {
         continue;
       }
       consecutiveFails = 0;
+      transientGetUpdatesFails = 0;
       if (resp.get_updates_buf) { setSyncBuf(resp.get_updates_buf); saveToken(); }
       for (const m of (resp.msgs || [])) {
         if (m.message_type === 1 && m.from_user_id) await handleMessage(m);
       }
     } catch (e) {
+      if (isTransientGetUpdatesError(e)) {
+        transientGetUpdatesFails++;
+        const detail = e.cause?.code || e.cause?.message || e.name || "network";
+        if (transientGetUpdatesFails >= 3) {
+          const now = Date.now();
+          if (now - lastTransientGetUpdatesLog > 60_000) {
+            log("⚠️", `getupdates temporary network issue: ${detail} (${transientGetUpdatesFails} in a row)`);
+            lastTransientGetUpdatesLog = now;
+          }
+          await sleep(5000);
+        } else {
+          await sleep(1000);
+        }
+        continue;
+      }
       consecutiveFails++;
       const detail = e.cause?.code || e.cause?.message || e.name || "";
       log("❌", `getupdates: ${e.message}${detail ? ` (${detail})` : ""} (${consecutiveFails}/3)`);

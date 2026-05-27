@@ -1,8 +1,9 @@
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { addRoute } from "./server.mjs";
+import { dataPath } from "./paths.mjs";
 
-const LOGS_DIR = join(import.meta.dirname, "..", "logs");
+const LOGS_DIR = dataPath("logs");
 
 export function registerLogRoutes() {
   addRoute("GET", "/api/logs", ({ req }) => {

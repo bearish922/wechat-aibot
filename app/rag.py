@@ -23,8 +23,9 @@ except ImportError:
     TextEmbedding = None
 
 
-BASE_DIR = Path(__file__).parent
-CONFIG_FILE = BASE_DIR / "config.json"
+APP_DIR = Path(__file__).parent
+PROJECT_ROOT = APP_DIR.parent
+CONFIG_FILE = PROJECT_ROOT / "data" / "config.json"
 
 
 def load_app_config() -> dict:
@@ -65,12 +66,12 @@ def cfg_float(key: str, default: float) -> float:
 def cfg_path(key: str, default) -> Path:
     raw = os.environ.get(f"WEIXIN_{key.upper().replace('.', '_')}") or cfg(key, str(default))
     p = Path(raw)
-    return p if p.is_absolute() else BASE_DIR / p
+    return p if p.is_absolute() else PROJECT_ROOT / p
 
 
-KB_DIR = cfg_path("rag.knowledgeDir", r"D:\Desktop\Obsidian\entertainment\Bangdream-Knowledge")
-STORE_DIR = cfg_path("rag.storeDir", BASE_DIR / "rag_vector_store")
-MODEL_CACHE_DIR = cfg_path("rag.modelCacheDir", BASE_DIR / ".fastembed_cache")
+KB_DIR = cfg_path("rag.knowledgeDir", PROJECT_ROOT / "data" / "knowledge")
+STORE_DIR = cfg_path("rag.storeDir", PROJECT_ROOT / "data" / "rag_vector_store")
+MODEL_CACHE_DIR = cfg_path("rag.modelCacheDir", PROJECT_ROOT / "data" / ".fastembed_cache")
 META_FILE = STORE_DIR / "rag_meta.json"
 COLLECTION_NAME = str(cfg("rag.collectionName", "bangdream_knowledge"))
 

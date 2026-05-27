@@ -1,22 +1,18 @@
 import { existsSync, readFileSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { addRoute } from "./server.mjs";
 import { configValue } from "./config.mjs";
+import { APP_DIR, resolveProjectPath } from "./paths.mjs";
 
-const APP_ROOT = resolve(import.meta.dirname, "..");
-const RAG_SCRIPT = resolve(APP_ROOT, configValue("paths.ragScript", "rag.py"));
-
-function appPath(value) {
-  return resolve(APP_ROOT, value);
-}
+const RAG_SCRIPT = resolveProjectPath(configValue("paths.ragScript", "app/rag.py"));
 
 export function registerRagRoutes() {
   addRoute("GET", "/api/rag/status", () => {
-    const storeDir = configValue("rag.storeDir", "rag_vector_store");
-    const metaPath = appPath(join(storeDir, "rag_meta.json"));
-    const knowledgeDir = configValue("rag.knowledgeDir", "knowledge");
-    const knowledgeExists = existsSync(appPath(knowledgeDir));
+    const storeDir = resolveProjectPath(configValue("rag.storeDir", "data/rag_vector_store"));
+    const metaPath = join(storeDir, "rag_meta.json");
+    const knowledgeDir = resolveProjectPath(configValue("rag.knowledgeDir", "data/knowledge"));
+    const knowledgeExists = existsSync(knowledgeDir);
     const indexExists = existsSync(metaPath);
     let chunkCount = 0;
     let meta = null;
@@ -31,7 +27,7 @@ export function registerRagRoutes() {
 
   addRoute("POST", "/api/rag/rebuild", () => {
     const proc = spawnSync("python", ["-X", "utf8", RAG_SCRIPT, "build"], {
-      cwd: APP_ROOT,
+      cwd: APP_DIR,
       encoding: "utf-8",
       timeout: 300_000,
       windowsHide: true,

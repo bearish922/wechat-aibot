@@ -1,24 +1,24 @@
 # Personal config (contains API keys, tokens, paths)
 config.json
-wechat-token.json
-wechat-sessions.json
-会话恢复指令.txt
+data/config.json
+data/wechat-token.json
+data/wechat-sessions.json
+data/会话恢复指令.txt
 产品功能文档与Review.md
 
 # Runtime
-.wechat-aibot.lock
-.rag_query_*
+data/runtime/
 
 # Logs and media (contain personal chat data)
-logs/
-inbound_media/
+data/logs/
+data/inbound_media/
 
 # Dependencies
-node_modules/
-__pycache__/
+app/node_modules/
+**/__pycache__/
 
 # Model cache (downloaded at first run)
-.fastembed_cache/
+data/.fastembed_cache/
 
 # RAG vector store (built locally)
-rag_vector_store/
+data/rag_vector_store/

@@ -1,7 +1,7 @@
 import fs from "node:fs";
-import path from "node:path";
+import { dataPath } from "./paths.mjs";
 
-const CONFIG_FILE = path.join(import.meta.dirname, "..", "config.json");
+const CONFIG_FILE = dataPath("config.json");
 
 function loadAppConfig() {
   try {

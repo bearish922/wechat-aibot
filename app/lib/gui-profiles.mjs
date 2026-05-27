@@ -1,10 +1,10 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { addRoute } from "./server.mjs";
 import { profileTemplates, sessions } from "./state.mjs";
 import { log } from "./utils.mjs";
+import { rootPath } from "./paths.mjs";
 
-const PROFILE_FILE = join(import.meta.dirname, "..", "wechat-profiles.json");
+const PROFILE_FILE = rootPath("wechat-profiles.json");
 
 export function registerProfileRoutes() {
   addRoute("GET", "/api/profiles", () => {

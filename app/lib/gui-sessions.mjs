@@ -2,8 +2,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { addRoute } from "./server.mjs";
 import { sessions, activeAI } from "./state.mjs";
+import { dataPath } from "./paths.mjs";
 
-const LOGS_DIR = join(import.meta.dirname, "..", "logs");
+const LOGS_DIR = dataPath("logs");
 
 export function registerSessionRoutes() {
   addRoute("GET", "/api/sessions", () => {

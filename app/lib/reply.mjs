@@ -106,20 +106,31 @@ export function extractKaomoji(text) {
   const bracketed = text.match(/[（(][^）)\n]{1,24}[）)](?:[^\s\w一-鿿]{0,3})/gu) || [];
   for (const item of bracketed) {
     if (/[一-鿿]/u.test(item)) continue;
-    if (/[｡•̀́ᴗω▽︿﹏∀◍〃^><;｀´≧≦╯╰･_]/u.test(item)) found.add(item);
+    if (/[｡•̀́ᴗω▽︿﹏∀◍〃^><;｀´≧≦╯╰･_¯︶]/u.test(item)) found.add(item);
   }
   const standalone = text.match(/[ヾヽ][^\s\n]{2,24}/gu) || [];
   for (const item of standalone) {
-    if (/[｡ωᴗ▽︿﹏∀◍]/u.test(item)) found.add(item);
+    if (/[｡ωᴗ▽︿﹏∀◍¯︶]/u.test(item)) found.add(item);
   }
   return Array.from(found).slice(0, 5);
 }
 
 export function rememberRecentKaomoji(sess, text) {
+  sess._kaomojiTurn = (sess._kaomojiTurn || 0) + 1;
+  const turn = sess._kaomojiTurn;
+  const current = (sess._recentKaomoji || [])
+    .map(item => typeof item === "string" ? { text: item, lastTurn: turn } : item)
+    .filter(item => item?.text && turn - (item.lastTurn || turn) <= 4);
   const kaomoji = extractKaomoji(text);
-  if (!kaomoji.length) return;
-  const recent = sess._recentKaomoji || [];
-  sess._recentKaomoji = [...kaomoji, ...recent.filter(k => !kaomoji.includes(k))].slice(0, 8);
+  if (!kaomoji.length) {
+    sess._recentKaomoji = current;
+    return;
+  }
+  const updated = [
+    ...kaomoji.map(k => ({ text: k, lastTurn: turn })),
+    ...current.filter(item => !kaomoji.includes(item.text)),
+  ];
+  sess._recentKaomoji = updated.slice(0, 6);
 }
 
 // ─── Info-seeking detection ─────────────────────────────────
@@ -184,10 +195,14 @@ export function buildStylePrompt(recentKaomoji = [], userBody = "", budget = cho
     "长度签是本轮风格指引，不是硬性限制。如果自然表达需要更多字数，完全可以超出。",
   ];
   if (recentKaomoji?.length) {
+    const recent = recentKaomoji
+      .map(item => typeof item === "string" ? item : item?.text)
+      .filter(Boolean)
+      .join(" ");
     parts.push(
       "",
-      `【近期表达记忆】最近几轮已经用过这些颜文字：${recentKaomoji.join(" ")}`,
-      "接下来如果需要颜文字，优先换一个，不要连续复用这些同款；也可以干脆不用颜文字，让语气靠文字本身成立。",
+      `【近期表达记忆】近期出现过这些颜文字：${recent}`,
+      "重点避免高频率或连续复用同款；如果已经隔了三四轮、语气又刚好合适，可以自然复用，不必为了回避而生硬换成陌生颜文字。也可以干脆不用颜文字，让语气靠文字本身成立。",
     );
   }
   return parts.join("\n");

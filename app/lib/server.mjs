@@ -4,8 +4,9 @@ import { join, extname, resolve, relative, sep } from "node:path";
 import { exec } from "node:child_process";
 import { log } from "./utils.mjs";
 import { configValue } from "./config.mjs";
+import { appPath } from "./paths.mjs";
 
-const STATIC_DIR = resolve(import.meta.dirname, "..", "static");
+const STATIC_DIR = appPath("static");
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",

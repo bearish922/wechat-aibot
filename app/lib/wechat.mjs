@@ -1,14 +1,14 @@
 import fs from "node:fs";
-import path from "node:path";
 import crypto from "node:crypto";
 import { token, getUpdatesBuf, activeAI, setToken, setSyncBuf, setActiveAI } from "./state.mjs";
 import { sleep, log, shortId } from "./utils.mjs";
+import { DATA_DIR, dataPath, ensureDir } from "./paths.mjs";
 
 const BASE_URL = "https://ilinkai.weixin.qq.com";
 const CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 const BOT_TYPE = "3";
 const LONG_POLL_TIMEOUT_MS = 35_000;
-const TOKEN_FILE = path.join(import.meta.dirname, "..", "wechat-token.json");
+const TOKEN_FILE = dataPath("wechat-token.json");
 
 // ─── HTTP helpers ───────────────────────────────────────────
 function randomUin() {
@@ -65,6 +65,7 @@ export function loadToken() {
   return false;
 }
 export function saveToken(syncBuf = getUpdatesBuf) {
+  ensureDir(DATA_DIR);
   fs.writeFileSync(TOKEN_FILE, JSON.stringify({ token, syncBuf, lastActiveAI: activeAI }, null, 2));
 }
 

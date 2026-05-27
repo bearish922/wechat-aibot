@@ -1,10 +1,10 @@
 import { existsSync, readFileSync, writeFileSync, copyFileSync, renameSync, rmSync } from "node:fs";
-import { join } from "node:path";
 import { addRoute } from "./server.mjs";
 import { log } from "./utils.mjs";
+import { appPath, dataPath } from "./paths.mjs";
 
-const CONFIG_PATH = join(import.meta.dirname, "..", "config.json");
-const EXAMPLE_CONFIG_PATH = join(import.meta.dirname, "..", "config.example.json");
+const CONFIG_PATH = dataPath("config.json");
+const EXAMPLE_CONFIG_PATH = appPath("config.example.json");
 
 const CONFIG_FIELDS = {
   "paths.npmGlobal": "string",

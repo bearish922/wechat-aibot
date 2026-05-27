@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 
-set "MEDIA_DIR=%~dp0inbound_media"
+set "MEDIA_DIR=%~dp0..\data\inbound_media"
 set "DEFAULT_DAYS=30"
 
 if not exist "%MEDIA_DIR%" (

@@ -1,6 +1,6 @@
 # WeChat AI Bot
 
-> v2.0.4 — Windows 本机运行的微信 AI 助手
+> v2.1.0 — Windows 本机运行的微信 AI 助手
 
 WeChat AI Bot 监听微信消息，将文字、图片、语音、文件、视频整理后交给 Claude Code 或 Codex 回复。它支持多线程会话、角色扮演、本地知识库检索、附件理解、日志留存和本地 Web 管理界面。
 
@@ -13,7 +13,8 @@ WeChat AI Bot 监听微信消息，将文字、图片、语音、文件、视频
 - **角色扮演**：从 `wechat-profiles.json` 加载角色模板，内置长崎素世、千早爱音、丸山彩、白鹭千圣等 BangDream 角色设定。
 - **回复风格控制**：通过长度预算、场景判断和近期颜文字记忆，让闲聊更短、更像微信私聊，任务回复仍可结构化。
 - **多媒体理解**：可保存并处理图片、语音、文件、视频；图片和视频首帧可接入 OpenAI-compatible 视觉模型生成中文描述。
-- **本地知识库**：`knowledge/` 目录中的 Markdown 会被构建为本地 Qdrant 向量索引，角色线程查询时可自动锚定角色名。
+- **长期记忆**：从 `wechat-memory.json` 读取结构化用户记忆，非默认角色线程会自动注入相关上下文。
+- **本地知识库**：`data/knowledge/` 目录中的 Markdown 会被构建为本地 Qdrant 向量索引，角色线程查询时可自动锚定角色名。
 - **本地 GUI**：启动后打开 `http://127.0.0.1:18720`，提供 Status、Sessions、Profiles、Config 四个页面。
 - **日志与媒体清理**：AI 调用生成 JSONL 和可读日志；日志可自动清理，媒体文件可用微信命令或脚本手动清理。
 
@@ -33,17 +34,17 @@ WeChat AI Bot 监听微信消息，将文字、图片、语音、文件、视频
 在项目目录中运行：
 
 ```bat
-setup.bat
-copy config.example.json config.json
-rebuild-rag.bat
+scripts\setup.bat
+copy app\config.example.json data\config.json
+scripts\rebuild-rag.bat
 launch.bat
 ```
 
-大多数情况下不需要先编辑 `config.json`。启动后按终端提示扫码登录微信。登录完成后，浏览器会自动打开 `http://127.0.0.1:18720`。
+大多数情况下不需要先编辑 `data/config.json`。启动后按终端提示扫码登录微信。登录完成后，浏览器会自动打开 `http://127.0.0.1:18720`。
 
 ### 配置重点
 
-`config.json` 从 `config.example.json` 复制得到。能自动发现或使用默认值的字段可以保留原样：
+`data/config.json` 从 `app/config.example.json` 复制得到。能自动发现或使用默认值的字段可以保留原样：
 
 ```json
 {
@@ -51,7 +52,7 @@ launch.bat
     "npmGlobal": "可选；默认自动查找 npm 全局目录",
     "claude": "可选；默认从 PATH 自动查找 claude",
     "codex": "可选；默认从 PATH 自动查找 codex",
-    "ragScript": "可选；默认使用项目内 rag.py",
+    "ragScript": "可选；默认使用 app/rag.py",
     "workDir": "可选；默认使用当前 Windows 用户目录"
   },
   "proxy": {
@@ -74,9 +75,9 @@ launch.bat
   },
   "rag": {
     "enabled": true,
-    "knowledgeDir": "knowledge",
-    "storeDir": "rag_vector_store",
-    "modelCacheDir": ".fastembed_cache",
+    "knowledgeDir": "data/knowledge",
+    "storeDir": "data/rag_vector_store",
+    "modelCacheDir": "data/.fastembed_cache",
     "collectionName": "bangdream_knowledge",
     "embedModel": "BAAI/bge-small-zh-v1.5",
     "topK": 3,
@@ -104,7 +105,7 @@ launch.bat
 | `proxy.https` | 空值，不使用代理 | 网络环境需要代理访问 Claude/Codex/API 时 |
 | `vision.apiKey` | 空值，不调用外部视觉 API | AI 后端本身不支持视觉，但你希望它能看图/看视频首帧时 |
 | `vision.baseUrl` / `vision.model` | 默认 SiliconFlow + Qwen vision 模型 | 使用其他 OpenAI-compatible 视觉服务时 |
-| `rag.knowledgeDir` | 使用项目内 `knowledge/` | 想换成自己的 Markdown 知识库目录时 |
+| `rag.knowledgeDir` | 使用项目内 `data/knowledge/` | 想换成自己的 Markdown 知识库目录时 |
 | `paths.workDir` | 当前 Windows 用户目录 | 希望 Claude/Codex 在指定项目目录或工作区运行时 |
 
 ### AI 后端登录
@@ -138,10 +139,10 @@ codex
 
 没有代理就让 `proxy.https` 保持空字符串。需要代理时填写形如 `http://127.0.0.1:7892` 的地址。
 
-默认知识库是项目内 `knowledge/`。如果要改用自己的 Markdown 知识库，把 `rag.knowledgeDir` 改成绝对路径或相对项目目录的路径，然后重新运行：
+默认知识库是项目内 `data/knowledge/`。如果要改用自己的 Markdown 知识库，把 `rag.knowledgeDir` 改成绝对路径或相对项目目录的路径，然后重新运行：
 
 ```bat
-rebuild-rag.bat
+scripts\rebuild-rag.bat
 ```
 
 `paths.workDir` 控制 Claude/Codex 的运行目录。默认是当前 Windows 用户目录；如果你希望工具读写某个固定项目，把它改成对应目录即可。
@@ -165,6 +166,11 @@ rebuild-rag.bat
 | `/profile off` | 当前默认线程保持默认风格 |
 | `/profile add <名称> \| <提示词>` | 添加新角色 |
 | `/profile delete <名称>` | 删除角色，若已有绑定会要求二次确认 |
+| `/memory` | 查看长期记忆 |
+| `/memory add 性格\|偏好\|事实 \| <内容>` | 手动添加长期记忆，末尾可加 `[sensitive]` |
+| `/memory forget <id或关键词>` | 删除匹配的长期记忆 |
+| `/memory on` / `/memory off` | 启用或暂停长期记忆 |
+| `/memory clear` | 清空长期记忆，会要求二次确认 |
 | `/cleanup media` | 查看媒体文件统计 |
 | `/cleanup media <天数>` | 查看超过指定天数的媒体文件 |
 | `/cleanup media confirm <天数>` | 删除超过指定天数的媒体文件 |
@@ -176,21 +182,29 @@ rebuild-rag.bat
 
 你可以在 GUI 的 Profiles 页面直接编辑角色，也可以手动修改 `wechat-profiles.json`。修改后建议新建线程使用新角色，避免旧会话上下文影响效果。
 
+## 长期记忆
+
+长期记忆保存在根目录 `wechat-memory.json`，用于记录用户长期稳定的信息。默认只注入到非默认角色线程；默认角色不使用这份记忆。
+
+记忆分为三类：`trait`（性格/价值观）、`preference`（偏好）、`fact`（事实）。敏感或私密信息会用 `sensitive: true` 标记，注入时提示 AI 只在相关且必要时使用。自动写入器会在用户消息明显涉及长期用户信息时尝试更新记忆；你也可以用 `/memory add`、`/memory forget`、`/memory off` 等命令手动维护。
+
+系统不会硬性截断 memory；当单个用户的记忆超过约 60 条，或注入上下文超过约 800-1200 字时，会发消息提醒你手动整理。
+
 ## 知识库
 
-`knowledge/` 目录包含 Markdown 知识文件。首次使用或修改知识后，运行：
+`data/knowledge/` 目录包含 Markdown 知识文件。首次使用或修改知识后，运行：
 
 ```bat
-rebuild-rag.bat
+scripts\rebuild-rag.bat
 ```
 
-构建结果默认写入 `rag_vector_store/`，模型缓存默认写入 `.fastembed_cache/`。如果知识库检索异常，可以删除 `rag_vector_store/` 后重新运行 `rebuild-rag.bat`。
+构建结果默认写入 `data/rag_vector_store/`，模型缓存默认写入 `data/.fastembed_cache/`。如果知识库检索异常，可以删除 `data/rag_vector_store/` 后重新运行 `scripts\rebuild-rag.bat`。
 
 查询时会跳过短问候、纯寒暄等低价值检索；绑定角色的线程会在合适情况下把角色名加入查询，以提高召回准确率。
 
 ## 附件处理
 
-- **图片**：下载到 `inbound_media/`；可按 `vision.mode` 调用外部视觉模型，或把本地路径交给支持视觉的 AI 后端。
+- **图片**：下载到 `data/inbound_media/`；可按 `vision.mode` 调用外部视觉模型，或把本地路径交给支持视觉的 AI 后端。
 - **语音**：保存语音文件，并使用微信返回的语音转文字内容。
 - **文件**：保存文件，并尝试抽取 PDF、DOCX、PPTX、XLSX 的文本预览。
 - **视频**：保存视频，可用 ffmpeg 截取首帧；首帧同样遵循 `vision.mode`。
@@ -206,13 +220,13 @@ rebuild-rag.bat
 | Status | 在线状态、当前 AI、模型、线程数量 |
 | Sessions | 查看线程列表和生成 CLI 恢复指令 |
 | Profiles | 查看、创建、编辑、删除角色模板 |
-| Config | 查看和编辑 `config.json` |
+| Config | 查看和编辑 `data/config.json` |
 
 GUI 只监听 `127.0.0.1`，默认不对局域网开放。
 
 ## 本地数据
 
-每次 AI 调用会在 `logs/` 下生成：
+每次 AI 调用会在 `data/logs/` 下生成：
 
 - `.jsonl`：原始事件流，适合精确排查。
 - `.txt`：可读摘要，包含用户输入、工具调用、结果和错误。
@@ -221,23 +235,24 @@ GUI 只监听 `127.0.0.1`，默认不对局域网开放。
 
 | 路径 | 内容 | 说明 |
 |---|---|---|
-| `config.json` | 本机配置 | 保存路径、代理、模型、视觉 API 等设置 |
-| `wechat-token.json` | 微信登录状态 | 删除后下次启动会重新扫码登录 |
-| `wechat-sessions.json` | 会话状态 | 保存线程、SID、角色绑定等信息 |
+| `data/config.json` | 本机配置 | 保存路径、代理、模型、视觉 API 等设置 |
+| `data/wechat-token.json` | 微信登录状态 | 删除后下次启动会重新扫码登录 |
+| `data/wechat-sessions.json` | 会话状态 | 保存线程、SID、角色绑定等信息 |
 | `wechat-profiles.json` | 角色模板 | 可通过 GUI 或文本编辑器修改 |
-| `logs/` | AI 调用日志 | 可用于排查问题；会按 `logs.retentionDays` 自动清理 |
-| `inbound_media/` | 收到的图片、文件、语音、视频 | 可用 `/cleanup media` 或 `cleanup-media.bat` 清理 |
-| `rag_vector_store/` | 知识库索引 | 可通过 `rebuild-rag.bat` 重建 |
-| `.fastembed_cache/` | embedding 模型缓存 | 首次构建知识库时自动下载和复用 |
+| `wechat-memory.json` | 长期记忆 | 可通过 `/memory` 命令或文本编辑器维护 |
+| `data/logs/` | AI 调用日志 | 可用于排查问题；会按 `logs.retentionDays` 自动清理 |
+| `data/inbound_media/` | 收到的图片、文件、语音、视频 | 可用 `/cleanup media` 或 `scripts\cleanup-media.bat` 清理 |
+| `data/rag_vector_store/` | 知识库索引 | 可通过 `scripts\rebuild-rag.bat` 重建 |
+| `data/.fastembed_cache/` | embedding 模型缓存 | 首次构建知识库时自动下载和复用 |
 
-升级新版时，通常保留 `config.json`、`wechat-token.json`、`wechat-sessions.json`、`wechat-profiles.json` 和自己的 `knowledge/` 即可继续使用原来的配置、登录状态、会话和角色。
+升级新版时，通常保留 `data/config.json`、`data/wechat-token.json`、`data/wechat-sessions.json`、`wechat-profiles.json`、`wechat-memory.json` 和自己的 `data/knowledge/` 即可继续使用原来的配置、登录状态、会话、角色和记忆。
 
 ## 打赏
 
 如果这个项目对你有帮助，欢迎请我喝杯奶茶 🧋
 
 <p align="center">
-  <img src="./assets/sponsor-alipay.jpg" width="220" alt="支付宝收款码" />
+  <img src="./docs/assets/sponsor-alipay.jpg" width="220" alt="支付宝收款码" />
 </p>
 
 ## 许可

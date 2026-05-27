@@ -1,6 +1,6 @@
 @echo off
 setlocal
-cd /d "%~dp0"
+cd /d "%~dp0.."
 set "NODE_CMD="
 where node >nul 2>nul
 if %errorlevel% equ 0 (
@@ -12,6 +12,6 @@ if %errorlevel% equ 0 (
     pause
     exit /b 1
 )
-"%NODE_CMD%" bot.mjs
+"%NODE_CMD%" app\bot.mjs
 pause
 endlocal

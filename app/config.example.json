@@ -3,7 +3,7 @@
     "npmGlobal": "可选；默认自动查找 npm 全局目录",
     "claude": "可选；默认从 PATH 自动查找 claude",
     "codex": "可选；默认从 PATH 自动查找 codex",
-    "ragScript": "可选；默认使用项目内 rag.py",
+    "ragScript": "可选；默认使用 app/rag.py",
     "workDir": "可选；默认使用当前 Windows 用户目录"
   },
   "proxy": {
@@ -26,9 +26,9 @@
   },
   "rag": {
     "enabled": true,
-    "knowledgeDir": "knowledge",
-    "storeDir": "rag_vector_store",
-    "modelCacheDir": ".fastembed_cache",
+    "knowledgeDir": "data/knowledge",
+    "storeDir": "data/rag_vector_store",
+    "modelCacheDir": "data/.fastembed_cache",
     "collectionName": "bangdream_knowledge",
     "embedModel": "BAAI/bge-small-zh-v1.5",
     "topK": 3,

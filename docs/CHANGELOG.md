@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## v2.1.0 — Memory and Project Layout (2026-05-28)
+- Add structured long-term user memory in `wechat-memory.json`, with manual `/memory` commands, sensitive item marking, soft maintenance reminders, and non-default profile prompt injection
+- Add an independent memory writer that only records long-term user traits, preferences, and facts when user messages meet the memory threshold
+- Reorganize the project so user-facing root files stay focused on `launch.bat`, `README.md`, `wechat-profiles.json`, and `wechat-memory.json`; runtime code, data, scripts, docs, and GitHub workflows now live in dedicated folders
+- Move private runtime state to `data/` and keep token, session, logs, media, vector store, model cache, and temporary prompt files out of public release artifacts
+- Relax kaomoji memory into a short cooldown instead of a long suppression list, and improve detection for additional common kaomoji
+- Update profile prompts with optional non-canon romantic subtext for Soyo/Anon and Chisato/Aya while preserving existing profile content
+
 ## v2.0.4 — Remove hard reply truncation (2026-05-25)
 - Remove `constrainCasualReply` hard truncation from the reply pipeline; AI output is no longer forcibly cut off to fit the random length budget
 - Change length budget prompt from hard constraint ("硬约束") to soft style guidance ("风格指引"), so the AI can naturally exceed the suggested length when needed

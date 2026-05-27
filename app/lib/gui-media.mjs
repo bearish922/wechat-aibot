@@ -1,8 +1,9 @@
 import { readdirSync, statSync, rmSync, existsSync } from "node:fs";
 import { join, extname } from "node:path";
 import { addRoute } from "./server.mjs";
+import { dataPath } from "./paths.mjs";
 
-const MEDIA_DIR = join(import.meta.dirname, "..", "inbound_media");
+const MEDIA_DIR = dataPath("inbound_media");
 
 export function registerMediaRoutes() {
   addRoute("GET", "/api/media", ({ req }) => {
