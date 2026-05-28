@@ -98,6 +98,15 @@ export function normalizeTerminology(text = "") {
   return normalized;
 }
 
+export function expressionCapabilityPrompt() {
+  return [
+    "【表情能力】",
+    "你只能使用通用 Unicode emoji、普通标点、文字颜文字或少量括号动作。",
+    "你不能主动发送微信内置表情包占位文本，例如 [旺柴]、[捂脸]、[破涕为笑]、[呲牙]、[微笑]。",
+    "如果对方消息里出现这类占位，可以理解为对方发了微信表情，但回复时不要照抄这种格式。",
+  ].join("\n");
+}
+
 // ─── Text splitting ─────────────────────────────────────────
 export function splitText(text, maxLen) {
   if (text.length <= maxLen) return [text];
@@ -278,6 +287,8 @@ export function buildStylePrompt(recentKaomoji = [], userBody = "", budget = cho
     formatLocalChatReality(),
     "",
     terminologyPrompt(),
+    "",
+    expressionCapabilityPrompt(),
     "",
     "【本轮回复长度签】",
     budget.instruction,

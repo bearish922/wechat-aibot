@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { splitText, hasInboundAttachment, isInfoSeekingTurn, chooseReplyBudget, constrainCasualReply, isStructuredReply, splitSocialReply, localTimePeriod, formatLocalChatReality, buildStylePrompt, normalizeTerminology, terminologyPrompt, loadTerminologyConfig } from "../lib/reply.mjs";
+import { splitText, hasInboundAttachment, isInfoSeekingTurn, chooseReplyBudget, constrainCasualReply, isStructuredReply, splitSocialReply, localTimePeriod, formatLocalChatReality, buildStylePrompt, normalizeTerminology, terminologyPrompt, loadTerminologyConfig, expressionCapabilityPrompt } from "../lib/reply.mjs";
 
 describe("splitText", () => {
   it("returns single element for short text", () => {
@@ -91,6 +91,15 @@ describe("terminology", () => {
     const text = buildStylePrompt([], "paspale", { instruction: "短", maxChars: 20, maxParts: 1, enforce: true });
     assert.match(text, /【术语规范】/u);
     assert.match(text, /不要写“帕斯帕雷”“帕斯帕莱”/u);
+  });
+});
+
+describe("expression capability", () => {
+  it("adds expression capability guidance to the style prompt", () => {
+    assert.match(expressionCapabilityPrompt(), /\[旺柴\]/u);
+    const text = buildStylePrompt([], "哈哈[旺柴]", { instruction: "短", maxChars: 20, maxParts: 1, enforce: true });
+    assert.match(text, /【表情能力】/u);
+    assert.match(text, /不能主动发送微信内置表情包占位文本/u);
   });
 });
 

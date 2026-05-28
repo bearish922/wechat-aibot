@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Add prompt guidance so role replies do not actively send WeChat built-in emoji placeholders such as `[旺柴]`
 
 ## v2.1.1 — Memory and Chat Polish (2026-05-28)
 - Change `/memory` into a summary view with per-category counts and up to 3 sample items; add `/memory all` and `/memory 性格|偏好|事实` category views
