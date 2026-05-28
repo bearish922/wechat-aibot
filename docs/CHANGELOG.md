@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## v2.1.1 — Memory and Chat Polish (2026-05-28)
 - Change `/memory` into a summary view with per-category counts and up to 3 sample items; add `/memory all` and `/memory 性格|偏好|事实` category views
 - Improve automatic memory candidate detection for long-term learning and practice statements, such as learning or practicing an instrument
 - Remove keyword-based memory prefiltering so the AI memory writer judges ordinary user turns directly and writes accepted items to the formal memory file
