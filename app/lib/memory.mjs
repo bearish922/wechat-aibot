@@ -30,44 +30,7 @@ const CATEGORY_ALIASES = {
   "信息": "fact",
 };
 
-const SELF_PATTERNS = [
-  /我/u,
-  /本人/u,
-  /我的/u,
-  /我家/u,
-  /我女朋友/u,
-  /我男朋友/u,
-  /我老婆/u,
-  /我老公/u,
-];
-
-const LONG_TERM_PATTERNS = [
-  /喜欢/u,
-  /讨厌/u,
-  /偏好/u,
-  /不喜欢/u,
-  /住在/u,
-  /来自/u,
-  /工作/u,
-  /职业/u,
-  /实习/u,
-  /学校/u,
-  /专业/u,
-  /女朋友/u,
-  /男朋友/u,
-  /老婆/u,
-  /老公/u,
-  /价值观/u,
-  /世界观/u,
-  /性格/u,
-  /认为/u,
-  /相信/u,
-  /长期/u,
-  /一直/u,
-  /习惯/u,
-  /身份/u,
-  /生日/u,
-];
+const DISPLAY_CATEGORIES = ["trait", "preference", "fact"];
 
 export function normalizeMemoryCategory(value = "") {
   return CATEGORY_ALIASES[String(value).trim().toLowerCase()] || null;
@@ -238,18 +201,39 @@ export function renderMemoryPrompt(userId) {
   ].join("\n");
 }
 
-export function memoryListText(userId) {
+function memoryStatsLines(user) {
+  const counts = Object.fromEntries(DISPLAY_CATEGORIES.map(category => [
+    category,
+    user.items.filter(item => item.category === category).length,
+  ]));
+  return [
+    `Memory: ${user.enabled === false ? "off" : "on"}`,
+    `总计: ${user.items.length} 条`,
+    `性格: ${counts.trait} 条；偏好: ${counts.preference} 条；事实: ${counts.fact} 条`,
+  ];
+}
+
+export function memoryListText(userId, { category = null, limit = 3, full = false } = {}) {
   const store = loadMemoryStore();
   const user = ensureUserMemory(store, userId);
-  if (!user.items.length) return `Memory: ${user.enabled === false ? "off" : "on"}\n暂无记录`;
-  const lines = [`Memory: ${user.enabled === false ? "off" : "on"}`];
-  for (const category of ["trait", "preference", "fact"]) {
-    const items = user.items.filter(item => item.category === category);
+  const selectedCategory = category ? normalizeMemoryCategory(category) : null;
+  const categories = selectedCategory ? [selectedCategory] : DISPLAY_CATEGORIES;
+  const lines = memoryStatsLines(user);
+  const shownLimit = full ? Infinity : Math.max(1, Number(limit) || 3);
+  if (!user.items.length) return `${lines.join("\n")}\n暂无记录`;
+
+  for (const categoryName of categories) {
+    const items = user.items.filter(item => item.category === categoryName);
     if (!items.length) continue;
-    lines.push("", `【${CATEGORY_LABELS[category]}】`);
-    for (const item of items) {
+    const shown = items.slice(0, shownLimit);
+    lines.push("", `【${CATEGORY_LABELS[categoryName]}】`);
+    for (const item of shown) {
       lines.push(`- ${item.id}: ${item.text}${item.sensitive ? " [sensitive]" : ""}`);
     }
+    if (shown.length < items.length) lines.push(`... 另 ${items.length - shown.length} 条，用 /memory all 查看`);
+  }
+  if (selectedCategory && !user.items.some(item => item.category === selectedCategory)) {
+    lines.push("", `【${CATEGORY_LABELS[selectedCategory]}】`, "暂无记录");
   }
   return lines.join("\n");
 }
@@ -274,20 +258,22 @@ export function memoryMaintenanceNotice(userId, { mark = false } = {}) {
   const reasons = [];
   if (tooManyItems) reasons.push(`已有 ${itemCount} 条，建议约 60 条以内`);
   if (tooLongPrompt) reasons.push(`注入上下文约 ${promptChars} 字，建议约 800-1200 字`);
-  return `⚠️ Memory 偏长：${reasons.join("；")}。可以用 /memory 查看，用 /memory forget <id或关键词> 手动整理。`;
+  return `⚠️ Memory 偏长：${reasons.join("；")}。可以用 /memory 查看概要，或用 /memory all 查看完整内容后整理 wechat-memory.json。`;
 }
 
-export function looksLikeMemoryCandidate(text = "") {
+export function shouldRunMemoryWriter(text = "") {
   const value = String(text || "").trim();
-  if (value.length < 4) return false;
-  return SELF_PATTERNS.some(pattern => pattern.test(value)) && LONG_TERM_PATTERNS.some(pattern => pattern.test(value));
+  if (!value) return false;
+  return !/^\/\S+/.test(value);
 }
 
 export function buildMemoryWriterPrompt(userText, currentPrompt) {
   return [
     "你是一个独立的长期记忆写入器，只判断用户消息是否包含值得长期保存的用户信息。",
+    "你的输出会直接写入正式 memory；不确定、价值不高或只是闲聊时必须输出 noop。",
     "只记录长期稳定且跨对话有用的信息，类别只能是 trait、preference、fact。",
     "trait 是世界观、价值观、稳定性格；preference 是明确个人喜好；fact 是用户长期事实。",
+    "用户正在长期学习、练习或培养的技能、乐器、运动、创作习惯，通常记为 fact；如果明确表达喜欢或偏爱，记为 preference。",
     "不要记录一次性事件、当天状态、闲聊细节、玩笑、角色扮演设定、未经明确表达的推断。",
     "健康、政治、宗教、性取向、财务、精确住址、亲密关系等敏感或私密内容如果确实需要记录，必须 sensitive: true。",
     "如与已有记忆重复，输出 update；如用户否定旧记忆，输出 delete 或 update。",

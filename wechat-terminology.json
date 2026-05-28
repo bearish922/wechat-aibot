@@ -1,0 +1,18 @@
+{
+  "promptRules": [
+    "Pastel*Palettes 可以写全名 Pastel*Palettes，或写简称 PasPale；不要写“帕斯帕雷”“帕斯帕莱”等音译。",
+    "若宫伊芙日常称呼写“伊芙”，不要写 Eve/eve。"
+  ],
+  "replacements": [
+    {
+      "pattern": "帕斯[·・\\s-]?帕[雷莱蕾]",
+      "flags": "gu",
+      "replace": "PasPale"
+    },
+    {
+      "pattern": "\\b[Ee]ve\\b",
+      "flags": "g",
+      "replace": "伊芙"
+    }
+  ]
+}

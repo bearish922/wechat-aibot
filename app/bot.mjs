@@ -125,7 +125,7 @@ const VISION_API_KEY = usableConfigString(process.env.WECHAT_VISION_API_KEY ?? p
 const VISION_MODEL = usableConfigString(envOrConfig("WECHAT_VISION_MODEL", "vision.model", DEFAULT_VISION_MODEL), DEFAULT_VISION_MODEL);
 const VISION_DETAIL = envOrConfig("WECHAT_VISION_DETAIL", "vision.detail", "high");
 const VISION_TIMEOUT_MS = configNumber("vision.timeoutMs", 180_000);
-import { COMMON_CHAT_STYLE_PROMPT, MAX_REPLY_LEN, SOCIAL_REPLY_MAX_PARTS, splitText, hasInboundAttachment, splitSocialReply, extractKaomoji, rememberRecentKaomoji, isInfoSeekingTurn, chooseReplyBudget, buildStylePrompt } from "./lib/reply.mjs";
+import { COMMON_CHAT_STYLE_PROMPT, MAX_REPLY_LEN, SOCIAL_REPLY_MAX_PARTS, splitText, hasInboundAttachment, splitSocialReply, extractKaomoji, rememberRecentKaomoji, isInfoSeekingTurn, chooseReplyBudget, buildStylePrompt, normalizeTerminology } from "./lib/reply.mjs";
 import { RAG_SKIP_PATTERNS, shouldSkipRag, buildRagBody } from "./lib/rag.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
@@ -138,13 +138,12 @@ import { registerLogRoutes } from "./lib/gui-logs.mjs";
 import { registerControlRoutes } from "./lib/gui-control.mjs";
 
 // ─── STATE ──────────────────────────────────────────────────
-import { token, getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, recentInputs, pendingProfileDeletes, pendingMemoryClears, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
+import { token, getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, recentInputs, pendingProfileDeletes, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
 import { uuid, shortId, sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost, apiGet } from "./lib/wechat.mjs";
-import { addMemoryItem, applyMemoryOps, buildMemoryWriterPrompt, clearMemory, forgetMemoryItems, isMemoryEnabled, looksLikeMemoryCandidate, memoryListText, memoryMaintenanceNotice, normalizeMemoryCategory, parseMemoryWriterOutput, renderMemoryPrompt, setMemoryEnabled } from "./lib/memory.mjs";
+import { applyMemoryOps, buildMemoryWriterPrompt, isMemoryEnabled, shouldRunMemoryWriter, memoryListText, memoryMaintenanceNotice, normalizeMemoryCategory, parseMemoryWriterOutput, renderMemoryPrompt } from "./lib/memory.mjs";
 const LONG_POLL_TIMEOUT_MS = 35_000;
 const PROFILE_DELETE_CONFIRM_MS = 60_000;
-const MEMORY_CLEAR_CONFIRM_MS = 60_000;
 
 function loadModelNames() {
   // CC: read from ~/.claude/settings.json
@@ -1171,7 +1170,7 @@ function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragConte
 
 async function updateUserMemoryFromTurn(userId, userBody) {
   if (!isMemoryEnabled(userId)) return [];
-  if (!looksLikeMemoryCandidate(userBody)) return [];
+  if (!shouldRunMemoryWriter(userBody)) return [];
   if (!commandExists(CLAUDE)) return [];
   const prompt = buildMemoryWriterPrompt(userBody, renderMemoryPrompt(userId));
   const args = [
@@ -1270,7 +1269,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
 
   async function flush(force, isFinal) {
     const raw = textBuf.trim();
-    const t = raw;
+    const t = normalizeTerminology(raw);
     if (!t || t === lastSent) { textBuf = ""; return; }
     if (!force && t.length < 300 && Date.now() - lastFlush < 3000) return;
     lastSent = t;
@@ -1592,70 +1591,25 @@ async function handleMemoryCommand(userId, body, ctx) {
   const rest = body.replace(/^\/memory\s*/i, "").trim();
   const help = [
     "Memory commands:",
-    "/memory                  查看记忆",
-    "/memory on               启用记忆",
-    "/memory off              暂停注入和自动写入",
-    "/memory add 偏好 | 用户喜欢黄瓜味薯片",
-    "/memory add 事实 | 用户住在上海 [sensitive]",
-    "/memory forget <id或关键词>",
-    "/memory clear            清空前先确认",
-    "/memory clear confirm    确认清空",
+    "/memory                  查看统计和每类前 3 条",
+    "/memory all              查看完整 memory",
+    "/memory 性格|偏好|事实   只查看某一类",
   ].join("\n");
 
-  if (!rest || /^list$/i.test(rest) || rest === "查看") {
+  if (!rest) {
     const notice = memoryMaintenanceNotice(userId);
     await sendMessage(userId, [memoryListText(userId), notice].filter(Boolean).join("\n\n"), ctx);
     return;
   }
-  if (/^help$/i.test(rest) || rest === "帮助") {
-    await sendMessage(userId, help, ctx);
-    return;
-  }
-  if (/^on$/i.test(rest) || rest === "开启" || rest === "启用") {
-    setMemoryEnabled(userId, true);
-    await sendMessage(userId, "✅ Memory 已启用", ctx);
-    return;
-  }
-  if (/^off$/i.test(rest) || rest === "关闭" || rest === "暂停") {
-    setMemoryEnabled(userId, false);
-    await sendMessage(userId, "✅ Memory 已暂停", ctx);
+  if (rest === "all") {
+    const notice = memoryMaintenanceNotice(userId);
+    await sendMessage(userId, [memoryListText(userId, { full: true }), notice].filter(Boolean).join("\n\n"), ctx);
     return;
   }
 
-  const addMatch = rest.match(/^(?:add|添加)\s+([^|]+)\|\s*([\s\S]+)$/i);
-  if (addMatch) {
-    const category = normalizeMemoryCategory(addMatch[1]);
-    let text = addMatch[2].trim();
-    const sensitive = /\[(?:sensitive|敏感)\]|sensitive\s*[:=]\s*true|敏感\s*[:：]\s*true/i.test(text);
-    text = text.replace(/\[(?:sensitive|敏感)\]/ig, "").replace(/sensitive\s*[:=]\s*true/ig, "").replace(/敏感\s*[:：]\s*true/g, "").trim();
-    if (!category || !text) {
-      await sendMessage(userId, "格式: /memory add 性格|偏好|事实 | 记忆内容", ctx);
-      return;
-    }
-    const result = addMemoryItem(userId, category, text, { sensitive, source: "manual" });
-    const notice = memoryMaintenanceNotice(userId, { mark: true });
-    await sendMessage(userId, [`✅ ${result.updated ? "已更新" : "已添加"}: ${result.item.text}${result.item.sensitive ? " [sensitive]" : ""}`, notice].filter(Boolean).join("\n"), ctx);
-    return;
-  }
-
-  const forgetMatch = rest.match(/^(?:forget|delete|remove|删除|忘记)\s+(.+)$/i);
-  if (forgetMatch) {
-    const result = forgetMemoryItems(userId, forgetMatch[1]);
-    await sendMessage(userId, result.removed.length ? `✅ 已删除 ${result.removed.length} 条` : "未找到匹配的 memory", ctx);
-    return;
-  }
-
-  if (/^(?:clear|清空)(?:\s+(?:confirm|确认))?$/i.test(rest)) {
-    const confirmed = /(?:confirm|确认)$/i.test(rest);
-    const pending = pendingMemoryClears.get(userId);
-    if (!confirmed && !(pending && pending > Date.now())) {
-      pendingMemoryClears.set(userId, Date.now() + MEMORY_CLEAR_CONFIRM_MS);
-      await sendMessage(userId, "⚠️ 如果确认清空 memory，请在 60 秒内发送：/memory clear confirm", ctx);
-      return;
-    }
-    pendingMemoryClears.delete(userId);
-    const count = clearMemory(userId);
-    await sendMessage(userId, `✅ 已清空 ${count} 条 memory`, ctx);
+  const category = ["性格", "偏好", "事实"].includes(rest) ? normalizeMemoryCategory(rest) : null;
+  if (category) {
+    await sendMessage(userId, memoryListText(userId, { category, full: true }), ctx);
     return;
   }
 
@@ -1695,7 +1649,9 @@ async function handleMessage(msg) {
       `/close [序号|名称]   关闭线程 (排空中)`,
       `/cancel             取消当前运行的任务`,
       `/cleanup media      查看/清理媒体文件`,
-      `/memory             查看/管理长期记忆`,
+      `/memory             查看 memory 统计和每类前 3 条`,
+      `/memory all         查看完整 memory`,
+      `/memory 性格|偏好|事实 只查看某一类 memory`,
       `/status             查看当前状态`,
       ``,
       `【角色管理】`,

@@ -166,11 +166,9 @@ scripts\rebuild-rag.bat
 | `/profile off` | 当前默认线程保持默认风格 |
 | `/profile add <名称> \| <提示词>` | 添加新角色 |
 | `/profile delete <名称>` | 删除角色，若已有绑定会要求二次确认 |
-| `/memory` | 查看长期记忆 |
-| `/memory add 性格\|偏好\|事实 \| <内容>` | 手动添加长期记忆，末尾可加 `[sensitive]` |
-| `/memory forget <id或关键词>` | 删除匹配的长期记忆 |
-| `/memory on` / `/memory off` | 启用或暂停长期记忆 |
-| `/memory clear` | 清空长期记忆，会要求二次确认 |
+| `/memory` | 查看长期记忆统计和每类前 3 条 |
+| `/memory all` | 查看完整长期记忆 |
+| `/memory 性格` / `/memory 偏好` / `/memory 事实` | 只查看某一类长期记忆 |
 | `/cleanup media` | 查看媒体文件统计 |
 | `/cleanup media <天数>` | 查看超过指定天数的媒体文件 |
 | `/cleanup media confirm <天数>` | 删除超过指定天数的媒体文件 |
@@ -182,11 +180,20 @@ scripts\rebuild-rag.bat
 
 你可以在 GUI 的 Profiles 页面直接编辑角色，也可以手动修改 `wechat-profiles.json`。修改后建议新建线程使用新角色，避免旧会话上下文影响效果。
 
+每轮回复都会注入当前本地时间、星期和大致时段，并提示模型把动作神态限制在微信私聊和已有上下文里。这样凌晨、深夜等场景下会更倾向于安静的手机聊天语境，而不是随意补出喝茶、教室、舞台等不合时宜的动作。
+
+风格提示中也包含轻量术语规范：乐队、角色、作品、歌曲等专有名词优先沿用上下文、角色模板和知识库里的写法，避免临场自造中文音译。术语规则保存在根目录 `wechat-terminology.json`：
+
+- `promptRules`：注入给模型看的称呼规范。
+- `replacements`：发送前执行的 JavaScript 正则替换；`pattern` 里的反斜杠需要写成 `\\`。
+
+例如 Pastel*Palettes 使用全名或 PasPale，不使用“帕斯帕雷”等译法；若宫伊芙日常称呼写“伊芙”，不写 Eve/eve。
+
 ## 长期记忆
 
 长期记忆保存在根目录 `wechat-memory.json`，用于记录用户长期稳定的信息。默认只注入到非默认角色线程；默认角色不使用这份记忆。
 
-记忆分为三类：`trait`（性格/价值观）、`preference`（偏好）、`fact`（事实）。敏感或私密信息会用 `sensitive: true` 标记，注入时提示 AI 只在相关且必要时使用。自动写入器会在用户消息明显涉及长期用户信息时尝试更新记忆；你也可以用 `/memory add`、`/memory forget`、`/memory off` 等命令手动维护。
+记忆分为三类：`trait`（性格/价值观）、`preference`（偏好）、`fact`（事实）。敏感或私密信息会用 `sensitive: true` 标记，注入时提示 AI 只在相关且必要时使用。自动写入器会在普通用户消息后让 AI 判断是否值得记忆，并直接更新正式 `wechat-memory.json`；不确定或只是闲聊时会输出 `noop`。长期学习、练习或培养的技能、乐器、运动、创作习惯通常会作为长期事实候选。
 
 系统不会硬性截断 memory；当单个用户的记忆超过约 60 条，或注入上下文超过约 800-1200 字时，会发消息提醒你手动整理。
 

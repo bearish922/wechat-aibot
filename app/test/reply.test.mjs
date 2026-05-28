@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { splitText, hasInboundAttachment, isInfoSeekingTurn, chooseReplyBudget, constrainCasualReply, isStructuredReply, splitSocialReply } from "../lib/reply.mjs";
+import { splitText, hasInboundAttachment, isInfoSeekingTurn, chooseReplyBudget, constrainCasualReply, isStructuredReply, splitSocialReply, localTimePeriod, formatLocalChatReality, buildStylePrompt, normalizeTerminology, terminologyPrompt, loadTerminologyConfig } from "../lib/reply.mjs";
 
 describe("splitText", () => {
   it("returns single element for short text", () => {
@@ -45,6 +45,52 @@ describe("chooseReplyBudget", () => {
   it("enforces casual budgets", () => {
     const b = chooseReplyBudget("哈哈");
     assert.equal(b.enforce, true);
+  });
+});
+
+describe("local chat reality", () => {
+  it("classifies deep night periods", () => {
+    assert.equal(localTimePeriod(new Date(2026, 4, 28, 2, 13)), "凌晨");
+    assert.equal(localTimePeriod(new Date(2026, 4, 28, 23, 13)), "深夜");
+  });
+
+  it("formats local time and action guidance", () => {
+    const text = formatLocalChatReality(new Date(2026, 4, 28, 2, 13));
+    assert.match(text, /当前本地时间：2026-05-28 02:13，星期四，凌晨。/u);
+    assert.match(text, /微信私聊/u);
+    assert.match(text, /不确定时可以不用动作/u);
+  });
+
+  it("includes chat reality in the style prompt", () => {
+    const text = buildStylePrompt([], "早上好", { instruction: "短", maxChars: 20, maxParts: 1, enforce: true });
+    assert.match(text, /【当前聊天现实】/u);
+    assert.match(text, /【本轮回复长度签】/u);
+  });
+});
+
+describe("terminology", () => {
+  it("loads editable terminology config", () => {
+    const config = loadTerminologyConfig();
+    assert.ok(config.promptRules.some(rule => rule.includes("PasPale")));
+    assert.ok(config.replacements.some(rule => rule.replace === "伊芙"));
+  });
+
+  it("normalizes unwanted PasPale transliterations", () => {
+    assert.equal(normalizeTerminology("帕斯帕雷今天也很可爱"), "PasPale今天也很可爱");
+    assert.equal(normalizeTerminology("帕斯帕莱"), "PasPale");
+  });
+
+  it("normalizes unwanted Eve names for Wakamiya Eve", () => {
+    assert.equal(normalizeTerminology("eve今天也在说武士道"), "伊芙今天也在说武士道");
+    assert.equal(normalizeTerminology("Eve和日菜"), "伊芙和日菜");
+  });
+
+  it("adds terminology guidance to the style prompt", () => {
+    assert.match(terminologyPrompt(), /Pastel\*Palettes/u);
+    assert.match(terminologyPrompt(), /伊芙/u);
+    const text = buildStylePrompt([], "paspale", { instruction: "短", maxChars: 20, maxParts: 1, enforce: true });
+    assert.match(text, /【术语规范】/u);
+    assert.match(text, /不要写“帕斯帕雷”“帕斯帕莱”/u);
   });
 });
 

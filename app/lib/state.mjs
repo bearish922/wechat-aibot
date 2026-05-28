@@ -11,7 +11,6 @@ export let modelNames = { cc: "unknown", codex: "unknown" };
 export const pendingInputs = new Map();
 export const recentInputs = new Map();
 export const pendingProfileDeletes = new Map();
-export const pendingMemoryClears = new Map();
 
 // Setter helpers for reassignable primitives
 export function setToken(v) { token = v; }

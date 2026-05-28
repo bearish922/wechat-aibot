@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import { rootPath } from "./paths.mjs";
+
 // ─── Common chat style prompt ───────────────────────────────
 export const COMMON_CHAT_STYLE_PROMPT = [
   "【共同聊天风格】",
@@ -12,6 +15,88 @@ export const COMMON_CHAT_STYLE_PROMPT = [
 
 export const MAX_REPLY_LEN = 3800;
 export const SOCIAL_REPLY_MAX_PARTS = 6;
+export const TERMINOLOGY_FILE = rootPath("wechat-terminology.json");
+
+const DEFAULT_TERMINOLOGY = {
+  promptRules: [
+    "Pastel*Palettes 可以写全名 Pastel*Palettes，或写简称 PasPale；不要写“帕斯帕雷”“帕斯帕莱”等音译。",
+    "若宫伊芙日常称呼写“伊芙”，不要写 Eve/eve。",
+  ],
+  replacements: [
+    { pattern: "帕斯[·・\\s-]?帕[雷莱蕾]", flags: "gu", replace: "PasPale" },
+    { pattern: "\\b[Ee]ve\\b", flags: "g", replace: "伊芙" },
+  ],
+};
+
+export function loadTerminologyConfig() {
+  try {
+    if (!fs.existsSync(TERMINOLOGY_FILE)) return DEFAULT_TERMINOLOGY;
+    const data = JSON.parse(fs.readFileSync(TERMINOLOGY_FILE, "utf-8"));
+    return {
+      promptRules: Array.isArray(data?.promptRules) ? data.promptRules.filter(rule => typeof rule === "string" && rule.trim()) : DEFAULT_TERMINOLOGY.promptRules,
+      replacements: Array.isArray(data?.replacements) ? data.replacements.filter(rule => typeof rule?.pattern === "string" && typeof rule?.replace === "string") : DEFAULT_TERMINOLOGY.replacements,
+    };
+  } catch {
+    return DEFAULT_TERMINOLOGY;
+  }
+}
+
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+export function localTimePeriod(date = new Date()) {
+  const hour = date.getHours();
+  if (hour < 5) return "凌晨";
+  if (hour < 8) return "早上";
+  if (hour < 11) return "上午";
+  if (hour < 13) return "中午";
+  if (hour < 18) return "下午";
+  if (hour < 23) return "晚上";
+  return "深夜";
+}
+
+export function formatLocalChatReality(date = new Date()) {
+  const weekdays = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+  const stamp = [
+    date.getFullYear(),
+    pad2(date.getMonth() + 1),
+    pad2(date.getDate()),
+  ].join("-") + ` ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+  return [
+    "【当前聊天现实】",
+    `当前本地时间：${stamp}，${weekdays[date.getDay()]}，${localTimePeriod(date)}。`,
+    "通常默认是微信私聊，对方/沃沃刚通过手机发来消息；对方主动补充了互动场景时，以对方描述为准。",
+    "",
+    "【动作与神态】",
+    "括号中的动作或神态只是少量语气补充，不必每次都写。",
+    "动作应当符合当前时间、微信私聊形式和已有上下文；不确定时可以不用动作。",
+    "例如，凌晨/深夜时段，如果没有额外场景信息，更适合默认聊天发生在安静的私人空间，可能是在房间里、床上、准备睡、刚醒或看手机；但如果上下文提示工作、赶路、练习等，也可以据此调整。",
+    "",
+    "【优先级】",
+    "如果用户明确描述了当前场景，以用户描述为准。",
+    "如果角色设定里的日常习惯和当前时间冲突，以当前聊天现实为准。",
+  ].join("\n");
+}
+
+export function terminologyPrompt() {
+  const rules = loadTerminologyConfig().promptRules;
+  return [
+    "【术语规范】",
+    "乐队、角色、作品、歌曲等专有名词优先沿用上下文、角色模板和知识库里的写法；不要临场自造中文音译。",
+    ...rules,
+  ].join("\n");
+}
+
+export function normalizeTerminology(text = "") {
+  let normalized = String(text);
+  for (const rule of loadTerminologyConfig().replacements) {
+    try {
+      normalized = normalized.replace(new RegExp(rule.pattern, rule.flags || "g"), rule.replace);
+    } catch {}
+  }
+  return normalized;
+}
 
 // ─── Text splitting ─────────────────────────────────────────
 export function splitText(text, maxLen) {
@@ -189,6 +274,10 @@ export function buildStylePrompt(recentKaomoji = [], userBody = "", budget = cho
 
   const parts = [
     chatGuidance,
+    "",
+    formatLocalChatReality(),
+    "",
+    terminologyPrompt(),
     "",
     "【本轮回复长度签】",
     budget.instruction,

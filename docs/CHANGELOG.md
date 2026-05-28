@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- Change `/memory` into a summary view with per-category counts and up to 3 sample items; add `/memory all` and `/memory 性格|偏好|事实` category views
+- Improve automatic memory candidate detection for long-term learning and practice statements, such as learning or practicing an instrument
+- Remove keyword-based memory prefiltering so the AI memory writer judges ordinary user turns directly and writes accepted items to the formal memory file
+- Add a local chat reality prompt with current local time, weekday, time period, and softer action guidance for context-appropriate roleplay gestures
+- Add root-level `wechat-terminology.json` for editable terminology prompt rules and final-output normalization, including unwanted PasPale Chinese transliterations and Eve naming
 
 ## v2.1.0 — Memory and Project Layout (2026-05-28)
 - Add structured long-term user memory in `wechat-memory.json`, with manual `/memory` commands, sensitive item marking, soft maintenance reminders, and non-default profile prompt injection
