@@ -1,20 +1,4 @@
 {
   "version": 1,
-  "users": {
-    "o9cq804e1i6BqI31DcyKJi6xToQc@im.wechat": {
-      "enabled": true,
-      "items": [
-        {
-          "id": "mem_66f6e822",
-          "category": "fact",
-          "text": "用户正在学习和练习架子鼓",
-          "sensitive": false,
-          "source": "manual",
-          "createdAt": "2026-05-28T13:59:42.644Z",
-          "updatedAt": "2026-05-28T13:59:42.644Z"
-        }
-      ],
-      "lastMaintenanceNoticeAt": null
-    }
-  }
+  "users": {}
 }

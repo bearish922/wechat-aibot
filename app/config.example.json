@@ -7,7 +7,10 @@
     "workDir": "可选；默认使用当前 Windows 用户目录"
   },
   "proxy": {
-    "https": ""
+    "https": "",
+    "claudeHttps": "",
+    "codexHttps": "",
+    "ragHttps": ""
   },
   "models": {
     "claudeFast": "deepseek-v4-flash[1m]",
@@ -23,6 +26,15 @@
     "model": "Qwen/Qwen3-VL-32B-Instruct",
     "detail": "high",
     "timeoutMs": 180000
+  },
+  "chat": {
+    "baseUrl": "",
+    "apiKey": "",
+    "model": "",
+    "temperature": 0.8,
+    "maxTokens": 800,
+    "timeoutMs": 120000,
+    "compactKeepTurns": 6
   },
   "rag": {
     "enabled": true,

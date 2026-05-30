@@ -1,6 +1,6 @@
 # WeChat AI Bot
 
-> v2.1.1 — Windows 本机运行的微信 AI 助手
+> v2.2.0 — Windows 本机运行的微信 AI 助手
 
 WeChat AI Bot 监听微信消息，将文字、图片、语音、文件、视频整理后交给 Claude Code 或 Codex 回复。它支持多线程会话、角色扮演、本地知识库检索、附件理解、日志留存和本地 Web 管理界面。
 
@@ -9,7 +9,8 @@ WeChat AI Bot 监听微信消息，将文字、图片、语音、文件、视频
 ## 功能
 
 - **双 AI 后端**：Claude Code 和 Codex 可在微信命令中切换，并各自保留独立会话。
-- **多线程会话**：支持创建、切换、重命名、关闭线程，线程状态会写入本地文件，重启后可恢复。
+- **Chat / Tool 会话分流**：工具线程继续使用 Claude Code/Codex 执行项目任务；轻量聊天线程使用 OpenAI-compatible Chat Completions API，避免长闲聊反复恢复工具上下文。
+- **多线程会话**：支持创建、切换、重命名、关闭线程，线程类型和状态会写入本地文件，重启后可恢复。
 - **角色扮演**：从 `wechat-profiles.json` 加载角色模板，内置长崎素世、千早爱音、丸山彩、白鹭千圣等 BangDream 角色设定。
 - **回复风格控制**：通过长度预算、场景判断和近期颜文字记忆，让闲聊更短、更像微信私聊，任务回复仍可结构化。
 - **多媒体理解**：可保存并处理图片、语音、文件、视频；图片和视频首帧可接入 OpenAI-compatible 视觉模型生成中文描述。
@@ -26,6 +27,7 @@ WeChat AI Bot 监听微信消息，将文字、图片、语音、文件、视频
 | Python 3 + pip | 文件内容提取、RAG 向量检索 | 是 |
 | Claude Code | Claude Code 后端 | 至少配置一个 AI 后端 |
 | Codex | Codex 后端 | 至少配置一个 AI 后端 |
+| OpenAI-compatible Chat API Key | 轻量聊天线程 | 使用 chat 线程时 |
 | ffmpeg | 视频首帧提取 | 否 |
 | OpenAI-compatible 视觉 API Key | 图片/视频首帧描述 | 否 |
 
@@ -56,7 +58,10 @@ launch.bat
     "workDir": "可选；默认使用当前 Windows 用户目录"
   },
   "proxy": {
-    "https": ""
+    "https": "",
+    "claudeHttps": "",
+    "codexHttps": "",
+    "ragHttps": ""
   },
   "models": {
     "claudeFast": "闲聊快速模型",
@@ -72,6 +77,15 @@ launch.bat
     "model": "Qwen/Qwen3-VL-32B-Instruct",
     "detail": "high",
     "timeoutMs": 180000
+  },
+  "chat": {
+    "baseUrl": "",
+    "apiKey": "",
+    "model": "",
+    "temperature": 0.8,
+    "maxTokens": 800,
+    "timeoutMs": 120000,
+    "compactKeepTurns": 6
   },
   "rag": {
     "enabled": true,
@@ -93,7 +107,7 @@ launch.bat
 }
 ```
 
-这些环境变量可覆盖配置：`WECHAT_CLAUDE_PATH`、`WECHAT_CODEX_PATH`、`WECHAT_AI_WORK_DIR`、`WECHAT_HTTPS_PROXY`、`WECHAT_VISION_MODE`、`WECHAT_VISION_BASE_URL`、`WECHAT_VISION_API_KEY`、`WECHAT_VISION_MODEL`、`WECHAT_LOG_RETENTION_DAYS`。
+这些环境变量可覆盖配置：`WECHAT_CLAUDE_PATH`、`WECHAT_CODEX_PATH`、`WECHAT_AI_WORK_DIR`、`WECHAT_HTTPS_PROXY`、`WECHAT_CLAUDE_HTTPS_PROXY`、`WECHAT_CODEX_HTTPS_PROXY`、`WECHAT_RAG_HTTPS_PROXY`、`WECHAT_VISION_MODE`、`WECHAT_VISION_BASE_URL`、`WECHAT_VISION_API_KEY`、`WECHAT_VISION_MODEL`、`WECHAT_CHAT_BASE_URL`、`WECHAT_CHAT_API_KEY`、`WECHAT_CHAT_MODEL`、`WECHAT_CHAT_TEMPERATURE`、`WECHAT_LOG_RETENTION_DAYS`。
 
 `paths.claude` 和 `paths.codex` 可以留空或保留示例占位；程序会先从环境变量读取，再从 PATH 自动查找 `claude` / `codex`。找不到时才使用 npm 全局安装目录下的常见路径。
 
@@ -102,9 +116,12 @@ launch.bat
 | 配置 | 默认行为 | 什么时候需要填写 |
 |---|---|---|
 | `paths.claude` / `paths.codex` | 自动从 PATH 和 npm 全局目录查找 | 只有自动查找失败，或你想指定某个固定安装路径 |
-| `proxy.https` | 空值，不使用代理 | 网络环境需要代理访问 Claude/Codex/API 时 |
+| `proxy.https` | 空值，不使用代理 | 作为 Claude/Codex/RAG 未单独配置时的共享代理 |
+| `proxy.claudeHttps` / `proxy.codexHttps` / `proxy.ragHttps` | 空值，沿用 `proxy.https` 或直连 | 需要让不同后端使用不同代理策略时 |
 | `vision.apiKey` | 空值，不调用外部视觉 API | AI 后端本身不支持视觉，但你希望它能看图/看视频首帧时 |
 | `vision.baseUrl` / `vision.model` | 默认 SiliconFlow + Qwen vision 模型 | 使用其他 OpenAI-compatible 视觉服务时 |
+| `chat.baseUrl` / `chat.apiKey` / `chat.model` | 空值，chat 线程会提示未配置 | 想用轻量聊天线程承接长时间角色闲聊时 |
+| `chat.compactKeepTurns` | 6 | `/compact` 后保留最近多少轮完整对话 |
 | `rag.knowledgeDir` | 使用项目内 `data/knowledge/` | 想换成自己的 Markdown 知识库目录时 |
 | `paths.workDir` | 当前 Windows 用户目录 | 希望 Claude/Codex 在指定项目目录或工作区运行时 |
 
@@ -128,16 +145,43 @@ codex
 
 `vision.mode` 支持：
 
-- `auto`：默认值；配置了外部视觉 API 时先生成图片/视频首帧描述，否则把本地图片路径交给 AI 后端处理。
+- `auto`：默认值；配置了外部视觉 API 时先生成图片/视频首帧描述，否则只保留本地媒体路径和基础信息。
 - `external`：强制使用 OpenAI-compatible 视觉 API，适合 Claude Code 后端本身不支持视觉、但另配视觉模型的场景。
-- `native`：不调用外部视觉 API，只把本地媒体路径交给支持视觉的 AI 后端。
+- `native`：不调用外部视觉 API，只保留本地媒体路径和基础信息。
 - `off`：不调用外部视觉 API，也不要求后端读取图片，只保留媒体路径和基础信息。
 
-如果你的 Claude Code/Codex 后端模型本身支持 vision，保留 `auto` 且不填写 `vision.apiKey` 即可；也可以显式设为 `native`。如果你的后端是 DeepSeek 这类不支持 vision 的模型，则保留 `auto` 并填写 `vision.apiKey`，或把 `vision.mode` 设为 `external`。
+如果你希望角色能稳定理解图片/视频首帧，建议保留 `auto` 并填写 `vision.apiKey`，或把 `vision.mode` 设为 `external`。程序不会再提示 Claude Code/Codex 直接读取本地图片文件，以免把 base64 图片内容带入工具会话历史。
+
+### Chat / Tool 线程
+
+线程有两种类型：
+
+- `tool`：继续调用 Claude Code 或 Codex，适合查项目、改文件、运行命令、推送代码等工作。
+- `chat`：调用 `chat.*` 中配置的 OpenAI-compatible Chat Completions API，适合长期角色闲聊。chat 线程默认保留完整对话历史，不自动截断。
+
+默认迁移规则：Claude Code 下名为 `cst`、`anon`、`soyo`、`aya` 的线程会作为 chat 线程，其它线程保持 tool。你也可以手动创建或切换：
+
+```text
+/new chat cst
+/new tool research
+/mode chat
+/mode tool
+```
+
+如果 chat 线程历史过长，可以手动发送 `/compact`。它会调用同一个 chat API 将早期历史压缩成摘要，并保留最近 `chat.compactKeepTurns` 轮完整对话。
 
 ### 代理、自定义知识库和工作目录
 
-没有代理就让 `proxy.https` 保持空字符串。需要代理时填写形如 `http://127.0.0.1:7892` 的地址。
+没有代理就让对应代理字段保持空字符串。需要代理时填写形如 `http://127.0.0.1:7892` 的地址。`proxy.https` 是共享 fallback；如果要让 Claude 直连、Codex 走代理，可以设置：
+
+```json
+"proxy": {
+  "https": "",
+  "claudeHttps": "",
+  "codexHttps": "http://127.0.0.1:7892",
+  "ragHttps": ""
+}
+```
 
 默认知识库是项目内 `data/knowledge/`。如果要改用自己的 Markdown 知识库，把 `rag.knowledgeDir` 改成绝对路径或相对项目目录的路径，然后重新运行：
 
@@ -154,6 +198,10 @@ scripts\rebuild-rag.bat
 | `/cc` | 切换到 Claude Code |
 | `/codex` | 切换到 Codex |
 | `/new [名称]` | 创建新线程 |
+| `/new chat [名称]` | 创建轻量聊天线程 |
+| `/new tool [名称]` | 创建工具调用线程 |
+| `/mode chat` | 将当前线程切换为轻量聊天线程 |
+| `/mode tool` | 将当前线程切换为工具调用线程 |
 | `/switch [序号\|名称]` | 切换线程 |
 | `/rename <新名称>` | 重命名当前线程 |
 | `/rename [序号\|名称] <新名称>` | 重命名指定线程 |
@@ -169,6 +217,7 @@ scripts\rebuild-rag.bat
 | `/memory` | 查看长期记忆统计和每类前 3 条 |
 | `/memory all` | 查看完整长期记忆 |
 | `/memory 性格` / `/memory 偏好` / `/memory 事实` | 只查看某一类长期记忆 |
+| `/compact` | 手动压缩当前 chat 线程的早期历史 |
 | `/cleanup media` | 查看媒体文件统计 |
 | `/cleanup media <天数>` | 查看超过指定天数的媒体文件 |
 | `/cleanup media confirm <天数>` | 删除超过指定天数的媒体文件 |

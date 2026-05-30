@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { addMemoryItem, clearMemory, shouldRunMemoryWriter, memoryListText, MEMORY_FILE } from "../lib/memory.mjs";
+import { addMemoryItem, buildMemoryWriterPrompt, buildMemoryWriterSystemPrompt, clearMemory, parseMemoryWriterOutput, shouldRunMemoryWriter, memoryListText, MEMORY_FILE } from "../lib/memory.mjs";
 
 let originalMemory = null;
 
@@ -26,6 +26,38 @@ describe("shouldRunMemoryWriter", () => {
   it("skips empty input and commands", () => {
     assert.equal(shouldRunMemoryWriter("   "), false);
     assert.equal(shouldRunMemoryWriter("/memory"), false);
+  });
+});
+
+describe("buildMemoryWriterPrompt", () => {
+  it("guides the writer toward durable user memory without saving chat residue", () => {
+    const prompt = buildMemoryWriterPrompt("我不希望你每次都夸我", "");
+    assert.match(prompt, /审慎的人类助手/u);
+    assert.match(prompt, /宠物\/长期陪伴对象/u);
+    assert.match(prompt, /回复方式的长期偏好/u);
+    assert.match(prompt, /实习、转正、求职/u);
+    assert.match(prompt, /单次歌曲\/作品即时反应/u);
+    assert.match(prompt, /饭点\/天气\/通勤\/犯困/u);
+    assert.match(prompt, /只抽取稳定信息写入/u);
+    assert.match(prompt, /不要推断用户能力、性格缺陷、岗位适配性/u);
+    assert.match(prompt, /用户有一只猫，名叫盼盼/u);
+    assert.match(prompt, /用户不希望每次回复都被夸奖/u);
+    assert.match(prompt, /用户目前处在实习、转正、求职相关阶段/u);
+  });
+
+  it("can render instructions separately for a system prompt file", () => {
+    const prompt = buildMemoryWriterSystemPrompt("");
+    assert.match(prompt, /独立的长期记忆写入器/u);
+    assert.doesNotMatch(prompt, /\n用户消息：\n/u);
+  });
+});
+
+describe("parseMemoryWriterOutput", () => {
+  it("parses the first JSON object when stream-json duplicates result text", () => {
+    const raw = "{\"ops\":[{\"op\":\"add\",\"category\":\"trait\",\"text\":\"用户自认情绪稳定\",\"sensitive\":false}]}{\"ops\":[{\"op\":\"add\"}]}";
+    const ops = parseMemoryWriterOutput(raw);
+    assert.equal(ops.length, 1);
+    assert.equal(ops[0].text, "用户自认情绪稳定");
   });
 });
 

@@ -95,7 +95,10 @@ const CLAUDE = resolveClaudeCommand(CLAUDE_CONFIGURED);
 const CODEX = usableConfigString(envOrConfig("WECHAT_CODEX_PATH", "paths.codex", DEFAULT_CODEX), DEFAULT_CODEX);
 const NODE = process.execPath;
 const AI_WORK_DIR = usableConfigString(envOrConfig("WECHAT_AI_WORK_DIR", "paths.workDir", USER_HOME), USER_HOME);
-const HTTPS_PROXY = envOrConfig("WECHAT_HTTPS_PROXY", "proxy.https", "http://127.0.0.1:7892"); // Codex (Rust) doesn't read Windows system proxy
+const SHARED_HTTPS_PROXY = envOrConfig("WECHAT_HTTPS_PROXY", "proxy.https", "");
+const CLAUDE_HTTPS_PROXY = envOrConfig("WECHAT_CLAUDE_HTTPS_PROXY", "proxy.claudeHttps", SHARED_HTTPS_PROXY);
+const CODEX_HTTPS_PROXY = envOrConfig("WECHAT_CODEX_HTTPS_PROXY", "proxy.codexHttps", SHARED_HTTPS_PROXY);
+const RAG_HTTPS_PROXY = envOrConfig("WECHAT_RAG_HTTPS_PROXY", "proxy.ragHttps", SHARED_HTTPS_PROXY);
 const CLAUDE_FAST_MODEL = envOrConfig("WECHAT_CLAUDE_FAST_MODEL", "models.claudeFast", "deepseek-v4-flash[1m]");
 const CLAUDE_FALLBACK_MODEL = envOrConfig("WECHAT_CLAUDE_FALLBACK_MODEL", "models.claudeFallback", "deepseek-v4-flash[1m]");
 const CLAUDE_TIMEOUT_MS = configNumber("timeouts.aiMs", 600_000);
@@ -125,7 +128,14 @@ const VISION_API_KEY = usableConfigString(process.env.WECHAT_VISION_API_KEY ?? p
 const VISION_MODEL = usableConfigString(envOrConfig("WECHAT_VISION_MODEL", "vision.model", DEFAULT_VISION_MODEL), DEFAULT_VISION_MODEL);
 const VISION_DETAIL = envOrConfig("WECHAT_VISION_DETAIL", "vision.detail", "high");
 const VISION_TIMEOUT_MS = configNumber("vision.timeoutMs", 180_000);
-import { COMMON_CHAT_STYLE_PROMPT, MAX_REPLY_LEN, SOCIAL_REPLY_MAX_PARTS, splitText, hasInboundAttachment, splitSocialReply, extractKaomoji, rememberRecentKaomoji, isInfoSeekingTurn, chooseReplyBudget, buildStylePrompt, normalizeTerminology } from "./lib/reply.mjs";
+const CHAT_BASE_URL = usableConfigString(process.env.WECHAT_CHAT_BASE_URL ?? process.env.OPENAI_BASE_URL ?? configValue("chat.baseUrl", ""), "");
+const CHAT_API_KEY = usableConfigString(process.env.WECHAT_CHAT_API_KEY ?? process.env.OPENAI_API_KEY ?? configValue("chat.apiKey", ""), "");
+const CHAT_MODEL = usableConfigString(envOrConfig("WECHAT_CHAT_MODEL", "chat.model", ""), "");
+const CHAT_TEMPERATURE = Number(envOrConfig("WECHAT_CHAT_TEMPERATURE", "chat.temperature", 0.8));
+const CHAT_MAX_TOKENS = configNumber("chat.maxTokens", 800);
+const CHAT_TIMEOUT_MS = configNumber("chat.timeoutMs", 120_000);
+const CHAT_COMPACT_KEEP_TURNS = configNumber("chat.compactKeepTurns", 6);
+import { COMMON_CHAT_STYLE_PROMPT, MAX_REPLY_LEN, SOCIAL_REPLY_MAX_PARTS, splitText, hasInboundAttachment, splitSocialReply, extractKaomoji, rememberRecentKaomoji, rememberRecentRhetoricalPatterns, isInfoSeekingTurn, chooseReplyBudget, buildStylePrompt, normalizeTerminology } from "./lib/reply.mjs";
 import { RAG_SKIP_PATTERNS, shouldSkipRag, buildRagBody } from "./lib/rag.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
@@ -141,7 +151,7 @@ import { registerControlRoutes } from "./lib/gui-control.mjs";
 import { token, getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, recentInputs, pendingProfileDeletes, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
 import { uuid, shortId, sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost, apiGet } from "./lib/wechat.mjs";
-import { applyMemoryOps, buildMemoryWriterPrompt, isMemoryEnabled, shouldRunMemoryWriter, memoryListText, memoryMaintenanceNotice, normalizeMemoryCategory, parseMemoryWriterOutput, renderMemoryPrompt } from "./lib/memory.mjs";
+import { applyMemoryOps, buildMemoryWriterSystemPrompt, isMemoryEnabled, shouldRunMemoryWriter, memoryListText, memoryMaintenanceNotice, normalizeMemoryCategory, parseMemoryWriterOutput, renderMemoryPrompt } from "./lib/memory.mjs";
 const LONG_POLL_TIMEOUT_MS = 35_000;
 const PROFILE_DELETE_CONFIRM_MS = 60_000;
 
@@ -262,14 +272,9 @@ function queryRag(userMessage, profile = null) {
       encoding: "utf-8",
       timeout: 8000,
       windowsHide: true,
-      env: {
-        ...process.env,
-        HTTP_PROXY: HTTPS_PROXY,
-        HTTPS_PROXY,
-        http_proxy: HTTPS_PROXY,
-        https_proxy: HTTPS_PROXY,
+      env: envWithProxy(RAG_HTTPS_PROXY, {
         HF_HUB_DISABLE_SYMLINKS_WARNING: "1",
-      },
+      }),
     });
 
     if (result.error) throw result.error;
@@ -290,6 +295,54 @@ function queryRag(userMessage, profile = null) {
 
 function sessionProfile(sess) {
   return sess?._profile ?? null;
+}
+
+function parseSessionMode(mode) {
+  const value = String(mode || "").trim().toLowerCase();
+  if (value === "chat" || value === "闲聊") return "chat";
+  if (value === "tool" || value === "tools" || value === "agent" || value === "工具") return "tool";
+  return null;
+}
+
+const DEFAULT_CHAT_CC_SESSIONS = new Set(["cst", "anon", "soyo", "aya"]);
+
+function defaultSessionMode(ai, name) {
+  return ai === "cc" && DEFAULT_CHAT_CC_SESSIONS.has(String(name || "").trim().toLowerCase()) ? "chat" : "tool";
+}
+
+function normalizeSessionMode(mode, ai = null, name = null) {
+  const parsed = parseSessionMode(mode);
+  if (parsed) return parsed;
+  return defaultSessionMode(ai, name);
+}
+
+function sessionMode(sess) {
+  return normalizeSessionMode(sess?._mode);
+}
+
+function sessionModeLabel(mode) {
+  return mode === "chat" ? "chat" : "tool";
+}
+
+function makeSession(name, profile = null, mode = null, ai = null) {
+  return {
+    id: uuid(),
+    name,
+    busy: false,
+    queue: [],
+    _closing: false,
+    _lastEnd: 0,
+    sid: uuid(),
+    _firstTurn: true,
+    _recentKaomoji: [],
+    _kaomojiTurn: 0,
+    _recentRhetoricalPatterns: [],
+    _rhetoricalTurn: 0,
+    _profile: profile,
+    _mode: normalizeSessionMode(mode, ai, name),
+    _chatSummary: "",
+    _chatHistory: [],
+  };
 }
 
 function boundProfileSessions(profileName) {
@@ -314,6 +367,32 @@ function profileBindingListText(bindings) {
   }).join("\n");
 }
 
+function hydrateSession(ai, raw = {}) {
+  const mode = parseSessionMode(raw._mode) || defaultSessionMode(ai, raw.name);
+  const sess = {
+    id: raw.id || uuid(),
+    name: raw.name || "S1",
+    sid: raw.sid || uuid(),
+    _firstTurn: raw._firstTurn ?? true,
+    busy: false,
+    queue: [],
+    _closing: false,
+    _lastEnd: 0,
+    _recentKaomoji: raw._recentKaomoji || [],
+    _kaomojiTurn: raw._kaomojiTurn || 0,
+    _recentRhetoricalPatterns: raw._recentRhetoricalPatterns || [],
+    _rhetoricalTurn: raw._rhetoricalTurn || 0,
+    _profile: raw._profile ?? null,
+    _mode: mode,
+    _chatSummary: typeof raw._chatSummary === "string" ? raw._chatSummary : "",
+    _chatHistory: normalizeChatHistory(raw._chatHistory),
+  };
+  if (mode === "chat" && !sess._chatHistory.length && !sess._chatSummary) {
+    seedChatHistoryFromLogs(ai, sess);
+  }
+  return sess;
+}
+
 // ─── SESSION PERSISTENCE ─────────────────────────────────────
 function saveSessions() {
   ensureDir(DATA_DIR);
@@ -323,7 +402,20 @@ function saveSessions() {
     for (const [userId, u] of map) {
       aiData[userId] = {
         activeId: u.activeId,
-        list: u.list.map(s => ({ id: s.id, name: s.name, sid: s.sid, _firstTurn: s._firstTurn, _recentKaomoji: s._recentKaomoji || [], _kaomojiTurn: s._kaomojiTurn || 0, _profile: s._profile ?? null })),
+        list: u.list.map(s => ({
+          id: s.id,
+          name: s.name,
+          sid: s.sid,
+          _firstTurn: s._firstTurn,
+          _recentKaomoji: s._recentKaomoji || [],
+          _kaomojiTurn: s._kaomojiTurn || 0,
+          _recentRhetoricalPatterns: s._recentRhetoricalPatterns || [],
+          _rhetoricalTurn: s._rhetoricalTurn || 0,
+          _profile: s._profile ?? null,
+          _mode: sessionMode(s),
+          _chatSummary: typeof s._chatSummary === "string" ? s._chatSummary : "",
+          _chatHistory: normalizeChatHistory(s._chatHistory),
+        })),
       };
     }
     data[ai] = aiData;
@@ -343,7 +435,10 @@ function saveSessions() {
         const active = s.id === u.activeId ? " [当前]" : "";
         lines.push(`  ${s.name}${active}`);
         lines.push(`    角色: ${sessionProfile(s) || "默认"}`);
-        if (ai === "cc") {
+        lines.push(`    类型: ${sessionModeLabel(sessionMode(s))}`);
+        if (sessionMode(s) === "chat") {
+          lines.push(`    chat backend: ${CHAT_MODEL || "未配置"}`);
+        } else if (ai === "cc") {
           lines.push(`    claude --resume ${s.sid}`);
         } else {
           lines.push(`    codex resume ${s.sid}`);
@@ -368,10 +463,7 @@ function loadSessions() {
         for (const [userId, u] of Object.entries(data)) {
           ccMap.set(userId, {
             activeId: u.activeId,
-            list: (u.list || []).map(s => ({
-              id: s.id, name: s.name, sid: s.sid, _firstTurn: s._firstTurn,
-              busy: false, queue: [], _closing: false, _lastEnd: 0, _recentKaomoji: s._recentKaomoji || [], _kaomojiTurn: s._kaomojiTurn || 0, _profile: s._profile ?? null,
-            })),
+            list: (u.list || []).map(s => hydrateSession("cc", s)),
           });
         }
         sessions.cc = ccMap;
@@ -382,10 +474,7 @@ function loadSessions() {
           for (const [userId, u] of Object.entries(aiData)) {
             map.set(userId, {
               activeId: u.activeId,
-              list: (u.list || []).map(s => ({
-              id: s.id, name: s.name, sid: s.sid, _firstTurn: s._firstTurn,
-                busy: false, queue: [], _closing: false, _lastEnd: 0, _recentKaomoji: s._recentKaomoji || [], _kaomojiTurn: s._kaomojiTurn || 0, _profile: s._profile ?? null,
-              })),
+              list: (u.list || []).map(s => hydrateSession(ai, s)),
             });
           }
           if (ai === "cc" || ai === "codex") sessions[ai] = map;
@@ -679,7 +768,7 @@ async function fetchJsonWithTimeout(url, bodyObj, timeoutMs, headers = {}) {
   }
 }
 
-function visionChatCompletionsUrl(baseUrl = "") {
+function chatCompletionsUrl(baseUrl = "") {
   const base = baseUrl.trim().replace(/\/+$/, "");
   if (!base) return null;
   if (/\/chat\/completions$/i.test(base)) return base;
@@ -732,7 +821,7 @@ async function captionImageCloud(filePath, hint = "") {
   ].filter(Boolean).join("\n");
 
   try {
-    const result = await fetchJsonWithTimeout(visionChatCompletionsUrl(VISION_BASE_URL), {
+    const result = await fetchJsonWithTimeout(chatCompletionsUrl(VISION_BASE_URL), {
       model: VISION_MODEL,
       messages: [{
         role: "user",
@@ -828,8 +917,8 @@ function mediaInfoToPrompt(info) {
     const dims = info.dimensions ? `\n尺寸: ${info.dimensions.width}x${info.dimensions.height}` : "";
     const caption = info.caption
       ? `\n外部视觉模型描述:\n${info.caption}`
-      : "\n外部视觉模型描述: 未生成。若当前 AI 后端支持视觉，请直接查看本地路径中的图片；否则请说明无法确认图片细节。";
-    return `[图片]\n本地路径: ${info.path}\nMIME: ${info.mime}${dims}${caption}\n回复时不要仅凭用户补充文字脑补图片细节。若已有外部视觉描述，请优先依据它，但仍要保守处理不确定内容；若后端支持视觉，也可以直接查看本地图片文件。`;
+      : "\n外部视觉模型描述: 未生成。请说明无法确认图片细节，不要自行读取本地图片文件。";
+    return `[图片]\n本地路径: ${info.path}\nMIME: ${info.mime}${dims}${caption}\n回复时不要仅凭用户补充文字脑补图片细节。若已有外部视觉描述，请优先依据它，但仍要保守处理不确定内容；不要自行读取本地图片文件。`;
   }
   if (info.kind === "voice") {
     const transcript = info.transcript ? `\n语音转文字: ${info.transcript}` : "";
@@ -843,7 +932,7 @@ function mediaInfoToPrompt(info) {
     const frame = info.framePath ? `\n首帧截图: ${info.framePath}` : "";
     const frameCaption = info.frameCaption
       ? `\n首帧外部视觉模型描述:\n${info.frameCaption}`
-      : (info.framePath ? "\n首帧外部视觉模型描述: 未生成。若当前 AI 后端支持视觉，请直接查看首帧截图。" : "");
+      : (info.framePath ? "\n首帧外部视觉模型描述: 未生成。请说明无法确认视频画面细节，不要自行读取首帧截图。" : "");
     const videoPath = info.path ? `\n本地路径: ${info.path}` : "";
     const err = info.error ? `\n备注: ${info.error}` : "";
     return `[视频]${videoPath}\nMIME: ${info.mime || "unknown"}\n大小: ${info.size ?? "unknown"} bytes${frame}${frameCaption}${err}\n请优先依据可见首帧信息回复；不要脑补视频中不可见的内容。`;
@@ -903,8 +992,8 @@ function sessionMap(ai) { return sessions[ai || activeAI]; }
 function ensureUser(userId, ai = activeAI) {
   const sMap = sessionMap(ai);
   if (!sMap.has(userId)) {
-    const id = uuid();
-    sMap.set(userId, { activeId: id, list: [{ id, name: "S1", busy: false, queue: [], _closing: false, _lastEnd: 0, sid: uuid(), _firstTurn: true, _recentKaomoji: [], _kaomojiTurn: 0, _profile: null }] });
+    const sess = makeSession("S1", null, "tool", ai);
+    sMap.set(userId, { activeId: sess.id, list: [sess] });
   }
   return sMap.get(userId);
 }
@@ -946,13 +1035,14 @@ function sessionsListText(userId) {
     const busy = s.busy ? " ⏳" : "";
     const q = s.queue.length ? ` 排队${s.queue.length}` : " 空闲";
     const profile = sessionProfile(s) || "默认";
-    return `${arrow}[${i + 1}] ${s.name}${busy}${q}  角色:${profile}`;
+    const mode = sessionModeLabel(sessionMode(s));
+    return `${arrow}[${i + 1}] ${s.name}${busy}${q}  类型:${mode}  角色:${profile}`;
   }).join("\n");
 }
 
-function replyPrefix(sessionName, ai = activeAI) {
+function replyPrefix(sessionName, ai = activeAI, mode = "tool") {
   const aiName = ai === "cc" ? "CC" : "Codex";
-  return `${aiName}-${sessionName}`;
+  return `${aiName}-${sessionName} [${sessionModeLabel(mode)}]`;
 }
 
 function needsWindowsShell(command) {
@@ -964,6 +1054,23 @@ function spawnCli(command, args, options = {}) {
     ...options,
     shell: options.shell ?? needsWindowsShell(command),
   });
+}
+
+function envWithProxy(proxyUrl, extra = {}) {
+  const env = { ...process.env, ...extra };
+  if (proxyUrl && String(proxyUrl).trim()) {
+    const value = String(proxyUrl).trim();
+    env.HTTP_PROXY = value;
+    env.HTTPS_PROXY = value;
+    env.http_proxy = value;
+    env.https_proxy = value;
+  } else {
+    delete env.HTTP_PROXY;
+    delete env.HTTPS_PROXY;
+    delete env.http_proxy;
+    delete env.https_proxy;
+  }
+  return env;
 }
 
 function commandExists(command) {
@@ -1024,7 +1131,7 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
     timeout: CLAUDE_TIMEOUT_MS,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, HTTP_PROXY: HTTPS_PROXY, HTTPS_PROXY, http_proxy: HTTPS_PROXY, https_proxy: HTTPS_PROXY },
+    env: envWithProxy(CLAUDE_HTTPS_PROXY),
   });
 
   proc.stdin.on("error", () => {});
@@ -1124,7 +1231,7 @@ function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragConte
     timeout: CLAUDE_TIMEOUT_MS,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, HTTP_PROXY: HTTPS_PROXY, HTTPS_PROXY, http_proxy: HTTPS_PROXY, https_proxy: HTTPS_PROXY },
+    env: envWithProxy(CODEX_HTTPS_PROXY),
   });
 
   proc.stdin.on("error", () => {});
@@ -1168,36 +1275,196 @@ function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragConte
   return promise;
 }
 
+function hasChatConfig() {
+  return Boolean(CHAT_BASE_URL && CHAT_API_KEY && CHAT_MODEL);
+}
+
+function extractChatContent(messageContent) {
+  if (typeof messageContent === "string") return messageContent;
+  if (Array.isArray(messageContent)) {
+    return messageContent
+      .map(part => typeof part === "string" ? part : (part.text || part.content || ""))
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
+function normalizeChatHistory(history = []) {
+  const clean = (Array.isArray(history) ? history : [])
+    .filter(item => (item?.role === "user" || item?.role === "assistant") && typeof item.content === "string" && item.content.trim())
+    .map(item => ({ role: item.role, content: item.content.trim() }));
+  return clean;
+}
+
+function appendChatHistory(sess, userBody, assistantText) {
+  if (!sess) return;
+  sess._chatHistory = normalizeChatHistory([
+    ...(Array.isArray(sess._chatHistory) ? sess._chatHistory : []),
+    { role: "user", content: userBody },
+    { role: "assistant", content: assistantText },
+  ]);
+}
+
+function seedChatHistoryFromLogs(ai, sess) {
+  try {
+    if (!fs.existsSync(LOGS_DIR) || !sess?.name) return;
+    const safeName = sess.name.replace(/[<>:"/\\|?*]/g, "_");
+    const prefixes = [`${ai}-${safeName}-`, `${safeName}-`];
+    const history = [];
+    const files = fs.readdirSync(LOGS_DIR)
+      .filter(name => prefixes.some(prefix => name.startsWith(prefix)) && name.endsWith(".jsonl"))
+      .sort();
+    for (const name of files) {
+      let userText = "";
+      let resultText = "";
+      let assistantText = "";
+      const raw = fs.readFileSync(path.join(LOGS_DIR, name), "utf-8");
+      for (const line of raw.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        let evt;
+        try { evt = JSON.parse(line); } catch { continue; }
+        if (evt.type === "user_message" && typeof evt.body === "string") userText ||= evt.body.trim();
+        if (evt.type === "assistant" && evt.message?.content) {
+          for (const block of evt.message.content) {
+            if (block.type === "text" && block.text) assistantText += block.text;
+          }
+        }
+        if (evt.type === "result" && typeof evt.result === "string") resultText = evt.result.trim();
+      }
+      const replyText = (resultText || assistantText).trim();
+      if (userText) history.push({ role: "user", content: userText });
+      if (replyText) history.push({ role: "assistant", content: replyText });
+    }
+    sess._chatHistory = normalizeChatHistory(history);
+    if (sess._chatHistory.length) log("\u{1F4DC}", `[${sess.name}] seeded chat history from ${files.length} logs (${sess._chatHistory.length} messages)`);
+  } catch (e) {
+    log("⚠️", `[${sess?.name || "chat"}] seed history failed: ${e.message}`);
+  }
+}
+
+function buildChatMessages(userBody, ragContext, stylePrompt, memoryPrompt = "", profileOverride = null, history = [], summary = "") {
+  const systemParts = [
+    profileOverride && profileTemplates[profileOverride] ? profileTemplates[profileOverride] : "",
+    memoryPrompt,
+    stylePrompt,
+    "【会话类型】当前是轻量 chat session。请只用对话能力回复，不要声称已经读取本地文件、运行命令、浏览网页或调用工具；如果对方要你干活、查项目、改文件或执行命令，请提醒他切换到 tool session。",
+  ].filter(Boolean);
+  if (ragContext) {
+    systemParts.push([
+      "【可能相关的背景资料】",
+      "以下资料由本地向量检索自动召回，可能相关，也可能无关；只有当它确实能帮助回答时才使用。",
+      ragContext,
+    ].join("\n"));
+  }
+  if (summary && String(summary).trim()) {
+    systemParts.push(`【已手动压缩的早期对话摘要】\n${String(summary).trim()}`);
+  }
+  return [
+    { role: "system", content: systemParts.join("\n\n---\n\n") },
+    ...normalizeChatHistory(history),
+    { role: "user", content: userBody },
+  ];
+}
+
+async function runChatCompletion(sessionName, messages) {
+  if (!hasChatConfig()) {
+    throw new Error("chat session 未配置。请设置 chat.baseUrl、chat.apiKey、chat.model，或用 /mode tool 切回工具会话。");
+  }
+  const result = await fetchJsonWithTimeout(chatCompletionsUrl(CHAT_BASE_URL), {
+    model: CHAT_MODEL,
+    messages,
+    temperature: Number.isFinite(CHAT_TEMPERATURE) ? CHAT_TEMPERATURE : 0.8,
+    max_tokens: CHAT_MAX_TOKENS,
+    stream: false,
+  }, CHAT_TIMEOUT_MS, { Authorization: `Bearer ${CHAT_API_KEY}` });
+  const text = extractChatContent(result.choices?.[0]?.message?.content).trim();
+  if (!text) throw new Error("chat backend returned empty response");
+  log("\u{1F4AC}", `[${sessionName}] chat completion ok (${text.length} chars, model=${CHAT_MODEL})`);
+  return { text, usage: result.usage || null, raw: result };
+}
+
+function compactKeepMessageCount() {
+  return Math.max(0, CHAT_COMPACT_KEEP_TURNS * 2);
+}
+
+async function compactChatSession(sess) {
+  if (!sess || sessionMode(sess) !== "chat") {
+    throw new Error("/compact 只用于 chat session；tool session 请使用 Claude Code/Codex 自带压缩或新开线程。");
+  }
+  const history = normalizeChatHistory(sess._chatHistory);
+  if (history.length < 4 && !sess._chatSummary) {
+    return { changed: false, summaryChars: 0, keptMessages: history.length };
+  }
+  const keepCount = compactKeepMessageCount();
+  const keepTail = keepCount ? history.slice(-keepCount) : [];
+  const toCompact = keepCount ? history.slice(0, Math.max(0, history.length - keepCount)) : history;
+  const transcript = toCompact.map(item => `${item.role === "user" ? "User" : "Assistant"}: ${item.content}`).join("\n\n");
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "你在压缩一段微信角色聊天历史，用于后续继续对话。",
+        "输出中文摘要，保留连续性，而不是评价或改写。",
+        "必须保留：双方关系进展、昵称和称呼、用户个人事实、角色已承诺/已表达的态度、正在延续的话题、重要情绪节点、未解决的问题。",
+        "不要保留冗余寒暄、重复修辞、工具调用细节或无意义 UI 信息。",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: [
+        sess._chatSummary ? `已有早期摘要：\n${sess._chatSummary}` : "",
+        `需要压缩的对话：\n${transcript || "（无新增早期对话）"}`,
+      ].filter(Boolean).join("\n\n---\n\n"),
+    },
+  ];
+  const { text } = await runChatCompletion(`${sess.name}-compact`, messages);
+  sess._chatSummary = text.trim();
+  sess._chatHistory = keepTail;
+  return { changed: true, summaryChars: sess._chatSummary.length, keptMessages: keepTail.length };
+}
+
 async function updateUserMemoryFromTurn(userId, userBody) {
   if (!isMemoryEnabled(userId)) return [];
   if (!shouldRunMemoryWriter(userBody)) return [];
   if (!commandExists(CLAUDE)) return [];
-  const prompt = buildMemoryWriterPrompt(userBody, renderMemoryPrompt(userId));
+  const systemPromptFile = path.join(RUNTIME_DIR, `.memory_writer_system_${crypto.randomUUID()}.txt`);
+  ensureDir(RUNTIME_DIR);
+  fs.writeFileSync(systemPromptFile, buildMemoryWriterSystemPrompt(renderMemoryPrompt(userId)), "utf-8");
   const args = [
+    "--bare",
     "-p",
     "--output-format", "stream-json",
+    "--verbose",
     "--permission-mode", "bypassPermissions",
     "--model", CLAUDE_FAST_MODEL,
     "--effort", "low",
+    "--system-prompt-file", systemPromptFile,
   ];
   const proc = spawnCli(CLAUDE, args, {
     cwd: AI_WORK_DIR,
     timeout: 60_000,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, HTTP_PROXY: HTTPS_PROXY, HTTPS_PROXY, http_proxy: HTTPS_PROXY, https_proxy: HTTPS_PROXY },
+    env: envWithProxy(CLAUDE_HTTPS_PROXY),
   });
   proc.stdin.on("error", () => {});
-  proc.stdin.end(prompt, "utf8");
+  proc.stdin.end(userBody, "utf8");
 
   let stdout = "";
   let stderr = "";
-  await new Promise(resolve => {
+  const code = await new Promise(resolve => {
     proc.stdout.on("data", d => { stdout += d; });
     proc.stderr.on("data", d => { stderr += d; if (stderr.length > 2000) stderr = stderr.slice(-2000); });
     proc.on("close", resolve);
-    proc.on("error", resolve);
+    proc.on("error", () => resolve(-1));
+  }).finally(() => {
+    try { fs.unlinkSync(systemPromptFile); } catch {}
   });
+  if (code !== 0) {
+    log("⚠️", `memory writer failed: exit ${code}${stderr ? `; ${stderr.slice(-300)}` : ""}`);
+    return [];
+  }
 
   let text = "";
   for (const line of stdout.split(/\r?\n/)) {
@@ -1214,7 +1481,9 @@ async function updateUserMemoryFromTurn(userId, userBody) {
       }
     } catch {}
   }
-  const applied = applyMemoryOps(userId, parseMemoryWriterOutput(text), "auto");
+  const ops = parseMemoryWriterOutput(text);
+  if (!ops.length) log("⚠️", `memory writer returned no JSON ops${text ? `: ${text.slice(0, 120)}` : ""}`);
+  const applied = applyMemoryOps(userId, ops, "auto");
   if (applied.length) log("\u{1F9E0}", `memory updated: ${applied.map(x => x.op).join(",")}`);
   return applied;
 }
@@ -1237,10 +1506,16 @@ function killProc(proc) {
 // Returns the AI session ID reported by the CLI (CC session_id or Codex thread_id).
 async function processTurn(ai, userId, sid, sessionName, body, contextToken, firstTurn, onProc, styleState) {
   const turnStarted = Date.now();
-  const prefix = replyPrefix(sessionName, ai);
   const turnProfile = sessionProfile(styleState);
+  const turnMode = sessionMode(styleState);
+  const prefix = replyPrefix(sessionName, ai, turnMode);
   const replyBudget = chooseReplyBudget(body);
-  const stylePrompt = buildStylePrompt(styleState?._recentKaomoji || [], body, replyBudget);
+  const stylePrompt = buildStylePrompt(
+    styleState?._recentKaomoji || [],
+    body,
+    replyBudget,
+    styleState?._recentRhetoricalPatterns || [],
+  );
   const memoryPrompt = turnProfile && turnProfile !== "默认" ? renderMemoryPrompt(userId) : "";
   log("\u{1F4E4}", `[${ai}] [${sessionName}] ${body.slice(0, 80)}`);
 
@@ -1293,7 +1568,21 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   let newSid = sid;
   let assistantFullText = "";
 
-  if (ai === "codex") {
+  if (turnMode === "chat") {
+    const profile = turnProfile;
+    const useRagChat = RAG_ENABLED && !hasInboundAttachment(body) && profile && profile !== "默认" && profileTemplates[profile];
+    const ragContext = useRagChat ? queryRag(body, profile) : null;
+    const messages = buildChatMessages(body, ragContext, stylePrompt, memoryPrompt, profile, styleState?._chatHistory || [], styleState?._chatSummary || "");
+    writeLog(JSON.stringify({ type: "chat_request", model: CHAT_MODEL || null, messages, timestamp: new Date().toISOString() }));
+    const { text, usage } = await runChatCompletion(sessionName, messages);
+    writeLog(JSON.stringify({ type: "chat_result", usage, timestamp: new Date().toISOString() }));
+    if (usage) writeFmt(`\n[usage] input=${usage.prompt_tokens ?? usage.input_tokens ?? "?"} output=${usage.completion_tokens ?? usage.output_tokens ?? "?"}`);
+    textBuf += text;
+    assistantFullText += text;
+    hasOutput = true;
+    await flush(true, true);
+    appendChatHistory(styleState, body, text);
+  } else if (ai === "codex") {
     // ─── Codex event handling ───
     function handleCodexEvent(evt) {
       writeLog(JSON.stringify(evt));
@@ -1463,7 +1752,10 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   }
 
   writeFmt(`\n=== End ===`);
-  if (styleState && assistantFullText) rememberRecentKaomoji(styleState, assistantFullText);
+  if (styleState && assistantFullText) {
+    rememberRecentKaomoji(styleState, assistantFullText);
+    rememberRecentRhetoricalPatterns(styleState, assistantFullText);
+  }
   try {
     await updateUserMemoryFromTurn(userId, body);
     const notice = memoryMaintenanceNotice(userId, { mark: true });
@@ -1514,7 +1806,7 @@ async function sessionLoop(ai, userId, sessionId) {
       saveSessions();
     } catch (e) {
       log("❌", `[${sess.name}] error: ${e.message}`);
-      await sendMessage(userId, `# ${replyPrefix(sess.name, ai)}\n❌ ${e.message}`, item.ctx);
+      await sendMessage(userId, `# ${replyPrefix(sess.name, ai, sessionMode(sess))}\n❌ ${e.message}`, item.ctx);
     }
     sess._lastEnd = Date.now();
     sess._proc = null;
@@ -1626,7 +1918,8 @@ async function handleMessage(msg) {
   if (!body.trim()) return;
 
   const messageAI = activeAI;
-  const prefix = replyPrefix(activeSession(userId)?.name || "S1", messageAI);
+  const activeSess = activeSession(userId, messageAI);
+  const prefix = replyPrefix(activeSess?.name || "S1", messageAI, sessionMode(activeSess));
   const isCommand = /^\/\S+/.test(body);
   if (isCommand && !/^\/cancel$/.test(body)) {
     flushPendingInput(userId);
@@ -1643,6 +1936,9 @@ async function handleMessage(msg) {
       ``,
       `【线程管理】`,
       `/new [名称]         创建新会话线程`,
+      `/new chat [名称]    创建轻量闲聊线程`,
+      `/new tool [名称]    创建工具调用线程`,
+      `/mode chat|tool     查看或切换当前线程类型`,
       `/rename [序号|名称] <新名称>  重命名线程`,
       `/switch [序号|名称]  切换活跃线程`,
       `/sessions           查看所有线程`,
@@ -1652,6 +1948,7 @@ async function handleMessage(msg) {
       `/memory             查看 memory 统计和每类前 3 条`,
       `/memory all         查看完整 memory`,
       `/memory 性格|偏好|事实 只查看某一类 memory`,
+      `/compact            手动压缩当前 chat 线程的早期历史`,
       `/status             查看当前状态`,
       ``,
       `【角色管理】`,
@@ -1669,6 +1966,24 @@ async function handleMessage(msg) {
   // ── /memory ──
   if (/^\/memory(\s|$)/i.test(body)) {
     await handleMemoryCommand(userId, body, ctx);
+    return;
+  }
+
+  // ── /compact ──
+  if (/^\/compact$/.test(body)) {
+    const sess = activeSession(userId);
+    try {
+      const before = normalizeChatHistory(sess._chatHistory).length;
+      const result = await compactChatSession(sess);
+      saveSessions();
+      if (!result.changed) {
+        await sendMessage(userId, `当前 chat 历史还不长，暂时不需要压缩。`, ctx);
+      } else {
+        await sendMessage(userId, `✅ 已压缩当前 chat 线程\n原历史消息: ${before}\n保留最近消息: ${result.keptMessages}\n摘要长度: ${result.summaryChars} 字`, ctx);
+      }
+    } catch (e) {
+      await sendMessage(userId, `⚠️ 压缩失败: ${e.message}`, ctx);
+    }
     return;
   }
 
@@ -1692,18 +2007,25 @@ async function handleMessage(msg) {
 
   // ── /new ──
   if (/^\/new(\s|$)/.test(body)) {
-    const name = body.slice(5).trim() || nextSessionName(userId, messageAI);
+    let rest = body.slice(5).trim();
+    let requestedMode = null;
+    const modeMatch = rest.match(/^(chat|tool|tools|agent|闲聊|工具)(?:\s+|$)([\s\S]*)$/i);
+    if (modeMatch) {
+      requestedMode = normalizeSessionMode(modeMatch[1]);
+      rest = modeMatch[2].trim();
+    }
+    const name = rest || nextSessionName(userId, messageAI);
     if (hasSessionName(userId, name, null, messageAI)) {
       await sendMessage(userId, `⚠️ 线程名 "${name}" 已存在，请换一个名称`, ctx);
       return;
     }
     const boundProfile = name === "默认" ? null : (profileTemplates[name] && name !== "默认" ? name : null);
-    const id = uuid();
     const u = ensureUser(userId);
-    u.list.push({ id, name, busy: false, queue: [], _closing: false, _lastEnd: 0, sid: uuid(), _firstTurn: true, _recentKaomoji: [], _kaomojiTurn: 0, _profile: boundProfile });
-    u.activeId = id;
+    const sess = makeSession(name, boundProfile, requestedMode, messageAI);
+    u.list.push(sess);
+    u.activeId = sess.id;
     saveSessions();
-    await sendMessage(userId, `✅ 新线程: ${name}${boundProfile ? `（角色: ${boundProfile}）` : ""}`, ctx);
+    await sendMessage(userId, `✅ 新线程: ${name}\n类型: ${sessionModeLabel(sessionMode(sess))}${boundProfile ? `\n角色: ${boundProfile}` : ""}`, ctx);
     return;
   }
 
@@ -1715,7 +2037,35 @@ async function handleMessage(msg) {
     if (!sess) { await sendMessage(userId, `⚠️ 未找到 "${key}"\n${sessionsListText(userId)}`, ctx); return; }
     ensureUser(userId).activeId = sess.id;
     saveSessions();
-    await sendMessage(userId, `✅ 已切换: ${sess.name}`, ctx);
+    await sendMessage(userId, `✅ 已切换: ${sess.name}\n类型: ${sessionModeLabel(sessionMode(sess))}`, ctx);
+    return;
+  }
+
+  // ── /mode ──
+  if (/^\/mode(\s|$)/.test(body)) {
+    const rest = body.slice(6).trim();
+    const sess = activeSession(userId);
+    if (!rest) {
+      await sendMessage(userId, `当前线程: ${sess.name}\n类型: ${sessionModeLabel(sessionMode(sess))}\n\n/mode chat 切到轻量闲聊\n/mode tool 切到工具调用`, ctx);
+      return;
+    }
+    const nextMode = parseSessionMode(rest);
+    if (!nextMode) {
+      await sendMessage(userId, "用法: /mode chat 或 /mode tool", ctx);
+      return;
+    }
+    if (sess.busy) {
+      await sendMessage(userId, `⚠️ ${sess.name} 正在运行，请等任务完成后再切换类型`, ctx);
+      return;
+    }
+    const prevMode = sessionMode(sess);
+    sess._mode = nextMode;
+    if (prevMode === "chat" && nextMode === "tool") {
+      sess.sid = uuid();
+      sess._firstTurn = true;
+    }
+    saveSessions();
+    await sendMessage(userId, `✅ 当前线程类型: ${sessionModeLabel(nextMode)}${nextMode === "chat" && !hasChatConfig() ? "\n提示：chat backend 还没配置，回复会提示填写 chat.baseUrl/apiKey/model。" : ""}`, ctx);
     return;
   }
 
@@ -1825,6 +2175,7 @@ async function handleMessage(msg) {
       const current = [
         `AI: ${aiLabel}`,
         `线程: ${sess.name}`,
+        `类型: ${sessionModeLabel(sessionMode(sess))}`,
         `角色: ${cur || "默认"}`,
       ].join("\n");
       await sendMessage(userId, `${current}\n\n模板:\n${list}\n\n/profile add 名字 | 提示词\n/profile delete 名字\n/profile 名字 切换`, ctx);
@@ -1850,7 +2201,7 @@ async function handleMessage(msg) {
     }
     sess._profile = rest;
     saveSessions();
-    await sendMessage(userId, `✅ 当前线程已绑定角色: ${rest}${sess._firstTurn ? "" : "\n提示：这个线程已有历史上下文；如果仍有旧口吻残留，请用 /new " + rest + " 新开线程。"}`, ctx);
+    await sendMessage(userId, `✅ 当前线程已绑定角色: ${rest}\n类型: ${sessionModeLabel(sessionMode(sess))}${sess._firstTurn ? "" : "\n提示：这个线程已有历史上下文；如果仍有旧口吻残留，请用 /new " + rest + " 新开线程。"}`, ctx);
     return;
   }
 
@@ -1886,9 +2237,9 @@ async function handleMessage(msg) {
     let autoCreated = null;
     if (u.list.length === 0) {
       const newName = nextSessionName(userId);
-      const id = uuid();
-      u.list.push({ id, name: newName, busy: false, queue: [], _closing: false, _lastEnd: 0, sid: uuid(), _firstTurn: true, _recentKaomoji: [], _profile: null });
-      u.activeId = id;
+      const newSess = makeSession(newName, null, "tool", messageAI);
+      u.list.push(newSess);
+      u.activeId = newSess.id;
       autoCreated = newName;
     } else if (u.activeId === target.id) {
       // Switch to the thread before the closed one, or the first one
@@ -1917,17 +2268,22 @@ async function handleMessage(msg) {
     const otherCount = otherMap ? Array.from(otherMap.values()).reduce((s, u) => s + u.list.length, 0) : 0;
     const profile = sessionProfile(sess);
     const status = sess.busy ? "⏳ 运行中" : sess.queue.length ? `排队 ${sess.queue.length}` : "空闲";
+    const chatHistoryInfo = sessionMode(sess) === "chat"
+      ? `历史:   ${normalizeChatHistory(sess._chatHistory).length} 条${sess._chatSummary ? `，摘要 ${sess._chatSummary.length} 字` : ""}`
+      : null;
     await sendMessage(userId, [
       `# 状态`,
       ``,
       `AI:     ${activeAI === "cc" ? "Claude Code" : "Codex"}  (${modelNames[activeAI]})`,
       `会话:   [${idx}] ${sess.name}`,
+      `类型:   ${sessionModeLabel(sessionMode(sess))}`,
       `角色:   ${profile || "默认"}`,
       `状态:   ${status}`,
-      `SID:    ${sess.sid}`,
+      sessionMode(sess) === "chat" ? `Chat:   ${CHAT_MODEL || "未配置"}` : `SID:    ${sess.sid}`,
+      chatHistoryInfo,
       ``,
       `${activeAI === "cc" ? "CC" : "Codex"} 线程数: ${u.list.length}  |  ${activeAI === "cc" ? "Codex" : "CC"} 线程数: ${otherCount}`,
-    ].join("\n"), ctx);
+    ].filter(line => line !== null).join("\n"), ctx);
     return;
   }
 

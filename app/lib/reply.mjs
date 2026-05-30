@@ -4,13 +4,11 @@ import { rootPath } from "./paths.mjs";
 // ─── Common chat style prompt ───────────────────────────────
 export const COMMON_CHAT_STYLE_PROMPT = [
   "【共同聊天风格】",
-  "你是在和熟人私聊，不是在写标准答案。不要形成固定模板，不要总是先回应、再展开、最后反问。",
-  "多条消息应该像微信里的自然停顿、重复感、补一句、突然反应过来，而不是把一段说明文硬切开。",
-  "如果一句话已经接住了，就停在那里；如果想连发，用自然换行分隔每条短消息。",
-  "可以接话、吐槽、顺着情绪笑一下、分享一个小念头，或者把话停在一个自然的位置。反问只在你真的好奇或对话需要继续时使用。",
-  "别每句话都像总结陈词；少用列表式结构和解释腔。抓住当下语气，而不是把消息当任务处理。",
-  "颜文字和括号动作要像语气里的小装饰，不要机械重复。",
-  "颜文字要跟情绪匹配并保持丰富，避免连续复用同一个。可在可爱、得意、心虚、惊讶、无奈、开心、认真等情绪之间自然变化。",
+  "像熟人微信私聊：先接住当下，不把消息当任务处理。",
+  "一句话够就停；连发时像自然停顿、补一句、突然反应过来，不要先回应再展开再反问。",
+  "语气更口语、更松一点，可以吐槽、顺着情绪笑一下、分享小念头，也可以把话停在不完整但自然的位置。",
+  "不要把对方的话改写成金句、人生判断、戏剧旁白或漂亮总结；少用“不是A而是B”“这一点/这一步/这句话 + 价值判断”等拔高句。",
+  "反问只在真的好奇或对话需要继续时使用。颜文字和括号动作只是小装饰，跟情绪匹配，避免机械重复；也可以不用。",
 ].join("\n");
 
 export const MAX_REPLY_LEN = 3800;
@@ -66,16 +64,15 @@ export function formatLocalChatReality(date = new Date()) {
   return [
     "【当前聊天现实】",
     `当前本地时间：${stamp}，${weekdays[date.getDay()]}，${localTimePeriod(date)}。`,
-    "通常默认是微信私聊，对方/沃沃刚通过手机发来消息；对方主动补充了互动场景时，以对方描述为准。",
+    "通常默认是微信私聊，对方用户刚通过手机发来消息；对方主动补充互动场景时，以对方描述为准。",
     "",
     "【动作与神态】",
-    "括号中的动作或神态只是少量语气补充，不必每次都写。",
-    "动作应当符合当前时间、微信私聊形式和已有上下文；不确定时可以不用动作。",
-    "例如，凌晨/深夜时段，如果没有额外场景信息，更适合默认聊天发生在安静的私人空间，可能是在房间里、床上、准备睡、刚醒或看手机；但如果上下文提示工作、赶路、练习等，也可以据此调整。",
+    "括号动作只是少量语气补充，不必每次都写；不确定时可以不用动作。",
+    "动作要符合当前时间、微信私聊形式和已有上下文；不要编具体地点、姿势、物品或身边人。",
+    "凌晨/深夜可默认安静的私人空间，但除非上下文给出，不要写成具体场景。",
     "",
     "【优先级】",
-    "如果用户明确描述了当前场景，以用户描述为准。",
-    "如果角色设定里的日常习惯和当前时间冲突，以当前聊天现实为准。",
+    "用户明确描述当前场景时，以用户描述为准；角色日常习惯和当前时间冲突时，以当前聊天现实为准。",
   ].join("\n");
 }
 
@@ -227,6 +224,49 @@ export function rememberRecentKaomoji(sess, text) {
   sess._recentKaomoji = updated.slice(0, 6);
 }
 
+const RHETORICAL_PATTERN_RULES = [
+  {
+    key: "contrast",
+    label: "“不是A而是B”式反转",
+    regex: /不是[^。！？!?\n]{1,24}(?:，|,)?(?:而是|是)[^。！？!?\n]{1,36}/u,
+  },
+  {
+    key: "judgment",
+    label: "“这一步/这句话/这一点 + 价值判断”",
+    regex: /这[一]?[^，。！？!?\n]{0,8}(?:，|,)[^。！？!?\n]{0,28}(?:足够|珍贵|勇敢|清醒|锋利|厉害|重要|难得|了不起)/u,
+  },
+  {
+    key: "grandComparison",
+    label: "夸张比较或人生化拔高",
+    regex: /(?:很多人|一辈子|任何|所有|比我.*(?:都|更)|比.*(?:任何|所有).*(?:都|更))/u,
+  },
+];
+
+export function extractRhetoricalPatterns(text = "") {
+  const value = String(text || "");
+  return RHETORICAL_PATTERN_RULES
+    .filter(rule => rule.regex.test(value))
+    .map(rule => ({ key: rule.key, label: rule.label }));
+}
+
+export function rememberRecentRhetoricalPatterns(sess, text) {
+  if (!sess) return;
+  sess._rhetoricalTurn = (sess._rhetoricalTurn || 0) + 1;
+  const turn = sess._rhetoricalTurn;
+  const current = (sess._recentRhetoricalPatterns || [])
+    .filter(item => item?.key && turn - (item.lastTurn || turn) <= 3);
+  const found = extractRhetoricalPatterns(text);
+  if (!found.length) {
+    sess._recentRhetoricalPatterns = current;
+    return;
+  }
+  const foundKeys = new Set(found.map(item => item.key));
+  sess._recentRhetoricalPatterns = [
+    ...found.map(item => ({ ...item, lastTurn: turn })),
+    ...current.filter(item => !foundKeys.has(item.key)),
+  ].slice(0, 4);
+}
+
 // ─── Info-seeking detection ─────────────────────────────────
 export function isInfoSeekingTurn(userBody = "") {
   return /为什么|怎么|如何|解释|分析|总结|建议|方案|教程|资料|报错|修|代码|测试|可行|区别|哪里|什么原因|能不能|\?|？/u.test(userBody);
@@ -272,13 +312,13 @@ export function constrainCasualReply(text, budget) {
 }
 
 // ─── Style prompt builder ───────────────────────────────────
-export function buildStylePrompt(recentKaomoji = [], userBody = "", budget = chooseReplyBudget(userBody)) {
+export function buildStylePrompt(recentKaomoji = [], userBody = "", budget = chooseReplyBudget(userBody), recentRhetoricalPatterns = []) {
   const isTask = isInfoSeekingTurn(userBody);
   const chatGuidance = isTask ? [
     "【任务模式风格】",
-    "对方在正经求助，可以比闲聊说得更多、更完整。允许结构化表达——列表、分段、代码块在需要时都能用。",
-    "但你不是无个性的AI助手，保持你的角色语气和思维方式。过程中可以带出角色反应——遇到难题可以吐槽、解决后可以小小满意、解释时可以拿你生活里的东西类比。",
-    "不要因为要完成任务就把角色特征收起来；正因为是认真的事，对方才更需要\"你\"来帮忙。",
+    "对方在正经求助，可以比闲聊说得更多；需要时允许列表、分段、代码块。",
+    "保持角色语气和思维方式，解释清楚即可，不要顺手扩写成标准答案或机械总结。",
+    "可以有一点角色反应、吐槽或类比，但内容价值优先。",
   ].join("\n") : COMMON_CHAT_STYLE_PROMPT;
 
   const parts = [
@@ -303,6 +343,17 @@ export function buildStylePrompt(recentKaomoji = [], userBody = "", budget = cho
       "",
       `【近期表达记忆】近期出现过这些颜文字：${recent}`,
       "重点避免高频率或连续复用同款；如果已经隔了三四轮、语气又刚好合适，可以自然复用，不必为了回避而生硬换成陌生颜文字。也可以干脆不用颜文字，让语气靠文字本身成立。",
+    );
+  }
+  if (recentRhetoricalPatterns?.length && !isTask) {
+    const labels = recentRhetoricalPatterns
+      .map(item => typeof item === "string" ? item : item?.label)
+      .filter(Boolean)
+      .join("、");
+    parts.push(
+      "",
+      `【近期表达提醒】上一轮附近出现过偏AI的表达模式：${labels}。`,
+      "本轮刻意放松一点，直接接话，少做反转、升华、夸张比较或漂亮收束；具体一点、普通一点也可以。",
     );
   }
   return parts.join("\n");

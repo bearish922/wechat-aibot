@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { splitText, hasInboundAttachment, isInfoSeekingTurn, chooseReplyBudget, constrainCasualReply, isStructuredReply, splitSocialReply, localTimePeriod, formatLocalChatReality, buildStylePrompt, normalizeTerminology, terminologyPrompt, loadTerminologyConfig, expressionCapabilityPrompt } from "../lib/reply.mjs";
+import { splitText, hasInboundAttachment, isInfoSeekingTurn, chooseReplyBudget, constrainCasualReply, isStructuredReply, splitSocialReply, localTimePeriod, formatLocalChatReality, buildStylePrompt, normalizeTerminology, terminologyPrompt, loadTerminologyConfig, expressionCapabilityPrompt, extractRhetoricalPatterns, rememberRecentRhetoricalPatterns } from "../lib/reply.mjs";
 
 describe("splitText", () => {
   it("returns single element for short text", () => {
@@ -100,6 +100,23 @@ describe("expression capability", () => {
     const text = buildStylePrompt([], "哈哈[旺柴]", { instruction: "短", maxChars: 20, maxParts: 1, enforce: true });
     assert.match(text, /【表情能力】/u);
     assert.match(text, /不能主动发送微信内置表情包占位文本/u);
+  });
+});
+
+describe("rhetorical pattern memory", () => {
+  it("detects AI-sounding rhetorical patterns", () => {
+    const patterns = extractRhetoricalPatterns("这一步，很多人一辈子迈不出来。不是逃避，而是清醒。");
+    assert.ok(patterns.some(item => item.key === "contrast"));
+    assert.ok(patterns.some(item => item.key === "grandComparison"));
+  });
+
+  it("adds a temporary reminder only for casual replies", () => {
+    const sess = {};
+    rememberRecentRhetoricalPatterns(sess, "这一点，足够珍贵。");
+    const casual = buildStylePrompt([], "嗯嗯", { instruction: "短", maxChars: 20, maxParts: 1, enforce: true }, sess._recentRhetoricalPatterns);
+    const task = buildStylePrompt([], "怎么修这个报错？", { instruction: "正常说明", maxChars: 220, maxParts: 2, enforce: false }, sess._recentRhetoricalPatterns);
+    assert.match(casual, /【近期表达提醒】/u);
+    assert.doesNotMatch(task, /【近期表达提醒】/u);
   });
 });
 

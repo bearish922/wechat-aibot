@@ -267,32 +267,93 @@ export function shouldRunMemoryWriter(text = "") {
   return !/^\/\S+/.test(value);
 }
 
-export function buildMemoryWriterPrompt(userText, currentPrompt) {
+function memoryWriterInstructionLines(currentPrompt) {
   return [
     "你是一个独立的长期记忆写入器，只判断用户消息是否包含值得长期保存的用户信息。",
-    "你的输出会直接写入正式 memory；不确定、价值不高或只是闲聊时必须输出 noop。",
-    "只记录长期稳定且跨对话有用的信息，类别只能是 trait、preference、fact。",
-    "trait 是世界观、价值观、稳定性格；preference 是明确个人喜好；fact 是用户长期事实。",
-    "用户正在长期学习、练习或培养的技能、乐器、运动、创作习惯，通常记为 fact；如果明确表达喜欢或偏爱，记为 preference。",
-    "不要记录一次性事件、当天状态、闲聊细节、玩笑、角色扮演设定、未经明确表达的推断。",
+    "你的输出会直接写入正式 memory；要像审慎的人类助手一样判断，而不是机械地一律 noop。",
+    "只记录长期稳定且跨对话有用的信息，类别只能是 trait、preference、fact；每条都要简洁、可复用、避免聊天记录腔。",
+    "trait 是世界观、价值观、稳定性格和用户自述的长期特质；preference 是明确个人喜好、互动偏好和表达偏好；fact 是用户长期事实或当前较长期的人生阶段。",
+    "以下通常值得记录：宠物/长期陪伴对象的名字和稳定特点；用户明确说出的长期兴趣和习惯；用户正在长期学习、练习或培养的技能、乐器、运动、创作习惯；用户自述的稳定性格或情绪模式；用户对回复方式的长期偏好；当前正在持续的实习、转正、求职、学习、项目等阶段。",
+    "写入时优先抽象成耐用表述：例如“用户目前处在实习、转正、求职相关阶段”，不要写成过细的当天事件；例如“用户不希望每次回复都被夸奖”，不要写成一次对话里的玩笑。",
+    "如果同一条消息同时包含短期闲聊和明确的稳定信息，只抽取稳定信息写入，不要因为有短期内容就整体 noop。",
+    "从工作变动、被评价、被筛选等事件中，只记录用户当前阶段；不要推断用户能力、性格缺陷、岗位适配性或他人对用户的评价，除非用户明确说这是自己的长期偏好或自我认知。",
+    "以下通常不要记录：一次性事件、当天状态、饭点/天气/通勤/犯困等短期细节、闲聊玩笑、角色扮演设定、未经明确表达的推断、单次歌曲/作品即时反应、只对当天有用的计划。",
     "健康、政治、宗教、性取向、财务、精确住址、亲密关系等敏感或私密内容如果确实需要记录，必须 sensitive: true。",
-    "如与已有记忆重复，输出 update；如用户否定旧记忆，输出 delete 或 update。",
+    "如与已有记忆重复或可合并，输出 update 或 noop，避免制造重复条目；如用户否定旧记忆，输出 delete 或 update。",
     "只输出 JSON，不要解释。格式：{\"ops\":[{\"op\":\"add|update|delete|noop\",\"category\":\"trait|preference|fact\",\"text\":\"简洁中文记忆\",\"sensitive\":false,\"id\":\"可选\"}]}",
+    "",
+    "判断样例：",
+    "用户消息：叫盼盼！",
+    "输出：{\"ops\":[{\"op\":\"add\",\"category\":\"fact\",\"text\":\"用户有一只猫，名叫盼盼\",\"sensitive\":false}]}",
+    "用户消息：盼盼是一只很亲人，但是胆子不大的小猫咪",
+    "输出：{\"ops\":[{\"op\":\"add\",\"category\":\"fact\",\"text\":\"用户的猫盼盼很亲人但胆子不大\",\"sensitive\":false}]}",
+    "用户消息：你不用每次都夸我啦",
+    "输出：{\"ops\":[{\"op\":\"add\",\"category\":\"preference\",\"text\":\"用户不希望每次回复都被夸奖，夸奖应更克制自然\",\"sensitive\":false}]}",
+    "用户消息：我是一个情绪调节能力很强，情绪非常稳定的人",
+    "输出：{\"ops\":[{\"op\":\"add\",\"category\":\"trait\",\"text\":\"用户自认情绪调节能力强且情绪稳定\",\"sensitive\":false}]}",
+    "用户消息：我已经好多了，我是一个情绪调节能力很强，情绪非常稳定的人，盼盼一直在",
+    "输出：{\"ops\":[{\"op\":\"add\",\"category\":\"trait\",\"text\":\"用户自认情绪调节能力强且情绪稳定\",\"sensitive\":false}]}",
+    "用户消息：又要重新开始找实习找工作了",
+    "输出：{\"ops\":[{\"op\":\"add\",\"category\":\"fact\",\"text\":\"用户目前处在实习、转正、求职相关阶段\",\"sensitive\":false}]}",
+    "用户消息：因为岗位不适合被裁了，又要重新开始找实习找工作",
+    "输出：{\"ops\":[{\"op\":\"add\",\"category\":\"fact\",\"text\":\"用户目前处在实习、转正、求职相关阶段\",\"sensitive\":false}]}",
+    "用户消息：我真的很喜欢这首！配合小彩的可爱舞蹈是绝佳",
+    "输出：{\"ops\":[{\"op\":\"noop\"}]}",
     "",
     "现有记忆：",
     currentPrompt || "无",
+  ];
+}
+
+export function buildMemoryWriterSystemPrompt(currentPrompt) {
+  return memoryWriterInstructionLines(currentPrompt).join("\n");
+}
+
+export function buildMemoryWriterPrompt(userText, currentPrompt) {
+  return [
+    ...memoryWriterInstructionLines(currentPrompt),
     "",
     "用户消息：",
     userText,
   ].join("\n");
 }
 
+function firstJsonObject(raw) {
+  const start = raw.indexOf("{");
+  if (start < 0) return "";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === "\"") {
+      inString = true;
+    } else if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) return raw.slice(start, i + 1);
+    }
+  }
+  return "";
+}
+
 export function parseMemoryWriterOutput(text = "") {
   const raw = String(text).trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return [];
+  const jsonText = firstJsonObject(raw);
+  if (!jsonText) return [];
   try {
-    const data = JSON.parse(match[0]);
+    const data = JSON.parse(jsonText);
     return Array.isArray(data.ops) ? data.ops : [];
   } catch {
     return [];

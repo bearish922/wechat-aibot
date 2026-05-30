@@ -1,7 +1,16 @@
 # Changelog
 
 ## Unreleased
-- Add prompt guidance so role replies do not actively send WeChat built-in emoji placeholders such as `[旺柴]`
+
+## v2.2.0 — Chat and Tool Session Split (2026-05-31)
+- Add per-session `chat` / `tool` modes. Tool sessions keep using Claude Code/Codex resume for project work, while chat sessions use a lightweight OpenAI-compatible Chat Completions backend.
+- Show the session mode in WeChat reply headers, `/sessions`, `/status`, and the local GUI Sessions page.
+- Add `/new chat`, `/new tool`, and `/mode chat|tool` commands; existing `cc` sessions named `cst`, `anon`, `soyo`, and `aya` migrate to chat mode, while other sessions stay in tool mode.
+- Preserve full chat history by default and add manual `/compact` for chat sessions, storing an early-history summary while keeping recent turns.
+- Seed migrated chat sessions from existing readable logs so role conversations can continue after configuring the chat API.
+- Add `chat.*` GUI/config fields for OpenAI-compatible chat API settings and compact behavior.
+- Prevent image/video prompts from encouraging Claude Code to read local media files as base64 when an external visual description is already available.
+- Add prompt guidance so role replies do not actively send WeChat built-in emoji placeholders such as `[旺柴]`.
 
 ## v2.1.1 — Memory and Chat Polish (2026-05-28)
 - Change `/memory` into a summary view with per-category counts and up to 3 sample items; add `/memory all` and `/memory 性格|偏好|事实` category views
