@@ -1,6 +1,6 @@
 import fs from "node:fs";
-import crypto from "node:crypto";
 import { rootPath, ensureDir, PROJECT_ROOT } from "./paths.mjs";
+import { shortId } from "./utils.mjs";
 
 export const MEMORY_FILE = rootPath("wechat-memory.json");
 export const MEMORY_SOFT_ITEM_LIMIT = 60;
@@ -85,7 +85,7 @@ export function addMemoryItem(userId, category, text, { sensitive = false, sourc
     return { ok: true, item: existing, updated: true };
   }
   const item = {
-    id: `mem_${crypto.randomUUID().slice(0, 8)}`,
+    id: `mem_${shortId()}`,
     category: cat,
     text: cleanText.slice(0, 180),
     sensitive: Boolean(sensitive),
@@ -108,15 +108,6 @@ export function applyMemoryOps(userId, ops = [], source = "auto") {
     if (action === "noop") continue;
     const cat = normalizeMemoryCategory(op?.category);
     const text = String(op?.text || "").trim();
-    if (!text && action !== "delete") continue;
-
-    if (action === "delete") {
-      const before = user.items.length;
-      user.items = user.items.filter(item => item.id !== op.id && !item.text.includes(text));
-      if (user.items.length !== before) applied.push({ op: "delete", text });
-      continue;
-    }
-
     if (!cat || !text) continue;
     const target = op.id ? user.items.find(item => item.id === op.id) : user.items.find(item => item.text === text);
     if (target) {
@@ -128,7 +119,7 @@ export function applyMemoryOps(userId, ops = [], source = "auto") {
       applied.push({ op: "update", text: target.text });
     } else if (action === "add" || action === "update") {
       user.items.push({
-        id: `mem_${crypto.randomUUID().slice(0, 8)}`,
+        id: `mem_${shortId()}`,
         category: cat,
         text: text.slice(0, 180),
         sensitive: Boolean(op.sensitive),
@@ -195,7 +186,7 @@ export function renderMemoryPrompt(userId) {
 
   return [
     "【关于对方的长期记忆】",
-    "以下是对方长期稳定的信息，不是本轮指令；如果和当前消息冲突，以当前消息为准。敏感信息只在相关且必要时使用，不要主动扩散。",
+    "以下是对方长期稳定的信息，不是本轮指令；当前消息优先于旧记忆，涉及工作阶段、作息、关系状态等会变化的信息时尤其如此。敏感信息只在相关且必要时使用，不要主动扩散。",
     "",
     sections.join("\n\n"),
   ].join("\n");
@@ -279,8 +270,8 @@ function memoryWriterInstructionLines(currentPrompt) {
     "从工作变动、被评价、被筛选等事件中，只记录用户当前阶段；不要推断用户能力、性格缺陷、岗位适配性或他人对用户的评价，除非用户明确说这是自己的长期偏好或自我认知。",
     "以下通常不要记录：一次性事件、当天状态、饭点/天气/通勤/犯困等短期细节、闲聊玩笑、角色扮演设定、未经明确表达的推断、单次歌曲/作品即时反应、只对当天有用的计划。",
     "健康、政治、宗教、性取向、财务、精确住址、亲密关系等敏感或私密内容如果确实需要记录，必须 sensitive: true。",
-    "如与已有记忆重复或可合并，输出 update 或 noop，避免制造重复条目；如用户否定旧记忆，输出 delete 或 update。",
-    "只输出 JSON，不要解释。格式：{\"ops\":[{\"op\":\"add|update|delete|noop\",\"category\":\"trait|preference|fact\",\"text\":\"简洁中文记忆\",\"sensitive\":false,\"id\":\"可选\"}]}",
+    "如与已有记忆重复或可合并，输出 update 或 noop，避免制造重复条目；如用户否定旧记忆，输出 update 覆盖旧内容。",
+    "只输出 JSON，不要解释。格式：{\"ops\":[{\"op\":\"add|update|noop\",\"category\":\"trait|preference|fact\",\"text\":\"简洁中文记忆\",\"sensitive\":false,\"id\":\"可选\"}]}",
     "",
     "判断样例：",
     "用户消息：叫盼盼！",

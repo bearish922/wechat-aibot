@@ -12,7 +12,7 @@ WeChat AI Bot 监听微信消息，将文字、图片、语音、文件、视频
 - **Chat / Tool 会话分流**：工具线程继续使用 Claude Code/Codex 执行项目任务；轻量聊天线程使用 OpenAI-compatible Chat Completions API，避免长闲聊反复恢复工具上下文。
 - **多线程会话**：支持创建、切换、重命名、关闭线程，线程类型和状态会写入本地文件，重启后可恢复。
 - **角色扮演**：从 `wechat-profiles.json` 加载角色模板，内置长崎素世、千早爱音、丸山彩、白鹭千圣等 BangDream 角色设定。
-- **回复风格控制**：通过长度预算、场景判断和近期颜文字记忆，让闲聊更短、更像微信私聊，任务回复仍可结构化。
+- **回复风格控制**：通过长度预算、场景判断、近期表达提醒和发送前改写，让闲聊更短、更像微信私聊，任务回复仍可结构化。
 - **多媒体理解**：可保存并处理图片、语音、文件、视频；图片和视频首帧可接入 OpenAI-compatible 视觉模型生成中文描述。
 - **长期记忆**：从 `wechat-memory.json` 读取结构化用户记忆，非默认角色线程会自动注入相关上下文。
 - **本地知识库**：`data/knowledge/` 目录中的 Markdown 会被构建为本地 Qdrant 向量索引，角色线程查询时可自动锚定角色名。
@@ -85,7 +85,10 @@ launch.bat
     "temperature": 0.8,
     "maxTokens": 800,
     "timeoutMs": 120000,
-    "compactKeepTurns": 6
+    "compactKeepTurns": 6,
+    "compactTimeoutMs": 240000,
+    "compactMaxTokens": 0,
+    "compactMessageMaxChars": 1800
   },
   "rag": {
     "enabled": true,
@@ -121,7 +124,10 @@ launch.bat
 | `vision.apiKey` | 空值，不调用外部视觉 API | AI 后端本身不支持视觉，但你希望它能看图/看视频首帧时 |
 | `vision.baseUrl` / `vision.model` | 默认 SiliconFlow + Qwen vision 模型 | 使用其他 OpenAI-compatible 视觉服务时 |
 | `chat.baseUrl` / `chat.apiKey` / `chat.model` | 空值，chat 线程会提示未配置 | 想用轻量聊天线程承接长时间角色闲聊时 |
-| `chat.compactKeepTurns` | 6 | `/compact` 后保留最近多少轮完整对话 |
+| `chat.compactKeepTurns` | 6 | `/summary` 后保留最近多少轮完整对话 |
+| `chat.compactTimeoutMs` | 240000 | `/summary` 摘要生成需要更长等待时间时 |
+| `chat.compactMaxTokens` | 0，不单独限制 | 想给摘要生成设置独立 `max_tokens` 上限时 |
+| `chat.compactMessageMaxChars` | 1800 | 历史单条消息很长，想限制送入摘要的单条长度时 |
 | `rag.knowledgeDir` | 使用项目内 `data/knowledge/` | 想换成自己的 Markdown 知识库目录时 |
 | `paths.workDir` | 当前 Windows 用户目录 | 希望 Claude/Codex 在指定项目目录或工作区运行时 |
 
@@ -157,7 +163,7 @@ codex
 线程有两种类型：
 
 - `tool`：继续调用 Claude Code 或 Codex，适合查项目、改文件、运行命令、推送代码等工作。
-- `chat`：调用 `chat.*` 中配置的 OpenAI-compatible Chat Completions API，适合长期角色闲聊。chat 线程默认保留完整对话历史，不自动截断。
+- `chat`：调用 `chat.*` 中配置的 OpenAI-compatible Chat Completions API，适合长期角色闲聊。chat 线程默认保留完整对话历史，不自动截断；只有明确问角色设定、剧情资料、作品信息等内容时才触发知识库检索。
 
 默认迁移规则：Claude Code 下名为 `cst`、`anon`、`soyo`、`aya` 的线程会作为 chat 线程，其它线程保持 tool。你也可以手动创建或切换：
 
@@ -168,7 +174,9 @@ codex
 /mode tool
 ```
 
-如果 chat 线程历史过长，可以手动发送 `/compact`。它会调用同一个 chat API 将早期历史压缩成摘要，并保留最近 `chat.compactKeepTurns` 轮完整对话。
+如果 chat 线程历史过长，可以手动发送 `/summary`。它会调用同一个 chat API 将早期历史压缩成一份较完整的历史摘要，并保留最近 `chat.compactKeepTurns` 轮完整对话。摘要会带入原消息时间戳，生成失败时会重试一次；旧摘要会保留最近 5 份备份，方便排查。
+
+chat 回复发送前还会做一次轻量检查：如果命中“裁判腔”、升华收束、漂亮反转、夸张比较、连续反问或括号动作过密等模式，会先要求 chat 后端改写成更自然的微信接话，再按本轮长度预算做收束。
 
 ### 代理、自定义知识库和工作目录
 
@@ -217,7 +225,7 @@ scripts\rebuild-rag.bat
 | `/memory` | 查看长期记忆统计和每类前 3 条 |
 | `/memory all` | 查看完整长期记忆 |
 | `/memory 性格` / `/memory 偏好` / `/memory 事实` | 只查看某一类长期记忆 |
-| `/compact` | 手动压缩当前 chat 线程的早期历史 |
+| `/summary` | 手动压缩当前 chat 线程的早期历史 |
 | `/cleanup media` | 查看媒体文件统计 |
 | `/cleanup media <天数>` | 查看超过指定天数的媒体文件 |
 | `/cleanup media confirm <天数>` | 删除超过指定天数的媒体文件 |
@@ -244,7 +252,7 @@ scripts\rebuild-rag.bat
 
 长期记忆保存在根目录 `wechat-memory.json`，用于记录用户长期稳定的信息。默认只注入到非默认角色线程；默认角色不使用这份记忆。
 
-记忆分为三类：`trait`（性格/价值观）、`preference`（偏好）、`fact`（事实）。敏感或私密信息会用 `sensitive: true` 标记，注入时提示 AI 只在相关且必要时使用。自动写入器会在普通用户消息后让 AI 判断是否值得记忆，并直接更新正式 `wechat-memory.json`；不确定或只是闲聊时会输出 `noop`。长期学习、练习或培养的技能、乐器、运动、创作习惯通常会作为长期事实候选。
+记忆分为三类：`trait`（性格/价值观）、`preference`（偏好）、`fact`（事实）。敏感或私密信息会用 `sensitive: true` 标记，注入时提示 AI 只在相关且必要时使用；当前消息会优先于旧记忆，尤其是工作阶段、作息、关系状态等可能变化的信息。自动写入器会在普通用户消息后让 AI 判断是否值得记忆，并直接更新正式 `wechat-memory.json`；不确定或只是闲聊时会输出 `noop`，否定旧记忆时会用 `update` 覆盖旧内容。长期学习、练习或培养的技能、乐器、运动、创作习惯通常会作为长期事实候选。
 
 系统不会硬性截断 memory；当单个用户的记忆超过约 60 条，或注入上下文超过约 800-1200 字时，会发消息提醒你手动整理。
 

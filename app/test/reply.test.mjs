@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { splitText, hasInboundAttachment, isInfoSeekingTurn, isCasualQuestionTurn, chooseReplyBudget, constrainCasualReply, needsReplyCondense, isStructuredReply, splitSocialReply, localTimePeriod, formatLocalChatReality, buildStylePrompt, normalizeTerminology, terminologyPrompt, loadTerminologyConfig, expressionCapabilityPrompt, extractRhetoricalPatterns, rememberRecentRhetoricalPatterns } from "../lib/reply.mjs";
+import { splitText, hasInboundAttachment, isInfoSeekingTurn, isCasualQuestionTurn, chooseReplyBudget, constrainCasualReply, needsReplyCondense, needsDeAiRewrite, detectAiStyleIssues, isStructuredReply, splitSocialReply, localTimePeriod, formatLocalChatReality, buildStylePrompt, normalizeTerminology, terminologyPrompt, loadTerminologyConfig, expressionCapabilityPrompt, extractRhetoricalPatterns, rememberRecentRhetoricalPatterns } from "../lib/reply.mjs";
 
 describe("splitText", () => {
   it("returns single element for short text", () => {
@@ -31,6 +31,10 @@ describe("isInfoSeekingTurn", () => {
     assert.equal(isInfoSeekingTurn("小千圣呀，你周日准备怎么度过呢？"), false);
     assert.equal(isInfoSeekingTurn("我不说，你可以猜猜她们写了什么，猜猜我的感觉？"), false);
     assert.equal(isInfoSeekingTurn("[引用: 不过你说\"实在太明显\"——对谁明显？]\n是在夸你哦"), false);
+  });
+  it("treats chat mode as casual unless it is a hard task", () => {
+    assert.equal(isInfoSeekingTurn("你觉得这是为什么？", { mode: "chat" }), false);
+    assert.equal(isInfoSeekingTurn("这个代码报错怎么修？", { mode: "chat" }), true);
   });
 });
 
@@ -127,6 +131,14 @@ describe("rhetorical pattern memory", () => {
     const task = buildStylePrompt([], "怎么修这个报错？", { instruction: "正常说明", maxChars: 220, maxParts: 2, enforce: false }, sess._recentRhetoricalPatterns);
     assert.match(casual, /【近期表达提醒】/u);
     assert.doesNotMatch(task, /【近期表达提醒】/u);
+  });
+});
+
+describe("AI style rewrite detection", () => {
+  it("flags AI-sounding casual replies before sending", () => {
+    const text = "这一步，很多人一辈子迈不出来。不是逃避，而是清醒。";
+    assert.ok(detectAiStyleIssues(text).length >= 2);
+    assert.equal(needsDeAiRewrite(text, { enforce: true, maxChars: 80, maxParts: 1 }), true);
   });
 });
 

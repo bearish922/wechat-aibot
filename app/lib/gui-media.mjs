@@ -1,5 +1,5 @@
 import { readdirSync, statSync, rmSync, existsSync } from "node:fs";
-import { join, extname } from "node:path";
+import { join } from "node:path";
 import { addRoute } from "./server.mjs";
 import { dataPath } from "./paths.mjs";
 

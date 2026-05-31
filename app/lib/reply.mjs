@@ -249,6 +249,31 @@ export function extractRhetoricalPatterns(text = "") {
     .map(rule => ({ key: rule.key, label: rule.label }));
 }
 
+export function detectAiStyleIssues(text = "") {
+  const value = String(text || "").trim();
+  if (!value || isStructuredReply(value)) return [];
+  const issues = [...extractRhetoricalPatterns(value)];
+  const actionCount = (value.match(/[（(][^）)\n]{2,42}[）)]/gu) || []).length;
+  if (actionCount >= 3) {
+    issues.push({ key: "tooManyActions", label: "括号动作过密" });
+  }
+  const questionCount = (value.match(/[？?]/g) || []).length;
+  if (questionCount >= 3 && value.length < 500) {
+    issues.push({ key: "tooManyQuestions", label: "连续反问过密" });
+  }
+  if (/真正的|本质上|这意味着|某种意义上|不是.*弱点.*证据|足够让|足够说明/u.test(value)) {
+    issues.push({ key: "abstractClosure", label: "抽象升华或漂亮收束" });
+  }
+  return issues;
+}
+
+export function needsDeAiRewrite(text = "", budget = null) {
+  if (!text || isStructuredReply(text)) return false;
+  const issues = detectAiStyleIssues(text);
+  if (!issues.length) return false;
+  return Boolean(budget?.enforce) || issues.length >= 2;
+}
+
 export function rememberRecentRhetoricalPatterns(sess, text) {
   if (!sess) return;
   sess._rhetoricalTurn = (sess._rhetoricalTurn || 0) + 1;
@@ -283,15 +308,23 @@ export function isCasualQuestionTurn(userBody = "") {
   return /[？?]|猜猜|是不是|会不会|想不想|要不要|能不能|可以吗|什么|怎么过|怎么样|哪/u.test(text);
 }
 
-export function isInfoSeekingTurn(userBody = "") {
+export function isHardTaskTurn(userBody = "") {
   const text = stripQuotedText(userBody);
-  if (!text || isCasualQuestionTurn(text)) return false;
+  if (!text) return false;
+  return /报错|bug|代码|脚本|测试|运行|执行|修|实现|改文件|项目|仓库|PR|commit|GitHub|API|配置|排查|怎么(?:修|改|做|实现|处理|解决|排查|配置|运行|测试|写)/u.test(text);
+}
+
+export function isInfoSeekingTurn(userBody = "", options = {}) {
+  const text = stripQuotedText(userBody);
+  if (!text) return false;
+  if (options.mode === "chat") return isHardTaskTurn(text);
+  if (isCasualQuestionTurn(text)) return false;
   return /为什么|如何|解释|分析|总结|建议|方案|教程|资料|报错|修|代码|测试|可行|区别|哪里|什么原因|能不能|怎么(?:修|改|做|实现|处理|解决|排查|配置|运行|测试|写)|[?？]/u.test(text);
 }
 
 // ─── Reply length budget ────────────────────────────────────
-export function chooseReplyBudget(userBody = "") {
-  const infoSeeking = isInfoSeekingTurn(userBody);
+export function chooseReplyBudget(userBody = "", options = {}) {
+  const infoSeeking = isInfoSeekingTurn(userBody, options);
   const mediaCasual = hasInboundAttachment(userBody) && !infoSeeking;
   const r = Math.random();
   if (mediaCasual || !infoSeeking) {
@@ -336,8 +369,8 @@ export function needsReplyCondense(text, budget) {
 }
 
 // ─── Style prompt builder ───────────────────────────────────
-export function buildStylePrompt(recentKaomoji = [], userBody = "", budget = chooseReplyBudget(userBody), recentRhetoricalPatterns = []) {
-  const isTask = isInfoSeekingTurn(userBody);
+export function buildStylePrompt(recentKaomoji = [], userBody = "", budget = chooseReplyBudget(userBody), recentRhetoricalPatterns = [], options = {}) {
+  const isTask = isInfoSeekingTurn(userBody, options);
   const chatGuidance = isTask ? [
     "【任务模式风格】",
     "对方在正经求助，可以比闲聊说得更多；需要时允许列表、分段、代码块。",

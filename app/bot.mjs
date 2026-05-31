@@ -135,7 +135,10 @@ const CHAT_TEMPERATURE = Number(envOrConfig("WECHAT_CHAT_TEMPERATURE", "chat.tem
 const CHAT_MAX_TOKENS = configNumber("chat.maxTokens", 800);
 const CHAT_TIMEOUT_MS = configNumber("chat.timeoutMs", 120_000);
 const CHAT_COMPACT_KEEP_TURNS = configNumber("chat.compactKeepTurns", 6);
-import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, rememberRecentKaomoji, rememberRecentRhetoricalPatterns, chooseReplyBudget, buildStylePrompt, normalizeTerminology, constrainCasualReply, needsReplyCondense } from "./lib/reply.mjs";
+const CHAT_COMPACT_TIMEOUT_MS = configNumber("chat.compactTimeoutMs", Math.max(CHAT_TIMEOUT_MS, 240_000));
+const CHAT_COMPACT_MAX_TOKENS = configNumber("chat.compactMaxTokens", 0);
+const CHAT_COMPACT_MESSAGE_MAX_CHARS = configNumber("chat.compactMessageMaxChars", 1800);
+import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, rememberRecentKaomoji, rememberRecentRhetoricalPatterns, chooseReplyBudget, buildStylePrompt, normalizeTerminology, constrainCasualReply, needsReplyCondense, needsDeAiRewrite, detectAiStyleIssues } from "./lib/reply.mjs";
 import { RAG_SKIP_PATTERNS, shouldSkipRag, buildRagBody } from "./lib/rag.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
@@ -247,6 +250,13 @@ function shouldAnchorRagProfile(userMessage, profile) {
   return /你|自己|身高|生日|喜欢|讨厌|学校|乐队|经历|过去|关系|朋友|队友|称呼|为什么|怎么/u.test(userMessage);
 }
 
+function shouldUseRagForChat(userMessage, profile) {
+  if (!profile || profile === "默认") return false;
+  if (shouldSkipRag(userMessage)) return false;
+  return hasExplicitProfileName(userMessage)
+    || /身高|生日|血型|学校|学部|乐队|成员|经历|过去|关系|朋友|队友|称呼|设定|资料|官方|剧情|假唱|退团|作品|歌曲|角色/u.test(userMessage);
+}
+
 function queryRag(userMessage, profile = null) {
   if (!fs.existsSync(RAG_SCRIPT)) return null;
   if (shouldSkipRag(userMessage)) {
@@ -327,6 +337,7 @@ function makeSession(name, profile = null, mode = null, ai = null) {
     _profile: profile,
     _mode: normalizeSessionMode(mode, ai, name),
     _chatSummary: "",
+    _chatSummaryBackups: [],
     _chatHistory: [],
   };
 }
@@ -350,6 +361,15 @@ function hydrateSession(ai, raw = {}) {
     _profile: raw._profile ?? null,
     _mode: mode,
     _chatSummary: typeof raw._chatSummary === "string" ? raw._chatSummary : "",
+    _chatSummaryBackups: Array.isArray(raw._chatSummaryBackups)
+      ? raw._chatSummaryBackups
+        .filter(item => item && typeof item.summary === "string" && item.summary.trim())
+        .map(item => ({
+          summary: item.summary.trim(),
+          ...(typeof item.ts === "string" && item.ts ? { ts: item.ts } : {}),
+        }))
+        .slice(-5)
+      : [],
     _chatHistory: normalizeChatHistory(raw._chatHistory),
   };
   if (mode === "chat" && !sess._chatHistory.length && !sess._chatSummary) {
@@ -379,6 +399,9 @@ function saveSessions() {
           _profile: s._profile ?? null,
           _mode: sessionMode(s),
           _chatSummary: typeof s._chatSummary === "string" ? s._chatSummary : "",
+          _chatSummaryBackups: Array.isArray(s._chatSummaryBackups)
+            ? s._chatSummaryBackups.slice(-5)
+            : [],
           _chatHistory: normalizeChatHistory(s._chatHistory),
         })),
       };
@@ -739,6 +762,12 @@ async function fetchJsonWithTimeout(url, bodyObj, timeoutMs, headers = {}) {
   } finally {
     clearTimeout(t);
   }
+}
+
+function isTransientChatError(error) {
+  const message = String(error?.message || "");
+  const code = error?.cause?.code || error?.code || "";
+  return /terminated|fetch failed|socket|ECONNRESET|ETIMEDOUT|EPIPE|UND_ERR/i.test(`${message} ${code}`);
 }
 
 function chatCompletionsUrl(baseUrl = "") {
@@ -1266,16 +1295,21 @@ function extractChatContent(messageContent) {
 function normalizeChatHistory(history = []) {
   const clean = (Array.isArray(history) ? history : [])
     .filter(item => (item?.role === "user" || item?.role === "assistant") && typeof item.content === "string" && item.content.trim())
-    .map(item => ({ role: item.role, content: item.content.trim() }));
+    .map(item => ({
+      role: item.role,
+      content: item.content.trim(),
+      ...(typeof item.ts === "string" && item.ts ? { ts: item.ts } : {}),
+    }));
   return clean;
 }
 
 function appendChatHistory(sess, userBody, assistantText) {
   if (!sess) return;
+  const now = new Date().toISOString();
   sess._chatHistory = normalizeChatHistory([
     ...(Array.isArray(sess._chatHistory) ? sess._chatHistory : []),
-    { role: "user", content: userBody },
-    { role: "assistant", content: assistantText },
+    { role: "user", content: userBody, ts: now },
+    { role: "assistant", content: assistantText, ts: now },
   ]);
 }
 
@@ -1293,6 +1327,8 @@ function seedChatHistoryFromLogs(ai, sess) {
       let userText = "";
       let resultText = "";
       let assistantText = "";
+      let userTs = "";
+      let assistantTs = "";
       let isChatLog = false;
       const raw = fs.readFileSync(path.join(LOGS_DIR, name), "utf-8");
       for (const line of raw.split(/\r?\n/)) {
@@ -1300,18 +1336,25 @@ function seedChatHistoryFromLogs(ai, sess) {
         let evt;
         try { evt = JSON.parse(line); } catch { continue; }
         if (evt.type === "chat_result") isChatLog = true;
-        if (evt.type === "user_message" && typeof evt.body === "string") userText ||= evt.body.trim();
+        if (evt.type === "user_message" && typeof evt.body === "string") {
+          userText ||= evt.body.trim();
+          if (typeof evt.timestamp === "string") userTs ||= evt.timestamp;
+        }
         if (evt.type === "assistant" && evt.message?.content) {
+          if (typeof evt.timestamp === "string") assistantTs ||= evt.timestamp;
           for (const block of evt.message.content) {
             if (block.type === "text" && block.text) assistantText += block.text;
           }
         }
-        if (evt.type === "result" && typeof evt.result === "string") resultText = evt.result.trim();
+        if (evt.type === "result" && typeof evt.result === "string") {
+          resultText = evt.result.trim();
+          if (typeof evt.timestamp === "string") assistantTs ||= evt.timestamp;
+        }
       }
       if (!isChatLog) continue;
       const replyText = (resultText || assistantText).trim();
-      if (userText) history.push({ role: "user", content: userText });
-      if (replyText) history.push({ role: "assistant", content: replyText });
+      if (userText) history.push({ role: "user", content: userText, ...(userTs ? { ts: userTs } : {}) });
+      if (replyText) history.push({ role: "assistant", content: replyText, ...(assistantTs ? { ts: assistantTs } : {}) });
     }
     sess._chatHistory = normalizeChatHistory(history);
     if (sess._chatHistory.length) log("\u{1F4DC}", `[${sess.name}] seeded chat history from ${files.length} logs (${sess._chatHistory.length} messages)`);
@@ -1344,18 +1387,31 @@ function buildChatMessages(userBody, ragContext, stylePrompt, memoryPrompt = "",
   ];
 }
 
-async function runChatCompletion(sessionName, messages) {
+async function runChatCompletion(sessionName, messages, options = {}) {
   if (!hasChatConfig()) {
     throw new Error("chat session 未配置。请设置 chat.baseUrl、chat.apiKey、chat.model，或用 /mode tool 切回工具会话。");
   }
   const body = {
     model: CHAT_MODEL,
     messages,
-    temperature: Number.isFinite(CHAT_TEMPERATURE) ? CHAT_TEMPERATURE : 0.8,
+    temperature: Number.isFinite(options.temperature) ? options.temperature : (Number.isFinite(CHAT_TEMPERATURE) ? CHAT_TEMPERATURE : 0.8),
     stream: false,
   };
-  if (Number.isFinite(CHAT_MAX_TOKENS) && CHAT_MAX_TOKENS > 0) body.max_tokens = CHAT_MAX_TOKENS;
-  const result = await fetchJsonWithTimeout(chatCompletionsUrl(CHAT_BASE_URL), body, CHAT_TIMEOUT_MS, { Authorization: `Bearer ${CHAT_API_KEY}` });
+  const maxTokens = Number.isFinite(options.maxTokens) ? options.maxTokens : CHAT_MAX_TOKENS;
+  if (Number.isFinite(maxTokens) && maxTokens > 0) body.max_tokens = maxTokens;
+  const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : CHAT_TIMEOUT_MS;
+  const retries = Math.max(0, Number(options.retries) || 0);
+  let result;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      result = await fetchJsonWithTimeout(chatCompletionsUrl(CHAT_BASE_URL), body, timeoutMs, { Authorization: `Bearer ${CHAT_API_KEY}` });
+      break;
+    } catch (e) {
+      if (attempt >= retries || !isTransientChatError(e)) throw e;
+      log("⚠️", `[${sessionName}] chat transient error, retrying: ${e.message}`);
+      await sleep(800);
+    }
+  }
   const text = extractChatContent(result.choices?.[0]?.message?.content).trim();
   if (!text) throw new Error("chat backend returned empty response");
   log("\u{1F4AC}", `[${sessionName}] chat completion ok (${text.length} chars, model=${CHAT_MODEL})`);
@@ -1378,12 +1434,62 @@ async function condenseChatReply(sessionName, text, budget, profile = "") {
     },
     { role: "user", content: text },
   ];
-  const { text: condensed } = await runChatCompletion(`${sessionName}-condense`, messages);
+  const { text: condensed } = await runChatCompletion(`${sessionName}-condense`, messages, {
+    maxTokens: 240,
+    timeoutMs: Math.max(CHAT_TIMEOUT_MS, 90_000),
+    temperature: 0.4,
+    retries: 1,
+  });
   return constrainCasualReply(condensed, budget);
+}
+
+async function deAiChatReply(sessionName, text, budget, profile = "") {
+  if (!needsDeAiRewrite(text, budget)) return text;
+  const maxChars = Math.max(24, Number(budget?.maxChars) || 90);
+  const maxParts = Math.max(1, Number(budget?.maxParts) || 1);
+  const issues = detectAiStyleIssues(text).map(item => item.label).join("、");
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "你在把一条中文微信角色回复改得更像熟人自然接话。",
+        `角色：${profile || "当前角色"}。保留原意和关系气氛，但删掉裁判腔、升华、漂亮反转、夸张比较、连续反问和多余括号动作。`,
+        `本轮检测到的问题：${issues || "表达偏硬"}`,
+        `输出 ${maxParts} 条以内，总字数尽量不超过 ${maxChars} 字。`,
+        "不要新增信息，不要解释修改过程，不要写成总结；像微信里顺手接一句。",
+      ].join("\n"),
+    },
+    { role: "user", content: text },
+  ];
+  const { text: rewritten } = await runChatCompletion(`${sessionName}-deai`, messages, {
+    maxTokens: 320,
+    timeoutMs: Math.max(CHAT_TIMEOUT_MS, 90_000),
+    temperature: 0.45,
+    retries: 1,
+  });
+  return constrainCasualReply(rewritten, budget);
 }
 
 function compactKeepMessageCount() {
   return Math.max(0, CHAT_COMPACT_KEEP_TURNS * 2);
+}
+
+function compactTranscriptLine(item) {
+  const role = item.role === "user" ? "User" : "Assistant";
+  const stamp = item.ts ? ` [${item.ts}]` : "";
+  const content = String(item.content || "").trim().replace(/\n{3,}/g, "\n\n");
+  if (content.length <= CHAT_COMPACT_MESSAGE_MAX_CHARS) return `${role}${stamp}: ${content}`;
+  return `${role}${stamp}: ${content.slice(0, CHAT_COMPACT_MESSAGE_MAX_CHARS).trimEnd()}…`;
+}
+
+function rememberChatSummaryBackup(sess) {
+  if (!sess?._chatSummary) return;
+  const backups = Array.isArray(sess._chatSummaryBackups) ? sess._chatSummaryBackups : [];
+  backups.push({
+    ts: new Date().toISOString(),
+    summary: sess._chatSummary,
+  });
+  sess._chatSummaryBackups = backups.slice(-5);
 }
 
 async function compactChatSession(sess) {
@@ -1397,20 +1503,18 @@ async function compactChatSession(sess) {
   const keepCount = compactKeepMessageCount();
   const keepTail = keepCount ? history.slice(-keepCount) : [];
   const toCompact = keepCount ? history.slice(0, Math.max(0, history.length - keepCount)) : history;
-  const transcript = toCompact.map(item => `${item.role === "user" ? "User" : "Assistant"}: ${item.content}`).join("\n\n");
+  const transcript = toCompact.map(compactTranscriptLine).join("\n\n");
   const messages = [
     {
       role: "system",
       content: [
         "你在压缩一段微信角色聊天历史，用于后续继续对话。",
-        "输出中文摘要，保留连续性，而不是评价、改写、读心或文学化概括。",
-        "只保留对后续对话仍有帮助的信息；宁可漏掉，也不要把不确定内容写成事实。",
-        "用户个人事实必须保守：只记录用户明确说过且看起来稳定的信息；单日状态、一次通勤、当天作息、饭点、犯困、临时安排、某次情绪或某次活动不要写成长期习惯。",
-        "涉及实习、工作、学校、项目阶段等会变化的信息，必须写明时态，例如“当时/曾经/后来/目前”；如果新对话表明旧摘要已过时，要更新或删除旧说法。",
-        "不要把“用户说喜欢/也喜欢某首歌”改写成“最喜欢”；不要把角色推荐、正在听、随机播放改写成稳定偏好。",
-        "未解决话题只保留明确还会继续的事项；不要保留已经自然结束、只是当时调侃或铺垫的片段。",
-        "可以保留：双方关系进展、昵称和称呼、明确稳定的用户事实、角色已承诺/已表达且后续仍相关的态度、真正正在延续的话题、重要情绪节点。",
-        "不要保留冗余寒暄、重复修辞、工具调用细节或无意义 UI 信息。",
+        "输出中文摘要：它应当是完整聊天历史的简洁版，可以较详细，但不要写成评价或文学化改写。",
+        "把已有早期摘要和新增对话合并成同一份修订版；新内容要加入，过时或被纠正的信息要更新或删除。",
+        "只写对话中明确出现的信息；不要推测，不要把一方提出的期待写成另一方的承诺。",
+        "时间尽量写具体日期；没有明确日期时写“当时/此前”，不要只写周几或自行换算。",
+        "保留双方关系、稳定事实、重要情绪节点、话题脉络、明确偏好和仍可能延续的事项；删掉寒暄、重复修辞和无后续价值的细节。",
+        "输出只能是历史摘要本身，不要输出写作规则、后续回复建议或 prompt 指令。",
       ].join("\n"),
     },
     {
@@ -1421,7 +1525,13 @@ async function compactChatSession(sess) {
       ].filter(Boolean).join("\n\n---\n\n"),
     },
   ];
-  const { text } = await runChatCompletion(`${sess.name}-compact`, messages);
+  const { text } = await runChatCompletion(`${sess.name}-compact`, messages, {
+    maxTokens: CHAT_COMPACT_MAX_TOKENS,
+    timeoutMs: CHAT_COMPACT_TIMEOUT_MS,
+    temperature: 0.3,
+    retries: 1,
+  });
+  rememberChatSummaryBackup(sess);
   sess._chatSummary = text.trim();
   sess._chatHistory = keepTail;
   return { changed: true, summaryChars: sess._chatSummary.length, keptMessages: keepTail.length };
@@ -1512,12 +1622,13 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   const turnProfile = sessionProfile(styleState);
   const turnMode = sessionMode(styleState);
   const prefix = replyPrefix(sessionName, ai, turnMode);
-  const replyBudget = chooseReplyBudget(body);
+  const replyBudget = chooseReplyBudget(body, { mode: turnMode });
   const stylePrompt = buildStylePrompt(
     styleState?._recentKaomoji || [],
     body,
     replyBudget,
     styleState?._recentRhetoricalPatterns || [],
+    { mode: turnMode },
   );
   const memoryPrompt = turnProfile && turnProfile !== "默认" ? renderMemoryPrompt(userId) : "";
   log("\u{1F4E4}", `[${ai}] [${sessionName}] ${body.slice(0, 80)}`);
@@ -1574,7 +1685,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   try {
     if (turnMode === "chat") {
     const profile = turnProfile;
-    const useRagChat = RAG_ENABLED && !hasInboundAttachment(body) && profile && profile !== "默认" && profileTemplates[profile];
+    const useRagChat = RAG_ENABLED && !hasInboundAttachment(body) && profile && profile !== "默认" && profileTemplates[profile] && shouldUseRagForChat(body, profile);
     const ragContext = useRagChat ? queryRag(body, profile) : null;
     const messages = buildChatMessages(body, ragContext, stylePrompt, memoryPrompt, profile, styleState?._chatHistory || [], styleState?._chatSummary || "");
     writeLog(JSON.stringify({ type: "chat_request", model: CHAT_MODEL || null, messages, timestamp: new Date().toISOString() }));
@@ -1583,13 +1694,24 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     if (usage) writeFmt(`\n[usage] input=${usage.prompt_tokens ?? usage.input_tokens ?? "?"} output=${usage.completion_tokens ?? usage.output_tokens ?? "?"}`);
     let finalText = text;
     try {
-      finalText = await condenseChatReply(sessionName, text, replyBudget, profile);
-      if (finalText !== text) {
-        writeLog(JSON.stringify({ type: "chat_condensed", originalChars: text.length, finalChars: finalText.length, timestamp: new Date().toISOString() }));
-        writeFmt(`\n[condensed] ${text.length} -> ${finalText.length} chars`);
+      const rewritten = await deAiChatReply(sessionName, finalText, replyBudget, profile);
+      if (rewritten !== finalText) {
+        writeLog(JSON.stringify({ type: "chat_deai_rewrite", originalChars: finalText.length, finalChars: rewritten.length, issues: detectAiStyleIssues(finalText).map(item => item.key), timestamp: new Date().toISOString() }));
+        writeFmt(`\n[deai] ${finalText.length} -> ${rewritten.length} chars`);
+        finalText = rewritten;
       }
     } catch (e) {
-      finalText = constrainCasualReply(text, replyBudget);
+      writeLog(JSON.stringify({ type: "chat_deai_failed", error: e.message, timestamp: new Date().toISOString() }));
+    }
+    try {
+      const condensed = await condenseChatReply(sessionName, finalText, replyBudget, profile);
+      if (condensed !== finalText) {
+        writeLog(JSON.stringify({ type: "chat_condensed", originalChars: finalText.length, finalChars: condensed.length, timestamp: new Date().toISOString() }));
+        writeFmt(`\n[condensed] ${finalText.length} -> ${condensed.length} chars`);
+        finalText = condensed;
+      }
+    } catch (e) {
+      finalText = constrainCasualReply(finalText, replyBudget);
       writeLog(JSON.stringify({ type: "chat_condense_failed", error: e.message, fallbackChars: finalText.length, timestamp: new Date().toISOString() }));
     }
     textBuf += finalText;

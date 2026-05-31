@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- Refine chat `/summary` into a fuller historical summary flow with timestamps, recent-summary backups, configurable compact timeout/token/message budgets, and one retry for transient chat backend failures.
+- Add a pre-send chat rewrite pass that detects AI-sounding rhetorical patterns, abstract closures, dense stage directions, and repeated questions before condensing casual role replies.
+- Make chat-mode intent detection mode-aware and reduce chat RAG usage to explicit role/lore/fact queries, so casual turns stay conversational.
+- Treat current user messages as higher priority than volatile long-term memory facts, and limit automatic memory writes to add/update/noop operations.
+- Expose new chat compact settings in the example config and local GUI.
 
 ## v2.2.0 — Chat and Tool Session Split (2026-05-31)
 - Add per-session `chat` / `tool` modes. Tool sessions keep using Claude Code/Codex resume for project work, while chat sessions use a lightweight OpenAI-compatible Chat Completions backend.
