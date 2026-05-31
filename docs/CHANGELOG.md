@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.3.1 — RAG Trigger & Cleanup (2026-06-01)
+- Relax RAG trigger: add "你/自己 + question words" path so conversational probing about the character (without explicit lore keywords or name mention) still triggers knowledge base lookup
+- Remove dead code: unused imports, unreferenced functions, orphaned GUI routes (rag/media/logs/control), and the chat-mode rhetorical pattern detection system
+- Fix CDN_BASE_URL ReferenceError on messages with attachments
+
 ## v2.3.0 — Per-Role Memory (2026-06-01)
 - Restructure long-term memory into per-role buckets (`users[userId].roles[profile].items`) so each role persona maintains its own independent memory of the user, with automatic migration of existing memory into the 白鹭千圣 role
 - Add `/memory <角色名>` to view another role's memory from any session; `/memory` without arguments shows the current role
