@@ -10,7 +10,7 @@ export const COMMON_CHAT_STYLE_PROMPT = [
 ].join("\n");
 
 export const MAX_REPLY_LEN = 3800;
-export const SOCIAL_REPLY_MAX_PARTS = 6;
+const SOCIAL_REPLY_MAX_PARTS = 6;
 
 function pad2(value) {
   return String(value).padStart(2, "0");
@@ -146,7 +146,7 @@ export function splitSocialReply(text) {
 }
 
 // ─── Kaomoji tracking ───────────────────────────────────────
-export function extractKaomoji(text) {
+function extractKaomoji(text) {
   const found = new Set();
   const bracketed = text.match(/[（(][^）)\n]{1,24}[）)](?:[^\s\w一-鿿]{0,3})/gu) || [];
   for (const item of bracketed) {

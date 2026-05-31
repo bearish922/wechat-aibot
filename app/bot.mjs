@@ -129,21 +129,17 @@ const VISION_MODEL = usableConfigString(envOrConfig("WECHAT_VISION_MODEL", "visi
 const VISION_DETAIL = envOrConfig("WECHAT_VISION_DETAIL", "vision.detail", "high");
 const VISION_TIMEOUT_MS = configNumber("vision.timeoutMs", 180_000);
 import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, rememberRecentKaomoji, COMMON_CHAT_STYLE_PROMPT, formatLocalChatReality, expressionCapabilityPrompt } from "./lib/reply.mjs";
-import { RAG_SKIP_PATTERNS, shouldSkipRag } from "./lib/rag.mjs";
+import { shouldSkipRag } from "./lib/rag.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
 import { registerSessionRoutes } from "./lib/gui-sessions.mjs";
 import { registerProfileRoutes } from "./lib/gui-profiles.mjs";
 import { registerConfigRoutes } from "./lib/gui-config.mjs";
-import { registerRagRoutes } from "./lib/gui-rag.mjs";
-import { registerMediaRoutes } from "./lib/gui-media.mjs";
-import { registerLogRoutes } from "./lib/gui-logs.mjs";
-import { registerControlRoutes } from "./lib/gui-control.mjs";
 
 // ─── STATE ──────────────────────────────────────────────────
-import { token, getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, recentInputs, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
+import { getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, recentInputs, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
 import { uuid, sleep, log, isPidRunning } from "./lib/utils.mjs";
-import { loadToken, saveToken, loginWithQr, sendMessage, apiPost, apiGet } from "./lib/wechat.mjs";
+import { loadToken, saveToken, loginWithQr, sendMessage, apiPost, CDN_BASE_URL } from "./lib/wechat.mjs";
 import { applyMemoryOps, buildMemoryWriterSystemPrompt, isMemoryEnabled, shouldRunMemoryWriter, memoryListText, memoryMaintenanceNotice, normalizeMemoryCategory, parseMemoryWriterOutput, renderMemoryPrompt } from "./lib/memory.mjs";
 const LONG_POLL_TIMEOUT_MS = 35_000;
 
@@ -233,11 +229,6 @@ function loadProfiles() {
 // ── RAG query ──
 function hasExplicitProfileName(userMessage) {
   return Object.keys(profileTemplates).some(name => name !== "默认" && userMessage.includes(name));
-}
-
-function shouldAnchorRagProfile(userMessage, profile) {
-  if (!profile || profile === "默认" || hasExplicitProfileName(userMessage)) return false;
-  return /你|自己|身高|生日|喜欢|讨厌|学校|乐队|经历|过去|关系|朋友|队友|称呼|为什么|怎么/u.test(userMessage);
 }
 
 function shouldUseRagForTurn(userMessage, profile) {
@@ -2204,10 +2195,6 @@ async function main() {
   registerSessionRoutes();
   registerProfileRoutes();
   registerConfigRoutes();
-  registerRagRoutes();
-  registerMediaRoutes();
-  registerLogRoutes();
-  registerControlRoutes();
   startServer();
 
   // ─── WeChat login ────────────────────────────────────────────

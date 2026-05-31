@@ -5,7 +5,7 @@ import { sleep, log, shortId } from "./utils.mjs";
 import { DATA_DIR, dataPath, ensureDir } from "./paths.mjs";
 
 const BASE_URL = "https://ilinkai.weixin.qq.com";
-const CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
+export const CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 const BOT_TYPE = "3";
 const LONG_POLL_TIMEOUT_MS = 35_000;
 const TOKEN_FILE = dataPath("wechat-token.json");

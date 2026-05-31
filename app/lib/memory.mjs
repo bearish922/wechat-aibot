@@ -38,7 +38,7 @@ export function normalizeMemoryCategory(value = "") {
   return CATEGORY_ALIASES[String(value).trim().toLowerCase()] || null;
 }
 
-export function normalizeRole(profile) {
+function normalizeRole(profile) {
   return profile || DEFAULT_ROLE;
 }
 
@@ -46,7 +46,7 @@ function freshStore() {
   return { version: 2, users: {} };
 }
 
-export function loadMemoryStore() {
+function loadMemoryStore() {
   try {
     if (!fs.existsSync(MEMORY_FILE)) return freshStore();
     const data = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf-8"));
@@ -59,7 +59,7 @@ export function loadMemoryStore() {
   }
 }
 
-export function saveMemoryStore(store) {
+function saveMemoryStore(store) {
   ensureDir(PROJECT_ROOT);
   fs.writeFileSync(MEMORY_FILE, JSON.stringify(store, null, 2) + "\n", "utf-8");
 }
@@ -75,7 +75,7 @@ function roleItems(user, profile) {
   return user.roles[role].items;
 }
 
-export function ensureUserMemory(store, userId, profile) {
+function ensureUserMemory(store, userId, profile) {
   if (!store.users[userId]) {
     store.users[userId] = { enabled: true, roles: {}, lastMaintenanceNoticeAt: null };
   }
@@ -159,7 +159,7 @@ export function applyMemoryOps(userId, profile, ops = [], source = "auto") {
   return applied;
 }
 
-export function forgetMemoryItems(userId, profile, query) {
+function forgetMemoryItems(userId, profile, query) {
   const q = String(query || "").trim();
   if (!q) return { ok: false, removed: [] };
   const store = loadMemoryStore();
@@ -186,7 +186,7 @@ export function clearMemory(userId, profile) {
   return count;
 }
 
-export function setMemoryEnabled(userId, enabled) {
+function setMemoryEnabled(userId, enabled) {
   const store = loadMemoryStore();
   const user = store.users[userId];
   if (!user) return;

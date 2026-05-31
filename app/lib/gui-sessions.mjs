@@ -1,10 +1,5 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { addRoute } from "./server.mjs";
 import { sessions, activeAI } from "./state.mjs";
-import { dataPath } from "./paths.mjs";
-
-const LOGS_DIR = dataPath("logs");
 
 export function registerSessionRoutes() {
   addRoute("GET", "/api/sessions", () => {
@@ -27,25 +22,6 @@ export function registerSessionRoutes() {
       }
     }
     return { ok: true, sessions: all, currentAI: activeAI };
-  });
-
-  addRoute("GET", "/api/sessions/:id/history", ({ params }) => {
-    const sid = params.id;
-    if (!sid) return { ok: false, error: "session id required" };
-
-    const lines = [];
-    try {
-      const files = readdirSync(LOGS_DIR)
-        .filter(f => f.includes(sid.slice(0, 8)) && f.endsWith(".txt"))
-        .sort()
-        .slice(-5);
-      for (const f of files) {
-        const content = readFileSync(join(LOGS_DIR, f), "utf-8");
-        lines.push(`--- ${f} ---`);
-        lines.push(content.slice(0, 3000));
-      }
-    } catch {}
-    return { ok: true, history: lines.join("\n") || "暂无历史记录" };
   });
 
   addRoute("GET", "/api/sessions/resume", () => {
