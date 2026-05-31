@@ -234,8 +234,13 @@ function hasExplicitProfileName(userMessage) {
 function shouldUseRagForTurn(userMessage, profile) {
   if (!profile || profile === "默认") return false;
   if (shouldSkipRag(userMessage)) return false;
-  return hasExplicitProfileName(userMessage)
-    || /身高|生日|血型|学校|学部|乐队|成员|经历|过去|关系|朋友|队友|称呼|设定|资料|官方|剧情|假唱|退团|作品|歌曲|角色/u.test(userMessage);
+  // 1) explicit profile name mention
+  if (hasExplicitProfileName(userMessage)) return true;
+  // 2) hard lore keywords
+  if (/身高|生日|血型|学校|学部|乐队|成员|经历|过去|关系|朋友|队友|称呼|设定|资料|官方|剧情|假唱|退团|作品|歌曲|角色/u.test(userMessage)) return true;
+  // 3) "你/自己" + question/curiosity — conversational probing about the character
+  if (/(?:你|自己).*(?:为什么|怎么(?:会|能|回事|这样|办)|是不是|真的|以前|曾经|喜欢|讨厌|知道|觉得|记得|想|会|能)/u.test(userMessage) && userMessage.length > 6) return true;
+  return false;
 }
 
 function queryRag(userMessage, profile = null) {
