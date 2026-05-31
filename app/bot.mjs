@@ -1703,21 +1703,21 @@ async function handleMemoryCommand(userId, body, ctx, activeProfile) {
 
   // determine which profile to show
   let targetProfile = activeProfile;
+  let lookedUpRole = false;
   if (rest && rest !== "all" && !["性格", "偏好", "事实"].includes(rest)) {
-    // check if rest matches a known profile name
     if (profileTemplates[rest]) {
       targetProfile = rest;
+      lookedUpRole = true;
     } else {
-      // fuzzy match
       const match = Object.keys(profileTemplates).find(k => k.includes(rest) || rest.includes(k));
-      if (match) targetProfile = match;
+      if (match) { targetProfile = match; lookedUpRole = true; }
     }
   }
 
   const isOtherRole = targetProfile !== activeProfile;
   const label = isOtherRole ? `角色: ${targetProfile}` : "";
 
-  if (!rest) {
+  if (!rest || lookedUpRole) {
     const notice = memoryMaintenanceNotice(userId, { profile: targetProfile });
     const text = [label, memoryListText(userId, { profile: targetProfile }), notice].filter(Boolean).join("\n\n");
     await sendMessage(userId, text, ctx);
@@ -1737,7 +1737,7 @@ async function handleMemoryCommand(userId, body, ctx, activeProfile) {
     return;
   }
 
-  // if rest didn't match any profile, show help
+  // show help when rest doesn't match any profile or category
   await sendMessage(userId, help, ctx);
 }
 
