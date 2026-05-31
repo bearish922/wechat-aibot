@@ -135,7 +135,7 @@ const CHAT_TEMPERATURE = Number(envOrConfig("WECHAT_CHAT_TEMPERATURE", "chat.tem
 const CHAT_MAX_TOKENS = configNumber("chat.maxTokens", 800);
 const CHAT_TIMEOUT_MS = configNumber("chat.timeoutMs", 120_000);
 const CHAT_COMPACT_KEEP_TURNS = configNumber("chat.compactKeepTurns", 6);
-import { COMMON_CHAT_STYLE_PROMPT, MAX_REPLY_LEN, SOCIAL_REPLY_MAX_PARTS, splitText, hasInboundAttachment, splitSocialReply, extractKaomoji, rememberRecentKaomoji, rememberRecentRhetoricalPatterns, isInfoSeekingTurn, chooseReplyBudget, buildStylePrompt, normalizeTerminology } from "./lib/reply.mjs";
+import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, rememberRecentKaomoji, rememberRecentRhetoricalPatterns, chooseReplyBudget, buildStylePrompt, normalizeTerminology, constrainCasualReply, needsReplyCondense } from "./lib/reply.mjs";
 import { RAG_SKIP_PATTERNS, shouldSkipRag, buildRagBody } from "./lib/rag.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
@@ -148,12 +148,11 @@ import { registerLogRoutes } from "./lib/gui-logs.mjs";
 import { registerControlRoutes } from "./lib/gui-control.mjs";
 
 // ─── STATE ──────────────────────────────────────────────────
-import { token, getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, recentInputs, pendingProfileDeletes, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
+import { token, getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, recentInputs, DEFAULT_CHAT_CC_SESSIONS, MODE_CHAT, MODE_TOOL, defaultSessionMode, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
 import { uuid, shortId, sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost, apiGet } from "./lib/wechat.mjs";
 import { applyMemoryOps, buildMemoryWriterSystemPrompt, isMemoryEnabled, shouldRunMemoryWriter, memoryListText, memoryMaintenanceNotice, normalizeMemoryCategory, parseMemoryWriterOutput, renderMemoryPrompt } from "./lib/memory.mjs";
 const LONG_POLL_TIMEOUT_MS = 35_000;
-const PROFILE_DELETE_CONFIRM_MS = 60_000;
 
 function loadModelNames() {
   // CC: read from ~/.claude/settings.json
@@ -238,13 +237,6 @@ function loadProfiles() {
   } catch { Object.assign(profileTemplates, { "默认": "保持 AI 的默认风格" }); }
 }
 
-function saveProfiles() {
-  ensureDir(rootPath());
-  fs.writeFileSync(PROFILE_FILE, JSON.stringify({
-    templates: profileTemplates,
-  }, null, 2), "utf-8");
-}
-
 // ── RAG query ──
 function hasExplicitProfileName(userMessage) {
   return Object.keys(profileTemplates).some(name => name !== "默认" && userMessage.includes(name));
@@ -304,12 +296,6 @@ function parseSessionMode(mode) {
   return null;
 }
 
-const DEFAULT_CHAT_CC_SESSIONS = new Set(["cst", "anon", "soyo", "aya"]);
-
-function defaultSessionMode(ai, name) {
-  return ai === "cc" && DEFAULT_CHAT_CC_SESSIONS.has(String(name || "").trim().toLowerCase()) ? "chat" : "tool";
-}
-
 function normalizeSessionMode(mode, ai = null, name = null) {
   const parsed = parseSessionMode(mode);
   if (parsed) return parsed;
@@ -345,27 +331,6 @@ function makeSession(name, profile = null, mode = null, ai = null) {
   };
 }
 
-function boundProfileSessions(profileName) {
-  const found = [];
-  for (const [ai, map] of Object.entries(sessions)) {
-    for (const [boundUserId, u] of map) {
-      for (let i = 0; i < (u.list || []).length; i++) {
-        const s = u.list[i];
-        if (s._profile === profileName) {
-          found.push({ ai, userId: boundUserId, session: s, index: i + 1, active: s.id === u.activeId });
-        }
-      }
-    }
-  }
-  return found;
-}
-
-function profileBindingListText(bindings) {
-  return bindings.map(b => {
-    const aiLabel = b.ai === "cc" ? "Claude Code" : "Codex";
-    return `- ${aiLabel} / [${b.index}] ${b.session.name}${b.active ? "（当前）" : ""}`;
-  }).join("\n");
-}
 
 function hydrateSession(ai, raw = {}) {
   const mode = parseSessionMode(raw._mode) || defaultSessionMode(ai, raw.name);
@@ -627,14 +592,18 @@ function cdnDownloadUrl(media) {
 }
 
 async function fetchBuffer(url, label, timeoutMs = 60_000) {
+  const effectiveTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 60_000;
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  const t = setTimeout(() => ctrl.abort(), effectiveTimeout);
   try {
     const res = await fetch(url, { signal: ctrl.signal });
     if (!res.ok) throw new Error(`${label}: CDN ${res.status} ${res.statusText}`);
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length > WECHAT_MEDIA_MAX_BYTES) throw new Error(`${label}: media too large (${buf.length} bytes)`);
     return buf;
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error(`${label}: download timeout after ${effectiveTimeout}ms`);
+    throw e;
   } finally {
     clearTimeout(t);
   }
@@ -751,8 +720,9 @@ function extractVideoFrame(videoPath) {
 }
 
 async function fetchJsonWithTimeout(url, bodyObj, timeoutMs, headers = {}) {
+  const effectiveTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 120_000;
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  const t = setTimeout(() => ctrl.abort(), effectiveTimeout);
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -763,6 +733,9 @@ async function fetchJsonWithTimeout(url, bodyObj, timeoutMs, headers = {}) {
     const text = await res.text();
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
     return text ? JSON.parse(text) : {};
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error(`request timeout after ${effectiveTimeout}ms`);
+    throw e;
   } finally {
     clearTimeout(t);
   }
@@ -1314,16 +1287,19 @@ function seedChatHistoryFromLogs(ai, sess) {
     const history = [];
     const files = fs.readdirSync(LOGS_DIR)
       .filter(name => prefixes.some(prefix => name.startsWith(prefix)) && name.endsWith(".jsonl"))
-      .sort();
+      .sort()
+      .slice(-50);
     for (const name of files) {
       let userText = "";
       let resultText = "";
       let assistantText = "";
+      let isChatLog = false;
       const raw = fs.readFileSync(path.join(LOGS_DIR, name), "utf-8");
       for (const line of raw.split(/\r?\n/)) {
         if (!line.trim()) continue;
         let evt;
         try { evt = JSON.parse(line); } catch { continue; }
+        if (evt.type === "chat_result") isChatLog = true;
         if (evt.type === "user_message" && typeof evt.body === "string") userText ||= evt.body.trim();
         if (evt.type === "assistant" && evt.message?.content) {
           for (const block of evt.message.content) {
@@ -1332,6 +1308,7 @@ function seedChatHistoryFromLogs(ai, sess) {
         }
         if (evt.type === "result" && typeof evt.result === "string") resultText = evt.result.trim();
       }
+      if (!isChatLog) continue;
       const replyText = (resultText || assistantText).trim();
       if (userText) history.push({ role: "user", content: userText });
       if (replyText) history.push({ role: "assistant", content: replyText });
@@ -1348,7 +1325,7 @@ function buildChatMessages(userBody, ragContext, stylePrompt, memoryPrompt = "",
     profileOverride && profileTemplates[profileOverride] ? profileTemplates[profileOverride] : "",
     memoryPrompt,
     stylePrompt,
-    "【会话类型】当前是轻量 chat session。请只用对话能力回复，不要声称已经读取本地文件、运行命令、浏览网页或调用工具；如果对方要你干活、查项目、改文件或执行命令，请提醒他切换到 tool session。",
+    "【会话类型】当前是轻量 chat session。只按对话回复；涉及改文件、运行命令或读取本地项目时，请让对方切到 tool session。",
   ].filter(Boolean);
   if (ragContext) {
     systemParts.push([
@@ -1371,17 +1348,38 @@ async function runChatCompletion(sessionName, messages) {
   if (!hasChatConfig()) {
     throw new Error("chat session 未配置。请设置 chat.baseUrl、chat.apiKey、chat.model，或用 /mode tool 切回工具会话。");
   }
-  const result = await fetchJsonWithTimeout(chatCompletionsUrl(CHAT_BASE_URL), {
+  const body = {
     model: CHAT_MODEL,
     messages,
     temperature: Number.isFinite(CHAT_TEMPERATURE) ? CHAT_TEMPERATURE : 0.8,
-    max_tokens: CHAT_MAX_TOKENS,
     stream: false,
-  }, CHAT_TIMEOUT_MS, { Authorization: `Bearer ${CHAT_API_KEY}` });
+  };
+  if (Number.isFinite(CHAT_MAX_TOKENS) && CHAT_MAX_TOKENS > 0) body.max_tokens = CHAT_MAX_TOKENS;
+  const result = await fetchJsonWithTimeout(chatCompletionsUrl(CHAT_BASE_URL), body, CHAT_TIMEOUT_MS, { Authorization: `Bearer ${CHAT_API_KEY}` });
   const text = extractChatContent(result.choices?.[0]?.message?.content).trim();
   if (!text) throw new Error("chat backend returned empty response");
   log("\u{1F4AC}", `[${sessionName}] chat completion ok (${text.length} chars, model=${CHAT_MODEL})`);
   return { text, usage: result.usage || null, raw: result };
+}
+
+async function condenseChatReply(sessionName, text, budget, profile = "") {
+  if (!needsReplyCondense(text, budget)) return text;
+  const maxChars = Math.max(12, Number(budget.maxChars) || 80);
+  const maxParts = Math.max(1, Number(budget.maxParts) || 1);
+  const messages = [
+    {
+      role: "system",
+      content: [
+        "你在把一条中文微信角色回复收短。",
+        `保留原意和${profile || "角色"}的口吻，但删掉分析、升华、漂亮总结和多余动作。`,
+        `输出 ${maxParts} 条以内，总字数尽量不超过 ${maxChars} 字。`,
+        "必须是完整自然的话，不要从句子中间截断；不要新增信息；不要解释。",
+      ].join("\n"),
+    },
+    { role: "user", content: text },
+  ];
+  const { text: condensed } = await runChatCompletion(`${sessionName}-condense`, messages);
+  return constrainCasualReply(condensed, budget);
 }
 
 function compactKeepMessageCount() {
@@ -1390,7 +1388,7 @@ function compactKeepMessageCount() {
 
 async function compactChatSession(sess) {
   if (!sess || sessionMode(sess) !== "chat") {
-    throw new Error("/compact 只用于 chat session；tool session 请使用 Claude Code/Codex 自带压缩或新开线程。");
+    throw new Error("/summary 只用于 chat session；tool session 请使用 Claude Code 自带的 /compact 或新开线程。");
   }
   const history = normalizeChatHistory(sess._chatHistory);
   if (history.length < 4 && !sess._chatSummary) {
@@ -1405,8 +1403,13 @@ async function compactChatSession(sess) {
       role: "system",
       content: [
         "你在压缩一段微信角色聊天历史，用于后续继续对话。",
-        "输出中文摘要，保留连续性，而不是评价或改写。",
-        "必须保留：双方关系进展、昵称和称呼、用户个人事实、角色已承诺/已表达的态度、正在延续的话题、重要情绪节点、未解决的问题。",
+        "输出中文摘要，保留连续性，而不是评价、改写、读心或文学化概括。",
+        "只保留对后续对话仍有帮助的信息；宁可漏掉，也不要把不确定内容写成事实。",
+        "用户个人事实必须保守：只记录用户明确说过且看起来稳定的信息；单日状态、一次通勤、当天作息、饭点、犯困、临时安排、某次情绪或某次活动不要写成长期习惯。",
+        "涉及实习、工作、学校、项目阶段等会变化的信息，必须写明时态，例如“当时/曾经/后来/目前”；如果新对话表明旧摘要已过时，要更新或删除旧说法。",
+        "不要把“用户说喜欢/也喜欢某首歌”改写成“最喜欢”；不要把角色推荐、正在听、随机播放改写成稳定偏好。",
+        "未解决话题只保留明确还会继续的事项；不要保留已经自然结束、只是当时调侃或铺垫的片段。",
+        "可以保留：双方关系进展、昵称和称呼、明确稳定的用户事实、角色已承诺/已表达且后续仍相关的态度、真正正在延续的话题、重要情绪节点。",
         "不要保留冗余寒暄、重复修辞、工具调用细节或无意义 UI 信息。",
       ].join("\n"),
     },
@@ -1568,7 +1571,8 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   let newSid = sid;
   let assistantFullText = "";
 
-  if (turnMode === "chat") {
+  try {
+    if (turnMode === "chat") {
     const profile = turnProfile;
     const useRagChat = RAG_ENABLED && !hasInboundAttachment(body) && profile && profile !== "默认" && profileTemplates[profile];
     const ragContext = useRagChat ? queryRag(body, profile) : null;
@@ -1577,11 +1581,22 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     const { text, usage } = await runChatCompletion(sessionName, messages);
     writeLog(JSON.stringify({ type: "chat_result", usage, timestamp: new Date().toISOString() }));
     if (usage) writeFmt(`\n[usage] input=${usage.prompt_tokens ?? usage.input_tokens ?? "?"} output=${usage.completion_tokens ?? usage.output_tokens ?? "?"}`);
-    textBuf += text;
-    assistantFullText += text;
+    let finalText = text;
+    try {
+      finalText = await condenseChatReply(sessionName, text, replyBudget, profile);
+      if (finalText !== text) {
+        writeLog(JSON.stringify({ type: "chat_condensed", originalChars: text.length, finalChars: finalText.length, timestamp: new Date().toISOString() }));
+        writeFmt(`\n[condensed] ${text.length} -> ${finalText.length} chars`);
+      }
+    } catch (e) {
+      finalText = constrainCasualReply(text, replyBudget);
+      writeLog(JSON.stringify({ type: "chat_condense_failed", error: e.message, fallbackChars: finalText.length, timestamp: new Date().toISOString() }));
+    }
+    textBuf += finalText;
+    assistantFullText += finalText;
     hasOutput = true;
     await flush(true, true);
-    appendChatHistory(styleState, body, text);
+    appendChatHistory(styleState, body, finalText);
   } else if (ai === "codex") {
     // ─── Codex event handling ───
     function handleCodexEvent(evt) {
@@ -1729,7 +1744,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
 
     let { code, stderr, killed } = await task;
 
-    for (let retry = 0; retry < SESSION_LOCK_RETRIES && !killed && code !== 0 && stderr.includes("already in use"); retry++) {
+    for (let retry = 0; retry < SESSION_LOCK_RETRIES && !killed && code !== 0 && (stderr.includes("already in use") || stderr.includes("timeout")); retry++) {
       log("\u{1F501}", `[${sessionName}] session lock, retry ${retry + 1}/${SESSION_LOCK_RETRIES}...`);
       await sleep(SESSION_LOCK_RETRY_MS);
       hasOutput = false; textBuf = ""; lastSent = ""; lastFlush = Date.now();
@@ -1764,8 +1779,10 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     log("⚠️", `memory writer skipped: ${e.message}`);
   }
   log("\u{23F1}", `[${ai}] [${sessionName}] turn done in ${Date.now() - turnStarted}ms`);
-  try { if (logStream) logStream.end(); } catch {}
-  try { if (fmtStream) fmtStream.end(); } catch {}
+  } finally {
+    try { if (logStream) logStream.end(); } catch {}
+    try { if (fmtStream) fmtStream.end(); } catch {}
+  }
 
   return newSid;
 }
@@ -1944,19 +1961,16 @@ async function handleMessage(msg) {
       `/sessions           查看所有线程`,
       `/close [序号|名称]   关闭线程 (排空中)`,
       `/cancel             取消当前运行的任务`,
-      `/cleanup media      查看/清理媒体文件`,
       `/memory             查看 memory 统计和每类前 3 条`,
       `/memory all         查看完整 memory`,
       `/memory 性格|偏好|事实 只查看某一类 memory`,
-      `/compact            手动压缩当前 chat 线程的早期历史`,
+      `/summary            手动压缩当前 chat 线程的早期历史`,
       `/status             查看当前状态`,
       ``,
       `【角色管理】`,
       `/profile                     查看所有角色`,
       `/profile <名称>              切换到指定角色`,
       `/profile off                 关闭角色，恢复默认`,
-      `/profile add <名称> | <提示词> 添加新角色`,
-      `/profile delete <名称>        删除角色`,
       ``,
       `当前 AI: ${activeAI === "cc" ? "Claude Code" : "Codex"}`,
     ].join("\n"), ctx);
@@ -1969,8 +1983,8 @@ async function handleMessage(msg) {
     return;
   }
 
-  // ── /compact ──
-  if (/^\/compact$/.test(body)) {
+  // ── /summary ──
+  if (/^\/summary$/.test(body)) {
     const sess = activeSession(userId);
     try {
       const before = normalizeChatHistory(sess._chatHistory).length;
@@ -2115,56 +2129,6 @@ async function handleMessage(msg) {
   if (/^\/profile(\s|$)/.test(body)) {
     const rest = body.slice(9).trim();
 
-    // /profile add <name> | <prompt>
-    const addMatch = rest.match(/^add\s+(\S+)\s*\|\s*([\s\S]+)$/);
-    if (addMatch) {
-      const name = addMatch[1].trim();
-      const prompt = addMatch[2].trim();
-      if (!name || !prompt) { await sendMessage(userId, "格式: /profile add 名字 | 系统提示词", ctx); return; }
-      if (profileTemplates[name]) { await sendMessage(userId, `⚠️ "${name}" 已存在，先 /profile delete ${name} 删除`, ctx); return; }
-      profileTemplates[name] = prompt;
-      saveProfiles();
-      await sendMessage(userId, `✅ 已添加角色: ${name}`, ctx);
-      return;
-    }
-
-    // /profile delete <name>
-    const delMatch = rest.match(/^delete\s+(.+)$/);
-    if (delMatch) {
-      const name = delMatch[1].trim();
-      if (!profileTemplates[name]) { await sendMessage(userId, `⚠️ 未找到 "${name}"`, ctx); return; }
-      if (name === "默认") { await sendMessage(userId, "⚠️ 不能删除默认角色", ctx); return; }
-      const bindings = boundProfileSessions(name);
-      const pending = pendingProfileDeletes.get(userId);
-      const confirmed = pending?.name === name && pending.expiresAt > Date.now();
-
-      if (bindings.length && !confirmed) {
-        pendingProfileDeletes.set(userId, { name, expiresAt: Date.now() + PROFILE_DELETE_CONFIRM_MS });
-        await sendMessage(userId, [
-          `⚠️ 角色「${name}」目前绑定在这些线程上：`,
-          profileBindingListText(bindings),
-          ``,
-          `如果仍要删除，请在 60 秒内再次发送：`,
-          `/profile delete ${name}`,
-          ``,
-          `确认删除后，上面这些线程会回退到默认性格；线程本身不会被删除。`,
-        ].join("\n"), ctx);
-        return;
-      }
-
-      delete profileTemplates[name];
-      let reverted = 0;
-      for (const b of bindings) {
-        b.session._profile = null;
-        reverted++;
-      }
-      pendingProfileDeletes.delete(userId);
-      saveProfiles();
-      saveSessions();
-      await sendMessage(userId, `✅ 已删除角色: ${name}${reverted ? `\n${reverted} 个线程已回退到默认性格` : ""}`, ctx);
-      return;
-    }
-
     if (!rest) {
       const cur = sessionProfile(activeSession(userId));
       const list = Object.entries(profileTemplates)
@@ -2178,7 +2142,7 @@ async function handleMessage(msg) {
         `类型: ${sessionModeLabel(sessionMode(sess))}`,
         `角色: ${cur || "默认"}`,
       ].join("\n");
-      await sendMessage(userId, `${current}\n\n模板:\n${list}\n\n/profile add 名字 | 提示词\n/profile delete 名字\n/profile 名字 切换`, ctx);
+      await sendMessage(userId, `${current}\n\n模板:\n${list}\n\n/profile 名字 切换\n/profile off 关闭`, ctx);
       return;
     }
     if (rest === "off" || rest === "关闭" || rest === "默认") {
@@ -2284,69 +2248,6 @@ async function handleMessage(msg) {
       ``,
       `${activeAI === "cc" ? "CC" : "Codex"} 线程数: ${u.list.length}  |  ${activeAI === "cc" ? "Codex" : "CC"} 线程数: ${otherCount}`,
     ].filter(line => line !== null).join("\n"), ctx);
-    return;
-  }
-
-  // ── /cleanup ──
-  if (/^\/cleanup\s/.test(body)) {
-    const rest = body.slice(9).trim();
-    // /cleanup media — show stats
-    // /cleanup media <days> — delete media older than N days
-    const mediaMatch = rest.match(/^media(?:\s+confirm)?\s*(\d*)$/);
-    if (mediaMatch) {
-      const isConfirm = rest.includes("confirm");
-      const days = parseInt(mediaMatch[1]) || 30;
-      if (!fs.existsSync(INBOUND_MEDIA_DIR)) {
-        await sendMessage(userId, "📁 data/inbound_media 目录不存在", ctx);
-        return;
-      }
-      const files = fs.readdirSync(INBOUND_MEDIA_DIR, { withFileTypes: true })
-        .filter(e => e.isFile())
-        .map(e => {
-          const fp = path.join(INBOUND_MEDIA_DIR, e.name);
-          const stat = fs.statSync(fp);
-          return { name: e.name, path: fp, mtime: stat.mtimeMs, size: stat.size };
-        });
-      const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-      const oldFiles = files.filter(f => f.mtime < cutoff);
-      const totalSize = files.reduce((s, f) => s + f.size, 0);
-      const oldSize = oldFiles.reduce((s, f) => s + f.size, 0);
-
-      if (!isConfirm) {
-        const sizeMB = (totalSize / 1024 / 1024).toFixed(1);
-        const oldMB = (oldSize / 1024 / 1024).toFixed(1);
-        const oldest = files.length ? new Date(Math.min(...files.map(f => f.mtime))).toLocaleDateString("zh-CN") : "N/A";
-        await sendMessage(userId, [
-          `📁 媒体文件统计`,
-          ``,
-          `总文件数: ${files.length}`,
-          `总大小:   ${sizeMB} MB`,
-          `最旧文件: ${oldest}`,
-          ``,
-          `超过 ${days} 天的文件: ${oldFiles.length} 个 (${oldMB} MB)`,
-          ``,
-          oldFiles.length > 0
-            ? `要删除这些文件，请发送: /cleanup media confirm ${days}`
-            : `没有超过 ${days} 天的文件需要清理。`,
-        ].join("\n"), ctx);
-        return;
-      }
-
-      // Confirm delete
-      if (oldFiles.length === 0) {
-        await sendMessage(userId, `✅ 没有需要清理的文件。`, ctx);
-        return;
-      }
-      let removed = 0;
-      let errCount = 0;
-      for (const f of oldFiles) {
-        try { fs.rmSync(f.path, { force: true }); removed++; } catch { errCount++; }
-      }
-      const removedMB = (oldSize / 1024 / 1024).toFixed(1);
-      await sendMessage(userId, `✅ 已清理 ${removed} 个文件 (${removedMB} MB)${errCount ? `\n⚠️ ${errCount} 个文件删除失败` : ""}`, ctx);
-      return;
-    }
-    await sendMessage(userId, "用法:\n/cleanup media         查看媒体文件统计\n/cleanup media <天数>   查看超过N天的文件\n/cleanup media confirm <天数>  确认删除超过N天的媒体文件", ctx);
     return;
   }
 

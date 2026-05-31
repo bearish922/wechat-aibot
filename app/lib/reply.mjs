@@ -268,8 +268,25 @@ export function rememberRecentRhetoricalPatterns(sess, text) {
 }
 
 // ─── Info-seeking detection ─────────────────────────────────
+export function stripQuotedText(userBody = "") {
+  return String(userBody || "")
+    .replace(/^\s*\[引用:[\s\S]*?\]\s*/u, "")
+    .replace(/^\s*>.*(?:\r?\n|$)/gm, "")
+    .trim();
+}
+
+export function isCasualQuestionTurn(userBody = "") {
+  const text = stripQuotedText(userBody);
+  if (!text) return false;
+  if (hasInboundAttachment(text)) return false;
+  if (/报错|bug|代码|脚本|测试|运行|执行|修|实现|改文件|项目|仓库|PR|commit|GitHub|API|配置|方案|建议|分析|总结|解释|教程|资料|排查|原因|区别|可行|如何/u.test(text)) return false;
+  return /[？?]|猜猜|是不是|会不会|想不想|要不要|能不能|可以吗|什么|怎么过|怎么样|哪/u.test(text);
+}
+
 export function isInfoSeekingTurn(userBody = "") {
-  return /为什么|怎么|如何|解释|分析|总结|建议|方案|教程|资料|报错|修|代码|测试|可行|区别|哪里|什么原因|能不能|\?|？/u.test(userBody);
+  const text = stripQuotedText(userBody);
+  if (!text || isCasualQuestionTurn(text)) return false;
+  return /为什么|如何|解释|分析|总结|建议|方案|教程|资料|报错|修|代码|测试|可行|区别|哪里|什么原因|能不能|怎么(?:修|改|做|实现|处理|解决|排查|配置|运行|测试|写)|[?？]/u.test(text);
 }
 
 // ─── Reply length budget ────────────────────────────────────
@@ -302,13 +319,20 @@ export function constrainCasualReply(text, budget) {
     if (kept.length >= Math.max(1, budget.maxParts || 1)) break;
     if (total && total + unit.length > budget.maxChars) break;
     if (!total && unit.length > budget.maxChars) {
-      kept.push(unit.slice(0, Math.max(8, budget.maxChars - 1)).trimEnd() + "…");
+      kept.push(unit);
       break;
     }
     kept.push(unit);
     total += unit.length;
   }
-  return kept.length ? kept.join(budget.maxParts > 1 ? "\n" : "") : normalized.slice(0, budget.maxChars).trimEnd() + "…";
+  return kept.length ? kept.join(budget.maxParts > 1 ? "\n" : "") : normalized;
+}
+
+export function needsReplyCondense(text, budget) {
+  if (!budget?.enforce || !text || isStructuredReply(text)) return false;
+  const maxChars = Number(budget.maxChars) || 0;
+  if (!maxChars) return false;
+  return text.trim().length > Math.max(maxChars * 1.6, maxChars + 40);
 }
 
 // ─── Style prompt builder ───────────────────────────────────
@@ -332,7 +356,9 @@ export function buildStylePrompt(recentKaomoji = [], userBody = "", budget = cho
     "",
     "【本轮回复长度签】",
     budget.instruction,
-    "长度签是本轮风格指引，不是硬性限制。如果自然表达需要更多字数，完全可以超出。",
+    budget.enforce
+      ? "长度签会在发送前按完整句收束；请优先自己说短，不要写完再等系统删。"
+      : "长度签是本轮风格指引；如果问题确实需要，可以适度超出。",
   ];
   if (recentKaomoji?.length) {
     const recent = recentKaomoji
@@ -345,7 +371,7 @@ export function buildStylePrompt(recentKaomoji = [], userBody = "", budget = cho
       "重点避免高频率或连续复用同款；如果已经隔了三四轮、语气又刚好合适，可以自然复用，不必为了回避而生硬换成陌生颜文字。也可以干脆不用颜文字，让语气靠文字本身成立。",
     );
   }
-  if (recentRhetoricalPatterns?.length && !isTask) {
+  if (recentRhetoricalPatterns?.length && (!isTask || isCasualQuestionTurn(userBody))) {
     const labels = recentRhetoricalPatterns
       .map(item => typeof item === "string" ? item : item?.label)
       .filter(Boolean)

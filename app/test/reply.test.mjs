@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { splitText, hasInboundAttachment, isInfoSeekingTurn, chooseReplyBudget, constrainCasualReply, isStructuredReply, splitSocialReply, localTimePeriod, formatLocalChatReality, buildStylePrompt, normalizeTerminology, terminologyPrompt, loadTerminologyConfig, expressionCapabilityPrompt, extractRhetoricalPatterns, rememberRecentRhetoricalPatterns } from "../lib/reply.mjs";
+import { splitText, hasInboundAttachment, isInfoSeekingTurn, isCasualQuestionTurn, chooseReplyBudget, constrainCasualReply, needsReplyCondense, isStructuredReply, splitSocialReply, localTimePeriod, formatLocalChatReality, buildStylePrompt, normalizeTerminology, terminologyPrompt, loadTerminologyConfig, expressionCapabilityPrompt, extractRhetoricalPatterns, rememberRecentRhetoricalPatterns } from "../lib/reply.mjs";
 
 describe("splitText", () => {
   it("returns single element for short text", () => {
@@ -28,6 +28,16 @@ describe("isInfoSeekingTurn", () => {
   });
   it("returns false for casual chat", () => {
     assert.equal(isInfoSeekingTurn("今天天气真好"), false);
+    assert.equal(isInfoSeekingTurn("小千圣呀，你周日准备怎么度过呢？"), false);
+    assert.equal(isInfoSeekingTurn("我不说，你可以猜猜她们写了什么，猜猜我的感觉？"), false);
+    assert.equal(isInfoSeekingTurn("[引用: 不过你说\"实在太明显\"——对谁明显？]\n是在夸你哦"), false);
+  });
+});
+
+describe("isCasualQuestionTurn", () => {
+  it("keeps role-chat questions casual", () => {
+    assert.equal(isCasualQuestionTurn("去咖啡店兼职？小千圣会被认出来吗"), true);
+    assert.equal(isCasualQuestionTurn("怎么修这个bug?"), false);
   });
 });
 
@@ -125,9 +135,13 @@ describe("constrainCasualReply", () => {
     const r = constrainCasualReply("a long reply here", { enforce: false, maxChars: 5 });
     assert.equal(r, "a long reply here");
   });
-  it("truncates when enforce is true and over budget", () => {
-    const r = constrainCasualReply("this is way too long for the budget allowed", { enforce: true, maxChars: 10, maxParts: 1 });
-    assert.ok(r.length <= 12); // 10 + "..."
+  it("keeps complete sentence units instead of cutting mid-sentence", () => {
+    const r = constrainCasualReply("第一句完整但是比较长。第二句应该被删掉。", { enforce: true, maxChars: 10, maxParts: 1 });
+    assert.equal(r, "第一句完整但是比较长。");
+  });
+  it("detects replies that should be condensed before sending", () => {
+    assert.equal(needsReplyCondense("第一句完整但是比较长。第二句继续展开很多。第三句又开始总结升华。第四句继续补充很多心理分析和漂亮收束。第五句还是没有停下来。", { enforce: true, maxChars: 20, maxParts: 1 }), true);
+    assert.equal(needsReplyCondense("短短一句。", { enforce: true, maxChars: 20, maxParts: 1 }), false);
   });
 });
 

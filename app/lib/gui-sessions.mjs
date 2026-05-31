@@ -1,15 +1,13 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { addRoute } from "./server.mjs";
-import { sessions, activeAI } from "./state.mjs";
+import { sessions, activeAI, defaultSessionMode } from "./state.mjs";
 import { dataPath } from "./paths.mjs";
 
 const LOGS_DIR = dataPath("logs");
-const DEFAULT_CHAT_CC_SESSIONS = new Set(["cst", "anon", "soyo", "aya"]);
-
 function sessionMode(ai, session) {
   if (session._mode) return session._mode;
-  return ai === "cc" && DEFAULT_CHAT_CC_SESSIONS.has(String(session.name || "").trim().toLowerCase()) ? "chat" : "tool";
+  return defaultSessionMode(ai, session.name);
 }
 
 export function registerSessionRoutes() {
