@@ -15,4 +15,4 @@ export const recentInputs = new Map();
 export function setToken(v) { token = v; }
 export function setSyncBuf(v) { getUpdatesBuf = v; }
 export function setActiveAI(v) { activeAI = v; }
-export function setProfileTemplates(v) { profileTemplates = v; }
+

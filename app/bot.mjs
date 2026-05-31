@@ -128,7 +128,7 @@ const VISION_API_KEY = usableConfigString(process.env.WECHAT_VISION_API_KEY ?? p
 const VISION_MODEL = usableConfigString(envOrConfig("WECHAT_VISION_MODEL", "vision.model", DEFAULT_VISION_MODEL), DEFAULT_VISION_MODEL);
 const VISION_DETAIL = envOrConfig("WECHAT_VISION_DETAIL", "vision.detail", "high");
 const VISION_TIMEOUT_MS = configNumber("vision.timeoutMs", 180_000);
-import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, rememberRecentKaomoji, rememberRecentRhetoricalPatterns, COMMON_CHAT_STYLE_PROMPT, formatLocalChatReality, expressionCapabilityPrompt } from "./lib/reply.mjs";
+import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, rememberRecentKaomoji, COMMON_CHAT_STYLE_PROMPT, formatLocalChatReality, expressionCapabilityPrompt } from "./lib/reply.mjs";
 import { RAG_SKIP_PATTERNS, shouldSkipRag } from "./lib/rag.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
@@ -142,7 +142,7 @@ import { registerControlRoutes } from "./lib/gui-control.mjs";
 
 // ─── STATE ──────────────────────────────────────────────────
 import { token, getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, recentInputs, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
-import { uuid, shortId, sleep, log, isPidRunning } from "./lib/utils.mjs";
+import { uuid, sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost, apiGet } from "./lib/wechat.mjs";
 import { applyMemoryOps, buildMemoryWriterSystemPrompt, isMemoryEnabled, shouldRunMemoryWriter, memoryListText, memoryMaintenanceNotice, normalizeMemoryCategory, parseMemoryWriterOutput, renderMemoryPrompt } from "./lib/memory.mjs";
 const LONG_POLL_TIMEOUT_MS = 35_000;
@@ -301,8 +301,6 @@ function makeSession(name, profile = null) {
     _firstTurn: true,
     _recentKaomoji: [],
     _kaomojiTurn: 0,
-    _recentRhetoricalPatterns: [],
-    _rhetoricalTurn: 0,
     _profile: profile,
   };
 }
@@ -320,8 +318,6 @@ function hydrateSession(ai, raw = {}) {
     _lastEnd: 0,
     _recentKaomoji: raw._recentKaomoji || [],
     _kaomojiTurn: raw._kaomojiTurn || 0,
-    _recentRhetoricalPatterns: raw._recentRhetoricalPatterns || [],
-    _rhetoricalTurn: raw._rhetoricalTurn || 0,
     _profile: raw._profile ?? null,
   };
 }
@@ -342,8 +338,6 @@ function saveSessions() {
           _firstTurn: s._firstTurn,
           _recentKaomoji: s._recentKaomoji || [],
           _kaomojiTurn: s._kaomojiTurn || 0,
-          _recentRhetoricalPatterns: s._recentRhetoricalPatterns || [],
-          _rhetoricalTurn: s._rhetoricalTurn || 0,
           _profile: s._profile ?? null,
         })),
       };
@@ -1575,7 +1569,6 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   writeFmt(`\n=== End ===`);
   if (styleState && assistantFullText) {
     rememberRecentKaomoji(styleState, assistantFullText);
-    rememberRecentRhetoricalPatterns(styleState, assistantFullText);
   }
   try {
     await updateUserMemoryFromTurn(userId, body, turnProfile);

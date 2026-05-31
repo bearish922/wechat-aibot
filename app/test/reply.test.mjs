@@ -8,8 +8,6 @@ import {
   localTimePeriod,
   formatLocalChatReality,
   expressionCapabilityPrompt,
-  extractRhetoricalPatterns,
-  rememberRecentRhetoricalPatterns,
 } from "../lib/reply.mjs";
 
 describe("splitText", () => {
@@ -52,20 +50,6 @@ describe("expression capability", () => {
     const text = expressionCapabilityPrompt();
     assert.match(text, /\[旺柴\]/u);
     assert.match(text, /不能主动发送微信内置表情包占位文本/u);
-  });
-});
-
-describe("rhetorical pattern memory", () => {
-  it("detects AI-sounding rhetorical patterns", () => {
-    const patterns = extractRhetoricalPatterns("这一步，很多人一辈子迈不出来。不是逃避，而是清醒。");
-    assert.ok(patterns.some(item => item.key === "contrast"));
-    assert.ok(patterns.some(item => item.key === "grandComparison"));
-  });
-
-  it("remembers recent rhetorical patterns without building prompt text", () => {
-    const sess = {};
-    rememberRecentRhetoricalPatterns(sess, "这一点，足够珍贵。");
-    assert.ok(sess._recentRhetoricalPatterns.some(item => item.key === "judgment"));
   });
 });
 
