@@ -1,6 +1,3 @@
-import fs from "node:fs";
-import { rootPath } from "./paths.mjs";
-
 // ─── Common chat style prompt ───────────────────────────────
 export const COMMON_CHAT_STYLE_PROMPT = [
   "【共同聊天风格】",
@@ -8,36 +5,12 @@ export const COMMON_CHAT_STYLE_PROMPT = [
   "一句话够就停；连发时像自然停顿、补一句、突然反应过来，不要先回应再展开再反问。",
   "语气更口语、更松一点，可以吐槽、顺着情绪笑一下、分享小念头，也可以把话停在不完整但自然的位置。",
   "不要把对方的话改写成金句、人生判断、戏剧旁白或漂亮总结；少用“不是A而是B”“这一点/这一步/这句话 + 价值判断”等拔高句。",
+  "可以自然回钩近处的梗，但不要为了显得记得旧内容，把已经离开当前话题的细节硬塞进回复；长期记忆和旧摘要只在当前消息明确相关时使用。",
   "反问只在真的好奇或对话需要继续时使用。颜文字和括号动作只是小装饰，跟情绪匹配，避免机械重复；也可以不用。",
 ].join("\n");
 
 export const MAX_REPLY_LEN = 3800;
 export const SOCIAL_REPLY_MAX_PARTS = 6;
-export const TERMINOLOGY_FILE = rootPath("wechat-terminology.json");
-
-const DEFAULT_TERMINOLOGY = {
-  promptRules: [
-    "Pastel*Palettes 可以写全名 Pastel*Palettes，或写简称 PasPale；不要写“帕斯帕雷”“帕斯帕莱”等音译。",
-    "若宫伊芙日常称呼写“伊芙”，不要写 Eve/eve。",
-  ],
-  replacements: [
-    { pattern: "帕斯[·・\\s-]?帕[雷莱蕾]", flags: "gu", replace: "PasPale" },
-    { pattern: "\\b[Ee]ve\\b", flags: "g", replace: "伊芙" },
-  ],
-};
-
-export function loadTerminologyConfig() {
-  try {
-    if (!fs.existsSync(TERMINOLOGY_FILE)) return DEFAULT_TERMINOLOGY;
-    const data = JSON.parse(fs.readFileSync(TERMINOLOGY_FILE, "utf-8"));
-    return {
-      promptRules: Array.isArray(data?.promptRules) ? data.promptRules.filter(rule => typeof rule === "string" && rule.trim()) : DEFAULT_TERMINOLOGY.promptRules,
-      replacements: Array.isArray(data?.replacements) ? data.replacements.filter(rule => typeof rule?.pattern === "string" && typeof rule?.replace === "string") : DEFAULT_TERMINOLOGY.replacements,
-    };
-  } catch {
-    return DEFAULT_TERMINOLOGY;
-  }
-}
 
 function pad2(value) {
   return String(value).padStart(2, "0");
@@ -74,25 +47,6 @@ export function formatLocalChatReality(date = new Date()) {
     "【优先级】",
     "用户明确描述当前场景时，以用户描述为准；角色日常习惯和当前时间冲突时，以当前聊天现实为准。",
   ].join("\n");
-}
-
-export function terminologyPrompt() {
-  const rules = loadTerminologyConfig().promptRules;
-  return [
-    "【术语规范】",
-    "乐队、角色、作品、歌曲等专有名词优先沿用上下文、角色模板和知识库里的写法；不要临场自造中文音译。",
-    ...rules,
-  ].join("\n");
-}
-
-export function normalizeTerminology(text = "") {
-  let normalized = String(text);
-  for (const rule of loadTerminologyConfig().replacements) {
-    try {
-      normalized = normalized.replace(new RegExp(rule.pattern, rule.flags || "g"), rule.replace);
-    } catch {}
-  }
-  return normalized;
 }
 
 export function expressionCapabilityPrompt() {
@@ -249,31 +203,6 @@ export function extractRhetoricalPatterns(text = "") {
     .map(rule => ({ key: rule.key, label: rule.label }));
 }
 
-export function detectAiStyleIssues(text = "") {
-  const value = String(text || "").trim();
-  if (!value || isStructuredReply(value)) return [];
-  const issues = [...extractRhetoricalPatterns(value)];
-  const actionCount = (value.match(/[（(][^）)\n]{2,42}[）)]/gu) || []).length;
-  if (actionCount >= 3) {
-    issues.push({ key: "tooManyActions", label: "括号动作过密" });
-  }
-  const questionCount = (value.match(/[？?]/g) || []).length;
-  if (questionCount >= 3 && value.length < 500) {
-    issues.push({ key: "tooManyQuestions", label: "连续反问过密" });
-  }
-  if (/真正的|本质上|这意味着|某种意义上|不是.*弱点.*证据|足够让|足够说明/u.test(value)) {
-    issues.push({ key: "abstractClosure", label: "抽象升华或漂亮收束" });
-  }
-  return issues;
-}
-
-export function needsDeAiRewrite(text = "", budget = null) {
-  if (!text || isStructuredReply(text)) return false;
-  const issues = detectAiStyleIssues(text);
-  if (!issues.length) return false;
-  return Boolean(budget?.enforce) || issues.length >= 2;
-}
-
 export function rememberRecentRhetoricalPatterns(sess, text) {
   if (!sess) return;
   sess._rhetoricalTurn = (sess._rhetoricalTurn || 0) + 1;
@@ -292,128 +221,3 @@ export function rememberRecentRhetoricalPatterns(sess, text) {
   ].slice(0, 4);
 }
 
-// ─── Info-seeking detection ─────────────────────────────────
-export function stripQuotedText(userBody = "") {
-  return String(userBody || "")
-    .replace(/^\s*\[引用:[\s\S]*?\]\s*/u, "")
-    .replace(/^\s*>.*(?:\r?\n|$)/gm, "")
-    .trim();
-}
-
-export function isCasualQuestionTurn(userBody = "") {
-  const text = stripQuotedText(userBody);
-  if (!text) return false;
-  if (hasInboundAttachment(text)) return false;
-  if (/报错|bug|代码|脚本|测试|运行|执行|修|实现|改文件|项目|仓库|PR|commit|GitHub|API|配置|方案|建议|分析|总结|解释|教程|资料|排查|原因|区别|可行|如何/u.test(text)) return false;
-  return /[？?]|猜猜|是不是|会不会|想不想|要不要|能不能|可以吗|什么|怎么过|怎么样|哪/u.test(text);
-}
-
-export function isHardTaskTurn(userBody = "") {
-  const text = stripQuotedText(userBody);
-  if (!text) return false;
-  return /报错|bug|代码|脚本|测试|运行|执行|修|实现|改文件|项目|仓库|PR|commit|GitHub|API|配置|排查|怎么(?:修|改|做|实现|处理|解决|排查|配置|运行|测试|写)/u.test(text);
-}
-
-export function isInfoSeekingTurn(userBody = "", options = {}) {
-  const text = stripQuotedText(userBody);
-  if (!text) return false;
-  if (options.mode === "chat") return isHardTaskTurn(text);
-  if (isCasualQuestionTurn(text)) return false;
-  return /为什么|如何|解释|分析|总结|建议|方案|教程|资料|报错|修|代码|测试|可行|区别|哪里|什么原因|能不能|怎么(?:修|改|做|实现|处理|解决|排查|配置|运行|测试|写)|[?？]/u.test(text);
-}
-
-// ─── Reply length budget ────────────────────────────────────
-export function chooseReplyBudget(userBody = "", options = {}) {
-  const infoSeeking = isInfoSeekingTurn(userBody, options);
-  const mediaCasual = hasInboundAttachment(userBody) && !infoSeeking;
-  const r = Math.random();
-  if (mediaCasual || !infoSeeking) {
-    if (r < 0.35) return { instruction: "极短：只回 1 条，中文 6-18 字；像微信里顺手接一句，不解释、不追问。", maxChars: 24, maxParts: 1, enforce: true };
-    if (r < 0.72) return { instruction: "短：只回 1 条，中文 20-45 字；抓住一个点回应，立刻停住。", maxChars: 55, maxParts: 1, enforce: true };
-    if (r < 0.90) return { instruction: "普通短聊：1 条，中文 45-90 字；可以有一点细节，但不要展开成小作文。", maxChars: 105, maxParts: 1, enforce: true };
-    if (r < 0.98) return { instruction: "短连发：2-4 条，每条 6-28 字，总量不超过 90 字；只有自然停顿或情绪跳动时才这样发。", maxChars: 105, maxParts: 4, enforce: true };
-    return { instruction: "少见长一点：1-2 条，总量不超过 160 字；仍然像私聊，不要讲设定课。", maxChars: 180, maxParts: 2, enforce: true };
-  }
-  if (r < 0.20) return { instruction: "短：1 条，中文 25-60 字；先给结论，不铺开。", maxChars: 80, maxParts: 1, enforce: false };
-  if (r < 0.65) return { instruction: "正常说明：1-2 条，总量 80-180 字；回答清楚即可，不要顺手扩写。", maxChars: 220, maxParts: 2, enforce: false };
-  if (r < 0.92) return { instruction: "较完整：1-3 条，总量 180-320 字；只在问题确实需要时使用。", maxChars: 360, maxParts: 3, enforce: false };
-  return { instruction: "长回复：可以超过 320 字，但必须是对方明确需要分析、排查或方案时；闲聊禁用。", maxChars: 800, maxParts: 4, enforce: false };
-}
-
-// ─── Budget enforcement ─────────────────────────────────────
-export function constrainCasualReply(text, budget) {
-  if (!budget?.enforce || !text || text.length <= budget.maxChars || isStructuredReply(text)) return text;
-  const normalized = text.trim().replace(/\n{3,}/g, "\n\n");
-  const explicit = normalized.split(/\n+/).map(s => s.trim()).filter(Boolean);
-  const units = explicit.length > 1 ? explicit : (normalized.match(/[^。！？!?…~～\n]+[。！？!?…~～]*|.+$/g) || [normalized]).map(s => s.trim()).filter(Boolean);
-  const kept = [];
-  let total = 0;
-  for (const unit of units) {
-    if (kept.length >= Math.max(1, budget.maxParts || 1)) break;
-    if (total && total + unit.length > budget.maxChars) break;
-    if (!total && unit.length > budget.maxChars) {
-      kept.push(unit);
-      break;
-    }
-    kept.push(unit);
-    total += unit.length;
-  }
-  return kept.length ? kept.join(budget.maxParts > 1 ? "\n" : "") : normalized;
-}
-
-export function needsReplyCondense(text, budget) {
-  if (!budget?.enforce || !text || isStructuredReply(text)) return false;
-  const maxChars = Number(budget.maxChars) || 0;
-  if (!maxChars) return false;
-  return text.trim().length > Math.max(maxChars * 1.6, maxChars + 40);
-}
-
-// ─── Style prompt builder ───────────────────────────────────
-export function buildStylePrompt(recentKaomoji = [], userBody = "", budget = chooseReplyBudget(userBody), recentRhetoricalPatterns = [], options = {}) {
-  const isTask = isInfoSeekingTurn(userBody, options);
-  const chatGuidance = isTask ? [
-    "【任务模式风格】",
-    "对方在正经求助，可以比闲聊说得更多；需要时允许列表、分段、代码块。",
-    "保持角色语气和思维方式，解释清楚即可，不要顺手扩写成标准答案或机械总结。",
-    "可以有一点角色反应、吐槽或类比，但内容价值优先。",
-  ].join("\n") : COMMON_CHAT_STYLE_PROMPT;
-
-  const parts = [
-    chatGuidance,
-    "",
-    formatLocalChatReality(),
-    "",
-    terminologyPrompt(),
-    "",
-    expressionCapabilityPrompt(),
-    "",
-    "【本轮回复长度签】",
-    budget.instruction,
-    budget.enforce
-      ? "长度签会在发送前按完整句收束；请优先自己说短，不要写完再等系统删。"
-      : "长度签是本轮风格指引；如果问题确实需要，可以适度超出。",
-  ];
-  if (recentKaomoji?.length) {
-    const recent = recentKaomoji
-      .map(item => typeof item === "string" ? item : item?.text)
-      .filter(Boolean)
-      .join(" ");
-    parts.push(
-      "",
-      `【近期表达记忆】近期出现过这些颜文字：${recent}`,
-      "重点避免高频率或连续复用同款；如果已经隔了三四轮、语气又刚好合适，可以自然复用，不必为了回避而生硬换成陌生颜文字。也可以干脆不用颜文字，让语气靠文字本身成立。",
-    );
-  }
-  if (recentRhetoricalPatterns?.length && (!isTask || isCasualQuestionTurn(userBody))) {
-    const labels = recentRhetoricalPatterns
-      .map(item => typeof item === "string" ? item : item?.label)
-      .filter(Boolean)
-      .join("、");
-    parts.push(
-      "",
-      `【近期表达提醒】上一轮附近出现过偏AI的表达模式：${labels}。`,
-      "本轮刻意放松一点，直接接话，少做反转、升华、夸张比较或漂亮收束；具体一点、普通一点也可以。",
-    );
-  }
-  return parts.join("\n");
-}

@@ -1,11 +1,13 @@
 # Changelog
 
-## Unreleased
-- Refine chat `/summary` into a fuller historical summary flow with timestamps, recent-summary backups, configurable compact timeout/token/message budgets, and one retry for transient chat backend failures.
-- Add a pre-send chat rewrite pass that detects AI-sounding rhetorical patterns, abstract closures, dense stage directions, and repeated questions before condensing casual role replies.
-- Make chat-mode intent detection mode-aware and reduce chat RAG usage to explicit role/lore/fact queries, so casual turns stay conversational.
-- Treat current user messages as higher priority than volatile long-term memory facts, and limit automatic memory writes to add/update/noop operations.
-- Expose new chat compact settings in the example config and local GUI.
+## v2.3.0 — Per-Role Memory (2026-06-01)
+- Restructure long-term memory into per-role buckets (`users[userId].roles[profile].items`) so each role persona maintains its own independent memory of the user, with automatic migration of existing memory into the 白鹭千圣 role
+- Add `/memory <角色名>` to view another role's memory from any session; `/memory` without arguments shows the current role
+- Remove chat/tool session mode split, `/mode`, `/compact`, `/summary` commands, and the OpenAI-compatible chat backend — all threads now use Claude Code / Codex persistent sessions
+- Retire `wechat-memory.json` from public tracking and add `wechat-memory.example.json` as the v2 template for new installations
+- Add automatic retry (up to 3 attempts) on message send failures for improved reliability
+- Remove `DEFAULT_CHAT_CC_SESSIONS`, `defaultSessionMode`, and related chat-mode state from the codebase
+- Clean up chat-related GUI fields, session mode columns, and config entries
 
 ## v2.2.0 — Chat and Tool Session Split (2026-05-31)
 - Add per-session `chat` / `tool` modes. Tool sessions keep using Claude Code/Codex resume for project work, while chat sessions use a lightweight OpenAI-compatible Chat Completions backend.

@@ -27,18 +27,6 @@
     "detail": "high",
     "timeoutMs": 180000
   },
-  "chat": {
-    "baseUrl": "",
-    "apiKey": "",
-    "model": "",
-    "temperature": 0.8,
-    "maxTokens": 800,
-    "timeoutMs": 120000,
-    "compactKeepTurns": 6,
-    "compactTimeoutMs": 240000,
-    "compactMaxTokens": 0,
-    "compactMessageMaxChars": 1800
-  },
   "rag": {
     "enabled": true,
     "knowledgeDir": "data/knowledge",

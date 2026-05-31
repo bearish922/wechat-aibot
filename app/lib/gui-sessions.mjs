@@ -1,14 +1,10 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { addRoute } from "./server.mjs";
-import { sessions, activeAI, defaultSessionMode } from "./state.mjs";
+import { sessions, activeAI } from "./state.mjs";
 import { dataPath } from "./paths.mjs";
 
 const LOGS_DIR = dataPath("logs");
-function sessionMode(ai, session) {
-  if (session._mode) return session._mode;
-  return defaultSessionMode(ai, session.name);
-}
 
 export function registerSessionRoutes() {
   addRoute("GET", "/api/sessions", () => {
@@ -25,7 +21,6 @@ export function registerSessionRoutes() {
             busy: s.busy || false,
             queue: s.queue?.length || 0,
             profile: s._profile || "默认",
-            mode: sessionMode(ai, s),
             firstTurn: s._firstTurn,
           });
         }
@@ -66,18 +61,15 @@ export function registerSessionRoutes() {
         for (const s of u.list) {
           const active = s.id === u.activeId ? " [当前]" : "";
           const profile = s._profile || "默认";
-          const mode = sessionMode(ai, s);
-          const command = mode === "chat" ? "chat session (no CLI resume)" : (ai === "cc" ? `claude --resume ${s.sid}` : `codex resume ${s.sid}`);
+          const command = ai === "cc" ? `claude --resume ${s.sid}` : `codex resume ${s.sid}`;
           lines.push(`  ${s.name}${active}`);
           lines.push(`    角色: ${profile}`);
-          lines.push(`    类型: ${mode}`);
           lines.push(`    ${command}`);
           commands.push({
             ai,
             aiLabel,
             name: s.name,
             profile,
-            mode,
             active: s.id === u.activeId,
             sid: s.sid,
             command,

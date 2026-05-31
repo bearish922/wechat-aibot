@@ -25,16 +25,6 @@ const CONFIG_FIELDS = {
   "vision.model": "string",
   "vision.detail": "string",
   "vision.timeoutMs": "number",
-  "chat.baseUrl": "string",
-  "chat.apiKey": "string",
-  "chat.model": "string",
-  "chat.temperature": "number",
-  "chat.maxTokens": "number",
-  "chat.timeoutMs": "number",
-  "chat.compactKeepTurns": "number",
-  "chat.compactTimeoutMs": "number",
-  "chat.compactMaxTokens": "number",
-  "chat.compactMessageMaxChars": "number",
   "rag.enabled": "boolean",
   "rag.knowledgeDir": "string",
   "rag.storeDir": "string",
@@ -99,7 +89,7 @@ function sanitizeConfigBody(body, current) {
   for (const [key, type] of Object.entries(CONFIG_FIELDS)) {
     let value = getNested(body, key);
     if (value === undefined) continue;
-    if ((key === "vision.apiKey" || key === "chat.apiKey") && String(value).includes("****")) {
+    if (key === "vision.apiKey" && String(value).includes("****")) {
       value = getNested(current, key) || "";
     }
     setNested(next, key, coerceConfigValue(value, type, getNested(current, key)));
@@ -126,9 +116,6 @@ export function registerConfigRoutes() {
       const raw = loadConfigForGui();
       if (raw.vision?.apiKey) {
         raw.vision.apiKey = raw.vision.apiKey.slice(0, 8) + "****";
-      }
-      if (raw.chat?.apiKey) {
-        raw.chat.apiKey = raw.chat.apiKey.slice(0, 8) + "****";
       }
       return { ok: true, config: raw };
     } catch (e) {

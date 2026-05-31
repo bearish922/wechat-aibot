@@ -10,13 +10,6 @@ export let profileTemplates = {};
 export let modelNames = { cc: "unknown", codex: "unknown" };
 export const pendingInputs = new Map();
 export const recentInputs = new Map();
-export const DEFAULT_CHAT_CC_SESSIONS = new Set(["cst", "anon", "soyo", "aya"]);
-export const MODE_CHAT = "chat";
-export const MODE_TOOL = "tool";
-
-export function defaultSessionMode(ai, name) {
-  return ai === "cc" && DEFAULT_CHAT_CC_SESSIONS.has(String(name || "").trim().toLowerCase()) ? MODE_CHAT : MODE_TOOL;
-}
 
 // Setter helpers for reassignable primitives
 export function setToken(v) { token = v; }

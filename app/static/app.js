@@ -69,7 +69,6 @@ async function renderSessions() {
     <tr>
       <td><span class="badge badge-${s.ai === 'cc' ? 'cc' : 'codex'}">${s.ai === 'cc' ? 'CC' : 'Codex'}</span></td>
       <td>${s.active ? '<strong class="active-mark">→</strong>' : ''} ${escHtml(s.name)}</td>
-      <td><span class="badge badge-default">${escHtml(s.mode || 'tool')}</span></td>
       <td><span class="badge badge-default">${escHtml(s.profile)}</span></td>
       <td>${s.busy ? 'Busy' : s.queue ? 'Queue(' + Number(s.queue) + ')' : 'Idle'}</td>
     </tr>
@@ -81,8 +80,8 @@ async function renderSessions() {
     <div class="panel">
       <div class="panel-head"><h2>Sessions (${d.currentAI === 'cc' ? 'Claude Code' : 'Codex'})</h2></div>
       <div class="table-wrap"><table>
-        <thead><tr><th>AI</th><th>Name</th><th>Mode</th><th>Profile</th><th>Status</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="5">No sessions</td></tr>'}</tbody>
+        <thead><tr><th>AI</th><th>Name</th><th>Profile</th><th>Status</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="4">No sessions</td></tr>'}</tbody>
       </table></div>
     </div>
     <div class="panel">
@@ -290,7 +289,6 @@ async function renderConfig() {
     S("Models", F("models.claudeFast", "Claude Fast Model", c.models?.claudeFast) + F("models.claudeFallback", "Claude Fallback Model", c.models?.claudeFallback)),
     S("Timeouts", F("timeouts.aiMs", "AI Timeout (ms)", c.timeouts?.aiMs, "number")),
     S("Vision", Select("vision.mode", "Mode", c.vision?.mode || "auto", [["auto", "Auto"], ["external", "External API"], ["native", "Native backend"], ["off", "Off"]]) + F("vision.baseUrl", "API Base URL", c.vision?.baseUrl, "text", "Default SiliconFlow") + F("vision.apiKey", "API Key", c.vision?.apiKey, "password", "Only for External API") + F("vision.model", "Model Name", c.vision?.model, "text", "Default Qwen/Qwen3-VL-32B-Instruct") + F("vision.detail", "Detail Level", c.vision?.detail) + F("vision.timeoutMs", "Timeout (ms)", c.vision?.timeoutMs, "number")),
-    S("Chat", F("chat.baseUrl", "API Base URL", c.chat?.baseUrl, "text", "OpenAI-compatible") + F("chat.apiKey", "API Key", c.chat?.apiKey, "password", "Only for chat sessions") + F("chat.model", "Model Name", c.chat?.model, "text", "Required for chat mode") + F("chat.temperature", "Temperature", c.chat?.temperature, "number") + F("chat.maxTokens", "Max Tokens", c.chat?.maxTokens, "number") + F("chat.timeoutMs", "Timeout (ms)", c.chat?.timeoutMs, "number") + F("chat.compactKeepTurns", "Compact Keep Turns", c.chat?.compactKeepTurns, "number") + F("chat.compactTimeoutMs", "Compact Timeout (ms)", c.chat?.compactTimeoutMs, "number") + F("chat.compactMaxTokens", "Compact Max Tokens", c.chat?.compactMaxTokens, "number") + F("chat.compactMessageMaxChars", "Compact Message Max Chars", c.chat?.compactMessageMaxChars, "number")),
     S("RAG", F("rag.knowledgeDir", "Knowledge Directory", c.rag?.knowledgeDir) + F("rag.collectionName", "Collection Name", c.rag?.collectionName) + F("rag.embedModel", "Embedding Model", c.rag?.embedModel) + F("rag.storeDir", "Vector Store Dir", c.rag?.storeDir) + F("rag.modelCacheDir", "Model Cache Dir", c.rag?.modelCacheDir) + F("rag.topK", "Top K Results", c.rag?.topK, "number") + F("rag.minScore", "Min Score", c.rag?.minScore, "number") + F("rag.scoreMargin", "Score Margin", c.rag?.scoreMargin, "number") + F("rag.chunkMaxChars", "Chunk Max Chars", c.rag?.chunkMaxChars, "number") + F("rag.resultMaxChars", "Result Max Chars", c.rag?.resultMaxChars, "number") + F("rag.batchSize", "Batch Size", c.rag?.batchSize, "number") + F("rag.enabled", "Enabled (true/false)", c.rag?.enabled)),
     S("Logs", F("logs.retentionDays", "Retention (days, 0=never)", c.logs?.retentionDays, "number")),
   ].join("");

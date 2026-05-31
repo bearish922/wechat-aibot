@@ -109,11 +109,21 @@ export async function loginWithQr() {
 
 // ─── Send ───────────────────────────────────────────────────
 export async function sendMessage(toUserId, text, contextToken) {
-  if (!text?.trim()) return;
-  try {
-    await apiPost("ilink/bot/sendmessage", {
-      msg: { to_user_id: toUserId, client_id: shortId(), message_type: 2, message_state: 2,
-        item_list: [{ type: 1, text_item: { text } }], context_token: contextToken || undefined },
-    });
-  } catch (e) { log("❌", `发送失败: ${e.message}`); }
+  if (!text?.trim()) return true;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const resp = await apiPost("ilink/bot/sendmessage", {
+        msg: { to_user_id: toUserId, client_id: shortId(), message_type: 2, message_state: 2,
+          item_list: [{ type: 1, text_item: { text } }], context_token: contextToken || undefined },
+      });
+      if (resp?.ret && resp.ret !== 0) throw new Error(resp.errmsg || `ret=${resp.ret}`);
+      if (resp?.errcode && resp.errcode !== 0) throw new Error(resp.errmsg || `errcode=${resp.errcode}`);
+      return true;
+    } catch (e) {
+      const triesLeft = attempt < 2;
+      log(triesLeft ? "⚠️" : "❌", `发送失败${triesLeft ? "，重试中" : ""}: ${e.message}`);
+      if (triesLeft) await sleep(800 * (attempt + 1));
+    }
+  }
+  return false;
 }
