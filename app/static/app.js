@@ -36,6 +36,7 @@ async function render() {
       case "status": await renderStatus(); break;
       case "sessions": await renderSessions(); break;
       case "profiles": await renderProfiles(); break;
+      case "history": await renderHistory(); break;
       case "config": await renderConfig(); break;
     }
   } catch (e) {
@@ -268,6 +269,87 @@ window.deleteProfile = async (name) => {
   if (r.ok) render();
 };
 
+// History
+let historyState = { q: "", sessionKey: "" };
+
+async function renderHistory() {
+  const q = historyState.q || "";
+  const conv = await get(`/api/history/conversations?q=${encodeURIComponent(q)}`);
+  const conversations = conv.conversations || [];
+  if (!historyState.sessionKey && conversations.length) historyState.sessionKey = conversations[0].key;
+  if (historyState.sessionKey && !conversations.some(x => x.key === historyState.sessionKey) && conversations.length) {
+    historyState.sessionKey = conversations[0].key;
+  }
+  const msgPath = `/api/history/messages?limit=800${historyState.sessionKey ? `&sessionKey=${encodeURIComponent(historyState.sessionKey)}` : ""}${q ? `&q=${encodeURIComponent(q)}` : ""}`;
+  const msg = historyState.sessionKey ? await get(msgPath) : { messages: [] };
+  content.innerHTML = `
+    <div class="panel history-panel">
+      <div class="panel-head">
+        <h2>Chat History</h2>
+        <input id="historySearch" class="history-search" placeholder="Search messages or scenelets" value="${escAttr(q)}">
+      </div>
+      <div class="history-layout">
+        <aside class="history-conversations">
+          ${renderHistoryConversations(conversations)}
+        </aside>
+        <section class="history-messages">
+          ${renderHistoryMessages(msg.messages || [])}
+        </section>
+      </div>
+    </div>
+  `;
+  content.querySelector("#historySearch").addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+      historyState.q = e.target.value.trim();
+      historyState.sessionKey = "";
+      renderHistory();
+    }
+  });
+  content.querySelectorAll("[data-history-session]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      historyState.sessionKey = btn.dataset.historySession;
+      renderHistory();
+    });
+  });
+}
+
+function renderHistoryConversations(conversations) {
+  if (!conversations.length) return '<p class="empty-text">No conversations yet</p>';
+  return conversations.map(item => `
+    <button class="history-conv ${item.key === historyState.sessionKey ? "active" : ""}" data-history-session="${escAttr(item.key)}">
+      <span class="history-conv-top">
+        <strong>${escHtml(item.sessionName || "Session")}</strong>
+        <span class="badge badge-${item.ai === "cc" ? "cc" : "codex"}">${item.ai === "cc" ? "CC" : "Codex"}</span>
+      </span>
+      <span class="history-conv-meta">${escHtml(item.profile || "default")} · ${Number(item.count || 0)} msgs · ${Number(item.sceneletCount || 0)} scenelets</span>
+      <span class="history-conv-last">${escHtml(item.lastText || "")}</span>
+      <time>${formatTime(item.lastTimestamp)}</time>
+    </button>
+  `).join("");
+}
+
+function renderHistoryMessages(messages) {
+  if (!messages.length) return '<p class="empty-text">No messages in this conversation</p>';
+  return messages.map(item => `
+    <article class="history-message ${item.role === "assistant" ? "assistant" : "user"}">
+      <header>
+        <span>${item.role === "assistant" ? escHtml(item.profile || "Assistant") : "User"}</span>
+        <time>${formatTime(item.timestamp)}</time>
+        ${item.kind && item.kind !== "chat" ? `<span class="history-kind">${escHtml(item.kind)}</span>` : ""}
+      </header>
+      <div class="history-text">${escHtml(item.text || "")}</div>
+      ${item.scenelet ? `<details class="scenelet-details"><summary>inner scenelet</summary><pre>${escHtml(item.scenelet)}</pre></details>` : ""}
+    </article>
+  `).join("");
+}
+
+function formatTime(value) {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return escHtml(value);
+  return d.toLocaleString("zh-CN", { hour12: false });
+}
+
 // Config
 function F(key, label, value, type, placeholder = "") {
   return `<div class="form-group"><label>${label}</label><input name="${key}" value="${escHtml(String(value ?? ''))}" type="${type || 'text'}" placeholder="${escAttr(placeholder)}"></div>`;
@@ -286,7 +368,7 @@ async function renderConfig() {
   const formHtml = [
     S("Paths", F("paths.npmGlobal", "NPM Global Directory", c.paths?.npmGlobal, "text", "Auto") + F("paths.claude", "Claude Code Path", c.paths?.claude, "text", "Auto") + F("paths.codex", "Codex Path", c.paths?.codex, "text", "Auto") + F("paths.ragScript", "RAG Script Path", c.paths?.ragScript, "text", "Auto") + F("paths.workDir", "AI Working Directory", c.paths?.workDir, "text", "Auto")),
     S("Proxy", F("proxy.https", "Shared HTTPS Proxy", c.proxy?.https, "text", "Fallback") + F("proxy.claudeHttps", "Claude HTTPS Proxy", c.proxy?.claudeHttps, "text", "Direct when empty") + F("proxy.codexHttps", "Codex HTTPS Proxy", c.proxy?.codexHttps, "text", "http://127.0.0.1:7892") + F("proxy.ragHttps", "RAG HTTPS Proxy", c.proxy?.ragHttps, "text", "Fallback")),
-    S("Models", F("models.claudeFast", "Claude Fast Model", c.models?.claudeFast) + F("models.claudeFallback", "Claude Fallback Model", c.models?.claudeFallback)),
+    S("Models", F("models.claudeFast", "Claude Fast Model", c.models?.claudeFast) + F("models.claudeFallback", "Claude Fallback Model", c.models?.claudeFallback) + F("models.scenelet", "Scenelet Model", c.models?.scenelet)),
     S("Timeouts", F("timeouts.aiMs", "AI Timeout (ms)", c.timeouts?.aiMs, "number")),
     S("Vision", Select("vision.mode", "Mode", c.vision?.mode || "auto", [["auto", "Auto"], ["external", "External API"], ["native", "Native backend"], ["off", "Off"]]) + F("vision.baseUrl", "API Base URL", c.vision?.baseUrl, "text", "Default SiliconFlow") + F("vision.apiKey", "API Key", c.vision?.apiKey, "password", "Only for External API") + F("vision.model", "Model Name", c.vision?.model, "text", "Default Qwen/Qwen3-VL-32B-Instruct") + F("vision.detail", "Detail Level", c.vision?.detail) + F("vision.timeoutMs", "Timeout (ms)", c.vision?.timeoutMs, "number")),
     S("RAG", F("rag.knowledgeDir", "Knowledge Directory", c.rag?.knowledgeDir) + F("rag.collectionName", "Collection Name", c.rag?.collectionName) + F("rag.embedModel", "Embedding Model", c.rag?.embedModel) + F("rag.storeDir", "Vector Store Dir", c.rag?.storeDir) + F("rag.modelCacheDir", "Model Cache Dir", c.rag?.modelCacheDir) + F("rag.topK", "Top K Results", c.rag?.topK, "number") + F("rag.minScore", "Min Score", c.rag?.minScore, "number") + F("rag.scoreMargin", "Score Margin", c.rag?.scoreMargin, "number") + F("rag.chunkMaxChars", "Chunk Max Chars", c.rag?.chunkMaxChars, "number") + F("rag.resultMaxChars", "Result Max Chars", c.rag?.resultMaxChars, "number") + F("rag.batchSize", "Batch Size", c.rag?.batchSize, "number") + F("rag.enabled", "Enabled (true/false)", c.rag?.enabled)),

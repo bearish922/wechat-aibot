@@ -1,6 +1,6 @@
 {
   "name": "wechat-aibot",
-  "version": "2.2.0",
+  "version": "2.4.0",
   "description": "Windows local WeChat AI bot powered by Claude Code or Codex",
   "main": "bot.mjs",
   "scripts": {

@@ -101,11 +101,16 @@ const CODEX_HTTPS_PROXY = envOrConfig("WECHAT_CODEX_HTTPS_PROXY", "proxy.codexHt
 const RAG_HTTPS_PROXY = envOrConfig("WECHAT_RAG_HTTPS_PROXY", "proxy.ragHttps", SHARED_HTTPS_PROXY);
 const CLAUDE_FAST_MODEL = envOrConfig("WECHAT_CLAUDE_FAST_MODEL", "models.claudeFast", "deepseek-v4-flash[1m]");
 const CLAUDE_FALLBACK_MODEL = envOrConfig("WECHAT_CLAUDE_FALLBACK_MODEL", "models.claudeFallback", "deepseek-v4-flash[1m]");
+const SCENELET_MODEL = envOrConfig("WECHAT_SCENELET_MODEL", "models.scenelet", "deepseek-v4-pro[1m]");
 const CLAUDE_TIMEOUT_MS = configNumber("timeouts.aiMs", 600_000);
 const RAG_SCRIPT = resolveProjectPath(configValue("paths.ragScript", "app/rag.py"));
 const RAG_ENABLED = configBool("rag.enabled", true);
 const INPUT_BATCH_MS = 30_000;
 const DUPLICATE_INPUT_MS = 5000;
+const SCENE_VISIBLE_CONTEXT_TURNS = 8;
+const SCENE_STATE_MAX_CHARS = 220;
+const PROACTIVE_CHECK_INTERVAL_MS = 20_000;
+const PROACTIVE_COOLDOWN_MS = 60 * 60 * 1000;
 const SESSION_LOCK_RETRIES = 3;
 const SESSION_LOCK_RETRY_MS = 2_000;
 const SESSION_RELEASE_GRACE_MS = 800;
@@ -135,6 +140,8 @@ import { registerStatusRoutes } from "./lib/gui-status.mjs";
 import { registerSessionRoutes } from "./lib/gui-sessions.mjs";
 import { registerProfileRoutes } from "./lib/gui-profiles.mjs";
 import { registerConfigRoutes } from "./lib/gui-config.mjs";
+import { registerHistoryRoutes } from "./lib/gui-history.mjs";
+import { appendChatEvent } from "./lib/chat-history.mjs";
 
 // ─── STATE ──────────────────────────────────────────────────
 import { getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, recentInputs, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
@@ -142,6 +149,7 @@ import { uuid, sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost, CDN_BASE_URL } from "./lib/wechat.mjs";
 import { applyMemoryOps, buildMemoryWriterSystemPrompt, isMemoryEnabled, shouldRunMemoryWriter, memoryListText, memoryMaintenanceNotice, normalizeMemoryCategory, parseMemoryWriterOutput, renderMemoryPrompt } from "./lib/memory.mjs";
 const LONG_POLL_TIMEOUT_MS = 35_000;
+let lastProactiveCheckAt = 0;
 
 function loadModelNames() {
   // CC: read from ~/.claude/settings.json
@@ -298,9 +306,76 @@ function makeSession(name, profile = null) {
     _recentKaomoji: [],
     _kaomojiTurn: 0,
     _profile: profile,
+    _lastFailedTurn: null,
+    _sceneState: null,
+    _visibleHistory: [],
+    _proactiveIntents: [],
+    _lastUserAt: null,
+    _lastAssistantAt: null,
+    _lastProactiveAt: null,
+    _lastContextToken: null,
   };
 }
 
+function normalizeFailedTurn(raw) {
+  if (!raw?.body) return null;
+  return {
+    body: String(raw.body),
+    timestamp: raw.timestamp ? String(raw.timestamp) : null,
+    reason: raw.reason ? String(raw.reason).slice(0, 500) : "",
+    sid: raw.sid ? String(raw.sid) : null,
+  };
+}
+
+function normalizeSceneState(raw) {
+  if (!raw) return null;
+  const text = typeof raw === "string" ? raw : raw.text;
+  if (!text) return null;
+  return {
+    text: String(text).slice(0, SCENE_STATE_MAX_CHARS),
+    updatedAt: raw.updatedAt ? String(raw.updatedAt) : new Date().toISOString(),
+    expiresAt: raw.expiresAt ? String(raw.expiresAt) : null,
+  };
+}
+
+function normalizeVisibleHistory(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(item => item?.role && item?.text)
+    .slice(-SCENE_VISIBLE_CONTEXT_TURNS * 2)
+    .map(item => ({
+      role: item.role === "assistant" ? "assistant" : "user",
+      text: String(item.text).slice(0, 4000),
+      timestamp: item.timestamp ? String(item.timestamp) : null,
+      kind: item.kind ? String(item.kind) : "chat",
+    }));
+}
+
+function normalizeProactiveIntent(raw) {
+  if (!raw?.id || !raw?.scheduledAt) return null;
+  return {
+    id: String(raw.id),
+    status: ["pending", "sent", "cancelled"].includes(raw.status) ? raw.status : "pending",
+    createdAt: raw.createdAt ? String(raw.createdAt) : new Date().toISOString(),
+    scheduledAt: String(raw.scheduledAt),
+    expiresAt: raw.expiresAt ? String(raw.expiresAt) : null,
+    sourceTurnAt: raw.sourceTurnAt ? String(raw.sourceTurnAt) : null,
+    sourceUserText: raw.sourceUserText ? String(raw.sourceUserText).slice(0, 500) : "",
+    basis: raw.basis ? String(raw.basis).slice(0, 800) : "",
+    cancelIf: Array.isArray(raw.cancelIf) ? raw.cancelIf.map(x => String(x).slice(0, 200)).slice(0, 8) : [],
+    innerScenelet: raw.innerScenelet ? String(raw.innerScenelet).slice(0, 2000) : "",
+    messageIntent: raw.messageIntent ? String(raw.messageIntent).slice(0, 500) : "",
+    lastCheckedAt: raw.lastCheckedAt ? String(raw.lastCheckedAt) : null,
+    sentAt: raw.sentAt ? String(raw.sentAt) : null,
+    cancelledAt: raw.cancelledAt ? String(raw.cancelledAt) : null,
+    cancelReason: raw.cancelReason ? String(raw.cancelReason).slice(0, 500) : "",
+  };
+}
+
+function normalizeProactiveIntents(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(normalizeProactiveIntent).filter(Boolean).slice(-20);
+}
 
 function hydrateSession(ai, raw = {}) {
   return {
@@ -315,6 +390,14 @@ function hydrateSession(ai, raw = {}) {
     _recentKaomoji: raw._recentKaomoji || [],
     _kaomojiTurn: raw._kaomojiTurn || 0,
     _profile: raw._profile ?? null,
+    _lastFailedTurn: normalizeFailedTurn(raw._lastFailedTurn),
+    _sceneState: normalizeSceneState(raw._sceneState),
+    _visibleHistory: normalizeVisibleHistory(raw._visibleHistory),
+    _proactiveIntents: normalizeProactiveIntents(raw._proactiveIntents),
+    _lastUserAt: raw._lastUserAt ? String(raw._lastUserAt) : null,
+    _lastAssistantAt: raw._lastAssistantAt ? String(raw._lastAssistantAt) : null,
+    _lastProactiveAt: raw._lastProactiveAt ? String(raw._lastProactiveAt) : null,
+    _lastContextToken: raw._lastContextToken ? String(raw._lastContextToken) : null,
   };
 }
 
@@ -335,6 +418,14 @@ function saveSessions() {
           _recentKaomoji: s._recentKaomoji || [],
           _kaomojiTurn: s._kaomojiTurn || 0,
           _profile: s._profile ?? null,
+          _lastFailedTurn: normalizeFailedTurn(s._lastFailedTurn),
+          _sceneState: normalizeSceneState(s._sceneState),
+          _visibleHistory: normalizeVisibleHistory(s._visibleHistory),
+          _proactiveIntents: normalizeProactiveIntents(s._proactiveIntents),
+          _lastUserAt: s._lastUserAt || null,
+          _lastAssistantAt: s._lastAssistantAt || null,
+          _lastProactiveAt: s._lastProactiveAt || null,
+          _lastContextToken: s._lastContextToken || null,
         })),
       };
     }
@@ -1035,7 +1126,9 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
     "--verbose",
     "--permission-mode", "bypassPermissions",
   ];
-  if (firstTurn) {
+  if (options.noSessionPersistence) {
+    args.push("--no-session-persistence");
+  } else if (firstTurn) {
     args.push("--session-id", sid);
   } else {
     args.push("--resume", sid);
@@ -1127,10 +1220,10 @@ function buildCodexPrompt(ai, userBody, ragContext, stylePrompt, memoryPrompt = 
   return prompt;
 }
 
-function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragContext, stylePrompt, memoryPrompt = "", profileOverride = null) {
+function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragContext, stylePrompt, memoryPrompt = "", profileOverride = null, options = {}) {
   const prompt = buildCodexPrompt(ai, body, ragContext, stylePrompt, memoryPrompt, profileOverride);
   let args;
-  if (firstTurn) {
+  if (options.noSessionPersistence || firstTurn) {
     args = [
       "exec",
       "--json",
@@ -1204,20 +1297,17 @@ function buildStableStylePrompt() {
     COMMON_CHAT_STYLE_PROMPT,
     "",
     expressionCapabilityPrompt(),
-    "",
-    "【自然长短】",
-    "不要按固定字数写。轻松接话、确认、调侃可以很短；对方认真倾诉、展开复杂观点或需要陪伴时，再自然多说。",
-    "短不是敷衍，长也不是默认目标；只要一句话能准确接住，就停在一句话。",
   ].join("\n");
 }
 
-function buildTurnBody(userBody, ragContext = "") {
+function buildTurnBody(userBody, ragContext = "", sceneContext = "") {
   const sections = [
     [
       "【本轮临时上下文】",
       formatLocalChatReality(),
     ].join("\n"),
   ];
+  if (sceneContext) sections.push(sceneContext);
   if (ragContext) {
     sections.push([
       "【可能相关的背景资料】",
@@ -1227,6 +1317,443 @@ function buildTurnBody(userBody, ragContext = "") {
   }
   sections.push(["【用户消息】", userBody].join("\n"));
   return sections.join("\n\n---\n\n");
+}
+
+function localWeekday(date = new Date()) {
+  return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()];
+}
+
+function sceneStateText(sess) {
+  const state = normalizeSceneState(sess?._sceneState);
+  if (!state) return "";
+  if (state.expiresAt && Date.parse(state.expiresAt) && Date.now() > Date.parse(state.expiresAt)) return "";
+  return state.text || "";
+}
+
+function recentVisibleContext(sess, limit = SCENE_VISIBLE_CONTEXT_TURNS) {
+  return normalizeVisibleHistory(sess?._visibleHistory)
+    .slice(-limit * 2)
+    .map(item => ({
+      role: item.role,
+      time: item.timestamp || "",
+      kind: item.kind || "chat",
+      text: item.text,
+    }));
+}
+
+function appendVisibleHistory(sess, role, text, kind = "chat", timestamp = new Date().toISOString()) {
+  if (!sess || !text?.trim()) return;
+  sess._visibleHistory = normalizeVisibleHistory([
+    ...(sess._visibleHistory || []),
+    { role, text: String(text), timestamp, kind },
+  ]);
+}
+
+function formatVisibleContext(items) {
+  const normalized = Array.isArray(items) ? items : [];
+  if (!normalized.length) return "";
+  return normalized.map(item => {
+    const role = item.role === "assistant" ? "assistant" : "user";
+    const time = item.time ? ` ${item.time}` : "";
+    const kind = item.kind && item.kind !== "chat" ? `/${item.kind}` : "";
+    return `${role}${kind}${time}: ${item.text}`;
+  }).join("\n");
+}
+
+function stripJsonFences(text = "") {
+  return String(text).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+}
+
+function parseHiddenJson(raw) {
+  const trimmed = stripJsonFences(raw);
+  try { return JSON.parse(trimmed); } catch {}
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) return JSON.parse(trimmed.slice(start, end + 1));
+  throw new Error("hidden call returned no JSON object");
+}
+
+async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000 } = {}) {
+  if (!commandExists(CLAUDE)) return null;
+  const args = [
+    "-p",
+    "--bare",
+    "--output-format", "json",
+    "--no-session-persistence",
+    "--tools", "",
+    "--model", SCENELET_MODEL,
+  ];
+  const proc = spawnCli(CLAUDE, args, {
+    cwd: AI_WORK_DIR,
+    timeout: timeoutMs,
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: envWithProxy(CLAUDE_HTTPS_PROXY),
+  });
+  proc.stdin.on("error", () => {});
+  proc.stdin.end(prompt, "utf8");
+  let stdout = "";
+  let stderr = "";
+  const code = await new Promise(resolve => {
+    proc.stdout.on("data", d => { stdout += d; });
+    proc.stderr.on("data", d => { stderr += d; if (stderr.length > 3000) stderr = stderr.slice(-3000); });
+    proc.on("close", resolve);
+    proc.on("error", () => resolve(-1));
+  });
+  if (code !== 0 && !stdout.trim()) {
+    log("⚠️", `${label} failed: exit ${code}${stderr ? `; ${stderr.slice(-200)}` : ""}`);
+    return null;
+  }
+  try {
+    const outer = parseHiddenJson(stdout);
+    const content = outer.result || outer.message || outer.text || stdout;
+    return typeof content === "string" ? parseHiddenJson(content) : outer;
+  } catch (e) {
+    log("⚠️", `${label} parse failed: ${e.message}`);
+    return null;
+  }
+}
+
+function buildSceneletPrompt({ userId, sessionName, profile, userBody, carriedSceneState, visibleContext, memoryPrompt }) {
+  const now = new Date();
+  return [
+    "你在为微信角色私聊生成隐藏中间层，不会发送任何消息，不能调用工具，不能联网，不能写文件。",
+    "",
+    "任务：先生成本轮 inner_scenelet，再给出极短 next_scene_state，并判断是否存在一次性主动回复候选。",
+    "",
+    "角色 prompt：",
+    profile && profileTemplates[profile] ? profileTemplates[profile] : "",
+    "",
+    memoryPrompt ? `长期记忆：\n${memoryPrompt}` : "",
+    "",
+    "机制要求：",
+    "- inner_scenelet 贴近角色视角，写清此刻生活瞬间、身体动作、心理落点、为什么这样接话。它不会直接展示给用户。",
+    "- inner_scenelet 可以细腻、具体、有生活感，但必须服从当前时间和上下文。",
+    "- next_scene_state 极短，40-80 个中文字符左右，只记录可帮助下一轮连续性的轻状态；不能固化复杂心理和重大日程。",
+    "- proactive_candidates 只在确实存在一次性、可观察、适合未来主动发消息的意图时生成；没有就给空数组。",
+    "- 主动候选不是定时循环，是一次性小任务。候选的 inner_scenelet 职能是 timing reason：为什么这个时间主动说话自然。",
+    "- 主动候选必须给 scheduled_at 和 expires_at，ISO 8601；不要卡点，可自然一点。",
+    "- 主动候选 cancel_if 只写系统可观察条件：用户已发来消息、事项已完成/取消、超过窗口、近期已主动发过、当前对话有更强主题等。",
+    "- 绝对不要在角色内提及 bot/AI/模型/角色扮演身份。",
+    "- 固定角色事实不要为了漂亮类比而编造；不确定就模糊。",
+    "",
+    "当前时间：",
+    JSON.stringify({
+      iso: now.toISOString(),
+      local: now.toLocaleString("zh-CN", { hour12: false }),
+      weekday: localWeekday(now),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
+    }, null, 2),
+    "",
+    "输入：",
+    JSON.stringify({
+      userId,
+      sessionName,
+      profile,
+      carried_scene_state: carriedSceneState || null,
+      recent_visible_context: visibleContext,
+      user_message: userBody,
+    }, null, 2),
+    "",
+    "输出 JSON，且只输出 JSON：",
+    JSON.stringify({
+      inner_scenelet: "string",
+      next_scene_state: "string|null",
+      proactive_candidates: [{
+        scheduled_at: "ISO string",
+        expires_at: "ISO string",
+        message_intent: "string",
+        basis: "string",
+        cancel_if: ["string"],
+        inner_scenelet: "string"
+      }]
+    }, null, 2),
+  ].filter(Boolean).join("\n");
+}
+
+function normalizeSceneletResult(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    innerScenelet: raw.inner_scenelet ? String(raw.inner_scenelet).trim() : "",
+    nextSceneState: raw.next_scene_state ? String(raw.next_scene_state).trim().slice(0, SCENE_STATE_MAX_CHARS) : "",
+    proactiveCandidates: Array.isArray(raw.proactive_candidates) ? raw.proactive_candidates : [],
+  };
+}
+
+async function generateSceneletForTurn({ userId, sess, profile, userBody, memoryPrompt }) {
+  if (!profile || !profileTemplates[profile]) return null;
+  const prompt = buildSceneletPrompt({
+    userId,
+    sessionName: sess.name,
+    profile,
+    userBody,
+    carriedSceneState: sceneStateText(sess),
+    visibleContext: recentVisibleContext(sess),
+    memoryPrompt,
+  });
+  const raw = await runHiddenJson(prompt, { label: "scenelet" });
+  const result = normalizeSceneletResult(raw);
+  if (!result?.innerScenelet) return null;
+  return result;
+}
+
+function buildSceneContextBlock(sess, sceneletResult, carriedState) {
+  const visible = formatVisibleContext(recentVisibleContext(sess, SCENE_VISIBLE_CONTEXT_TURNS));
+  const parts = [
+    visible ? ["【最近可见聊天】", "以下是真实微信最终发送内容，只保留最近 6-8 轮；优先回应当前用户消息。", visible].join("\n") : "",
+    carriedState ? ["【轻量 scene_state】", "这是极短、可过期、可被用户新消息覆盖的连续性状态；不要把它当成固定事实。", carriedState].join("\n") : "",
+    sceneletResult?.innerScenelet ? [
+      "【隐藏中间层：inner_scenelet】",
+      "下面内容不会展示给用户。它用于帮助你以角色此刻的状态接话；不要逐字复述，也不要解释它的存在。",
+      sceneletResult.innerScenelet,
+    ].join("\n") : "",
+  ].filter(Boolean);
+  return parts.join("\n\n");
+}
+
+function addProactiveCandidates(sess, sceneletResult, userBody) {
+  if (!sess || !sceneletResult?.proactiveCandidates?.length) return;
+  const nowIso = new Date().toISOString();
+  const existing = normalizeProactiveIntents(sess._proactiveIntents);
+  for (const raw of sceneletResult.proactiveCandidates.slice(0, 3)) {
+    const scheduled = raw.scheduled_at ? new Date(raw.scheduled_at) : null;
+    if (!scheduled || Number.isNaN(scheduled.getTime())) continue;
+    const expires = raw.expires_at ? new Date(raw.expires_at) : new Date(scheduled.getTime() + 30 * 60 * 1000);
+    const intent = normalizeProactiveIntent({
+      id: crypto.randomUUID(),
+      status: "pending",
+      createdAt: nowIso,
+      scheduledAt: scheduled.toISOString(),
+      expiresAt: Number.isNaN(expires.getTime()) ? new Date(scheduled.getTime() + 30 * 60 * 1000).toISOString() : expires.toISOString(),
+      sourceTurnAt: nowIso,
+      sourceUserText: userBody,
+      basis: raw.basis || "",
+      cancelIf: raw.cancel_if || [],
+      innerScenelet: raw.inner_scenelet || "",
+      messageIntent: raw.message_intent || "",
+    });
+    if (intent) existing.push(intent);
+  }
+  sess._proactiveIntents = normalizeProactiveIntents(existing);
+}
+
+function setSceneStateFromText(sess, text, ttlMs = 2 * 60 * 60 * 1000) {
+  const normalized = normalizeSceneState({
+    text,
+    updatedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + ttlMs).toISOString(),
+  });
+  sess._sceneState = normalized;
+}
+
+function recordChatHistory({ ai, userId, sess, role, kind = "chat", text, scenelet = "", sceneState = "", proactiveIntentId = "", timestamp = new Date().toISOString() }) {
+  if (!sess || (!text?.trim() && !scenelet?.trim())) return;
+  appendChatEvent({
+    timestamp,
+    userId,
+    ai,
+    sessionId: sess.id,
+    sessionName: sess.name,
+    profile: sessionProfile(sess) || "默认",
+    role,
+    kind,
+    text,
+    scenelet,
+    sceneState,
+    proactiveIntentId,
+  });
+}
+
+async function sendFinalAssistantMessage(userId, text, contextToken, prefix, isProfileChat = true) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return false;
+  const socialParts = isProfileChat ? splitSocialReply(trimmed) : [trimmed];
+  const messages = [];
+  for (let i = 0; i < socialParts.length; i++) {
+    const head = i === 0 ? `# ${prefix}\n` : "";
+    const tail = i === socialParts.length - 1 ? "/" : "";
+    messages.push(...splitText(`${head}${socialParts[i]}${tail}`, MAX_REPLY_LEN));
+  }
+  let ok = true;
+  for (const chunk of messages) {
+    if (!await sendMessage(userId, chunk, contextToken)) ok = false;
+    if (messages.length > 1) await sleep(450);
+  }
+  return ok;
+}
+
+function activeProfileSessionEntries() {
+  const entries = [];
+  for (const [ai, map] of Object.entries(sessions)) {
+    for (const [userId, userData] of map) {
+      const sess = (userData.list || []).find(s => s.id === userData.activeId);
+      const profile = sessionProfile(sess);
+      if (sess && profile && profileTemplates[profile]) entries.push({ ai, userId, sess, profile });
+    }
+  }
+  return entries;
+}
+
+function markProactiveIntent(intent, status, reason = "") {
+  intent.status = status;
+  if (status === "sent") intent.sentAt = new Date().toISOString();
+  if (status === "cancelled") intent.cancelledAt = new Date().toISOString();
+  if (reason) intent.cancelReason = String(reason).slice(0, 500);
+}
+
+function buildProactivePrompt({ userId, sessionName, profile, intent, memoryPrompt, carriedSceneState, visibleContext }) {
+  const now = new Date();
+  return [
+    "你在为微信角色私聊做一次性主动回复的到点二次判断。不能调用工具，不能联网，不能写文件。",
+    "",
+    "任务：根据系统可观察状态、上下文和候选意图，判断现在是否应该主动发送。如果发送，生成 inner_scenelet 和最终 visible_reply。",
+    "",
+    "角色 prompt：",
+    profile && profileTemplates[profile] ? profileTemplates[profile] : "",
+    "",
+    memoryPrompt ? `长期记忆：\n${memoryPrompt}` : "",
+    "",
+    "机制要求：",
+    "- 这不是定时循环，而是一次性候选；发送或取消后结束。",
+    "- inner_scenelet 在这里承担 timing reason：贴近角色视角说明为什么此刻主动说话自然，并帮助生成回复；它不会直接发给用户。",
+    "- 取消条件必须基于系统可观察事实：用户已经发来消息、事项已完成/取消、超过窗口、近期已主动发过、当前对话有更强主题、静默时段不适合打扰等。",
+    "- 不要把角色生活氛围当成执行逻辑；例如“她忘了/她很忙”只能写在 inner_scenelet 的氛围里，不能作为系统取消原因。",
+    "- visible_reply 可以长可以短，由语境决定；不要泄露 inner_scenelet、机制、JSON、bot/AI/model 身份。",
+    "- 固定角色事实不要为了漂亮类比而编造；不确定就模糊处理。",
+    "",
+    "当前时间：",
+    JSON.stringify({
+      iso: now.toISOString(),
+      local: now.toLocaleString("zh-CN", { hour12: false }),
+      weekday: localWeekday(now),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
+    }, null, 2),
+    "",
+    "输入：",
+    JSON.stringify({
+      userId,
+      sessionName,
+      profile,
+      system_observables: {
+        session_busy: Boolean(sess?.busy),
+        queued_turns: Number(sess?.queue?.length || 0),
+        last_user_at: sess?._lastUserAt || null,
+        last_assistant_at: sess?._lastAssistantAt || null,
+        last_proactive_at: sess?._lastProactiveAt || null,
+      },
+      carried_scene_state: carriedSceneState || null,
+      recent_visible_context: visibleContext,
+      candidate_intent: intent,
+    }, null, 2),
+    "",
+    "输出 JSON，且只输出 JSON：",
+    JSON.stringify({
+      should_send: true,
+      cancel_reason: "string|null",
+      inner_scenelet: "string",
+      visible_reply: "string",
+      next_scene_state: "string|null"
+    }, null, 2),
+  ].filter(Boolean).join("\n");
+}
+
+function normalizeProactiveDecision(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    shouldSend: raw.should_send === true,
+    cancelReason: raw.cancel_reason ? String(raw.cancel_reason).slice(0, 500) : "",
+    innerScenelet: raw.inner_scenelet ? String(raw.inner_scenelet).trim() : "",
+    visibleReply: raw.visible_reply ? String(raw.visible_reply).trim() : "",
+    nextSceneState: raw.next_scene_state ? String(raw.next_scene_state).trim().slice(0, SCENE_STATE_MAX_CHARS) : "",
+  };
+}
+
+async function evaluateProactiveIntent({ ai, userId, sess, profile, intent }) {
+  const memoryPrompt = renderMemoryPrompt(userId, { profile });
+  const prompt = buildProactivePrompt({
+    userId,
+    sessionName: sess.name,
+    profile,
+    intent,
+    memoryPrompt,
+    carriedSceneState: sceneStateText(sess),
+    visibleContext: recentVisibleContext(sess),
+  });
+  const raw = await runHiddenJson(prompt, { label: "proactive" });
+  return normalizeProactiveDecision(raw);
+}
+
+async function checkProactiveIntents() {
+  const nowMs = Date.now();
+  if (nowMs - lastProactiveCheckAt < PROACTIVE_CHECK_INTERVAL_MS) return;
+  lastProactiveCheckAt = nowMs;
+
+  for (const { ai, userId, sess, profile } of activeProfileSessionEntries()) {
+    if (sess.busy || sess.queue?.length || pendingInputs.has(userId)) continue;
+    const pending = normalizeProactiveIntents(sess._proactiveIntents).filter(x => x.status === "pending");
+    if (!pending.length) continue;
+
+    let changed = false;
+    for (const intent of pending) {
+      const scheduled = Date.parse(intent.scheduledAt);
+      const expires = intent.expiresAt ? Date.parse(intent.expiresAt) : scheduled + 30 * 60 * 1000;
+      if (!Number.isFinite(scheduled)) {
+        markProactiveIntent(intent, "cancelled", "invalid scheduled_at");
+        changed = true;
+        continue;
+      }
+      if (Number.isFinite(expires) && nowMs > expires) {
+        markProactiveIntent(intent, "cancelled", "current time exceeded expires_at");
+        changed = true;
+        continue;
+      }
+      if (nowMs < scheduled) continue;
+      if (sess._lastProactiveAt && nowMs - Date.parse(sess._lastProactiveAt) < PROACTIVE_COOLDOWN_MS) continue;
+
+      intent.lastCheckedAt = new Date().toISOString();
+      const decision = await evaluateProactiveIntent({ ai, userId, sess, profile, intent });
+      if (!decision?.shouldSend || !decision.visibleReply) {
+        markProactiveIntent(intent, "cancelled", decision?.cancelReason || "second check declined");
+        changed = true;
+        continue;
+      }
+
+      const sent = await sendFinalAssistantMessage(userId, decision.visibleReply, sess._lastContextToken, replyPrefix(sess.name, ai), true);
+      if (!sent) {
+        intent.cancelReason = "send failed";
+        changed = true;
+        continue;
+      }
+
+      const sentAt = new Date().toISOString();
+      markProactiveIntent(intent, "sent");
+      sess._lastProactiveAt = sentAt;
+      sess._lastAssistantAt = sentAt;
+      appendVisibleHistory(sess, "assistant", decision.visibleReply, "proactive", sentAt);
+      if (decision.nextSceneState) setSceneStateFromText(sess, decision.nextSceneState);
+      recordChatHistory({
+        ai,
+        userId,
+        sess,
+        role: "assistant",
+        kind: "proactive",
+        text: decision.visibleReply,
+        scenelet: decision.innerScenelet || intent.innerScenelet,
+        sceneState: decision.nextSceneState,
+        proactiveIntentId: intent.id,
+        timestamp: sentAt,
+      });
+      changed = true;
+    }
+
+    if (changed) {
+      sess._proactiveIntents = normalizeProactiveIntents([
+        ...normalizeProactiveIntents(sess._proactiveIntents).filter(x => x.status !== "pending"),
+        ...pending,
+      ]);
+      saveSessions();
+    }
+  }
 }
 
 async function updateUserMemoryFromTurn(userId, userBody, profile) {
@@ -1308,8 +1835,9 @@ function killProc(proc) {
 }
 
 // ─── PROCESS ONE TURN (streaming) ────────────────────────────
-// Returns the AI session ID reported by the CLI (CC session_id or Codex thread_id).
-async function processTurn(ai, userId, sid, sessionName, body, contextToken, firstTurn, onProc, styleState) {
+// Returns the AI session ID reported by the CLI (CC session_id or Codex thread_id)
+// plus whether the turn completed with a normal assistant reply.
+async function processTurn(ai, userId, sid, sessionName, body, contextToken, firstTurn, onProc, styleState, failedTurn = null) {
   const turnStarted = Date.now();
   const turnProfile = sessionProfile(styleState);
   const prefix = replyPrefix(sessionName, ai);
@@ -1336,6 +1864,26 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   writeFmt(`Time: ${new Date().toLocaleString("zh-CN")}`);
   writeFmt(`User: ${body}\n`);
 
+  const isProfileChat = Boolean(turnProfile && profileTemplates[turnProfile]);
+  const carriedSceneState = sceneStateText(styleState);
+  let sceneletResult = null;
+  if (isProfileChat) {
+    try {
+      sceneletResult = await generateSceneletForTurn({ userId, sess: styleState, profile: turnProfile, userBody: body, memoryPrompt });
+      if (sceneletResult) {
+        writeLog(JSON.stringify({
+          type: "inner_scenelet",
+          inner_scenelet: sceneletResult.innerScenelet,
+          next_scene_state: sceneletResult.nextSceneState,
+          proactive_candidates: sceneletResult.proactiveCandidates,
+          timestamp: new Date().toISOString(),
+        }));
+      }
+    } catch (e) {
+      log("⚠️", `scenelet skipped: ${e.message}`);
+    }
+  }
+
   let textBuf = "";
   let lastFlush = Date.now();
   let lastSent = "";
@@ -1345,7 +1893,6 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     if (!t || t === lastSent) { textBuf = ""; return true; }
     if (!force && t.length < 300 && Date.now() - lastFlush < 3000) return true;
     lastSent = t;
-    const isProfileChat = Boolean(turnProfile);
     const socialParts = isFinal && isProfileChat ? splitSocialReply(t) : [t];
     const messages = [];
     for (let i = 0; i < socialParts.length; i++) {
@@ -1367,6 +1914,10 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   let hasOutput = false;
   let newSid = sid;
   let assistantFullText = "";
+  let turnCompleted = false;
+  let turnSucceeded = false;
+  let explicitFailure = false;
+  let failureMessage = "";
 
   try {
   if (ai === "codex") {
@@ -1416,6 +1967,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
         return;
       }
       if (evt.type === "turn.completed") {
+        turnCompleted = true;
         if (evt.usage) {
           writeFmt(`\n[usage] input=${evt.usage.input_tokens} output=${evt.usage.output_tokens}`);
         }
@@ -1424,8 +1976,8 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       }
       if (evt.type === "turn.failed") {
         const errMsg = evt.error?.message || JSON.stringify(evt.error || evt);
-        textBuf += `\n⚠️ ${errMsg}`;
-        hasOutput = true;
+        explicitFailure = true;
+        failureMessage = errMsg;
         writeFmt(`\n=== FAILED ===\n${errMsg}`);
         return;
       }
@@ -1434,7 +1986,8 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     const profile = turnProfile;
     const useRagCdx = RAG_ENABLED && !hasInboundAttachment(body) && profile && profile !== "默认" && profileTemplates[profile] && shouldUseRagForTurn(body, profile);
     const ragContext = useRagCdx ? queryRag(body, profile) : null;
-    const turnBody = buildTurnBody(body, null);
+    const sceneContext = isProfileChat ? buildSceneContextBlock(styleState, sceneletResult, carriedSceneState) : "";
+    const turnBody = buildTurnBody(body, null, sceneContext);
     writeLog(JSON.stringify({
       type: "turn_context",
       backend: "codex",
@@ -1444,7 +1997,9 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       stableSystemChars: stylePrompt.length + memoryPrompt.length + (profile && profileTemplates[profile] ? profileTemplates[profile].length : 0),
       timestamp: new Date().toISOString(),
     }));
-    const task = runCodexStream(ai, sid, sessionName, turnBody, firstTurn, handleCodexEvent, ragContext, stylePrompt, memoryPrompt, profile);
+    const task = runCodexStream(ai, sid, sessionName, turnBody, firstTurn, handleCodexEvent, ragContext, stylePrompt, memoryPrompt, profile, {
+      noSessionPersistence: isProfileChat,
+    });
     if (onProc) onProc(task.proc);
 
     let { code, stderr, killed } = await task;
@@ -1454,20 +2009,26 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       log("\u{1F501}", `[${sessionName}] retry ${retry + 1}/${SESSION_LOCK_RETRIES}...`);
       await sleep(SESSION_LOCK_RETRY_MS);
       hasOutput = false; textBuf = ""; lastSent = ""; lastFlush = Date.now();
+      assistantFullText = ""; turnCompleted = false; explicitFailure = false; failureMessage = "";
       writeFmt(`\n--- Retry ${retry + 1} ---`);
-      const retryTask = runCodexStream(ai, newSid || sid, sessionName, turnBody, firstTurn, handleCodexEvent, ragContext, stylePrompt, memoryPrompt, profile);
+      const retryTask = runCodexStream(ai, newSid || sid, sessionName, turnBody, firstTurn, handleCodexEvent, ragContext, stylePrompt, memoryPrompt, profile, {
+        noSessionPersistence: isProfileChat,
+      });
       if (onProc) onProc(retryTask.proc);
       ({ code, stderr, killed } = await retryTask);
     }
 
-    const ok = !killed && (code === 0 || hasOutput);
-    await flush(true, ok);
+    turnSucceeded = !killed && code === 0 && turnCompleted && assistantFullText.trim().length > 0 && !explicitFailure;
+    await flush(true, turnSucceeded);
 
     if (killed) {
+      failureMessage = "cancelled";
       await sendMessage(userId, `# ${prefix}\n⏹️ 已取消`, contextToken);
       writeFmt("\n=== CANCELLED ===");
-    } else if (code !== 0 && !hasOutput) {
-      await sendMessage(userId, `# ${prefix}\n❌ Codex exited ${code}\n${stderr.slice(0, 500)}`, contextToken);
+    } else if (!turnSucceeded) {
+      failureMessage ||= explicitFailure ? "Codex turn failed" : `Codex exited ${code}`;
+      const details = explicitFailure ? failureMessage : stderr.slice(0, 500);
+      await sendMessage(userId, `# ${prefix}\n❌ ${failureMessage}${details && details !== failureMessage ? `\n${details}` : ""}`, contextToken);
       writeFmt(`\n=== ERROR exit ${code} ===\n${stderr.slice(0, 500)}`);
     }
   } else {
@@ -1509,9 +2070,10 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
         writeFmt(`Result: ${JSON.stringify(evt).slice(0, 2000)}`);
       }
       if (evt.type === "result") {
-        if (evt.subtype !== "success") {
-          textBuf += `\n⚠️ ${evt.subtype}: ${evt.result || ""}`;
-          hasOutput = true;
+        if (evt.subtype === "success") turnCompleted = true;
+        else {
+          explicitFailure = true;
+          failureMessage = `${evt.subtype || "failed"}${evt.result ? `: ${evt.result}` : ""}`;
         }
         writeFmt(`\n=== ${evt.subtype || "completed"} ===`);
         if (evt.result) writeFmt(`Result: ${JSON.stringify(evt.result).slice(0, 1000)}`);
@@ -1521,7 +2083,8 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     const profile = turnProfile;
     const useRag = RAG_ENABLED && !hasInboundAttachment(body) && profile && profile !== "默认" && profileTemplates[profile] && shouldUseRagForTurn(body, profile);
     const ragContext = useRag ? queryRag(body, profile) : null;
-    const claudeBody = buildTurnBody(body, ragContext);
+    const sceneContext = isProfileChat ? buildSceneContextBlock(styleState, sceneletResult, carriedSceneState) : "";
+    const claudeBody = buildTurnBody(body, ragContext, sceneContext);
     writeLog(JSON.stringify({
       type: "turn_context",
       backend: "claude_stream",
@@ -1533,6 +2096,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     }));
     const task = runClaudeStream(ai, sid, sessionName, claudeBody, firstTurn, handleClaudeEvent, stylePrompt, memoryPrompt, profile, {
       routingBody: body,
+      noSessionPersistence: isProfileChat,
     });
     if (onProc) onProc(task.proc);
 
@@ -1542,36 +2106,68 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       log("\u{1F501}", `[${sessionName}] session lock, retry ${retry + 1}/${SESSION_LOCK_RETRIES}...`);
       await sleep(SESSION_LOCK_RETRY_MS);
       hasOutput = false; textBuf = ""; lastSent = ""; lastFlush = Date.now();
+      assistantFullText = ""; turnCompleted = false; explicitFailure = false; failureMessage = "";
       writeFmt(`\n--- Retry ${retry + 1} ---`);
       const retryTask = runClaudeStream(ai, newSid || sid, sessionName, claudeBody, firstTurn, handleClaudeEvent, stylePrompt, memoryPrompt, profile, {
         routingBody: body,
+        noSessionPersistence: isProfileChat,
       });
       if (onProc) onProc(retryTask.proc);
       ({ code, stderr, killed } = await retryTask);
     }
 
-    const ok = !killed && (code === 0 || hasOutput);
-    await flush(true, ok);
+    turnSucceeded = !killed && code === 0 && turnCompleted && assistantFullText.trim().length > 0 && !explicitFailure;
+    await flush(true, turnSucceeded);
 
     if (killed) {
+      failureMessage = "cancelled";
       await sendMessage(userId, `# ${prefix}\n⏹️ 已取消`, contextToken);
       writeFmt("\n=== CANCELLED ===");
-    } else if (code !== 0 && !hasOutput) {
-      await sendMessage(userId, `# ${prefix}\n❌ CC exited ${code}\n${stderr.slice(0, 500)}`, contextToken);
+    } else if (!turnSucceeded) {
+      failureMessage ||= explicitFailure ? "CC turn failed" : `CC exited ${code}`;
+      const details = explicitFailure ? failureMessage : stderr.slice(0, 500);
+      await sendMessage(userId, `# ${prefix}\n❌ ${failureMessage}${details && details !== failureMessage ? `\n${details}` : ""}`, contextToken);
       writeFmt(`\n=== ERROR exit ${code} ===\n${stderr.slice(0, 500)}`);
     }
   }
 
   writeFmt(`\n=== End ===`);
-  if (styleState && assistantFullText) {
+  if (turnSucceeded && styleState && assistantFullText) {
     rememberRecentKaomoji(styleState, assistantFullText);
   }
-  try {
-    await updateUserMemoryFromTurn(userId, body, turnProfile);
-    const notice = memoryMaintenanceNotice(userId, { profile: turnProfile, mark: true });
-    if (notice) await sendMessage(userId, notice, contextToken);
-  } catch (e) {
-    log("⚠️", `memory writer skipped: ${e.message}`);
+  if (turnSucceeded && styleState) {
+    const userAt = new Date(turnStarted).toISOString();
+    const assistantAt = new Date().toISOString();
+    styleState._lastUserAt = userAt;
+    styleState._lastAssistantAt = assistantAt;
+    styleState._lastContextToken = contextToken || styleState._lastContextToken || null;
+    appendVisibleHistory(styleState, "user", body, "chat", userAt);
+    appendVisibleHistory(styleState, "assistant", assistantFullText.trim(), "chat", assistantAt);
+    if (sceneletResult?.nextSceneState) setSceneStateFromText(styleState, sceneletResult.nextSceneState);
+    addProactiveCandidates(styleState, sceneletResult, body);
+    recordChatHistory({ ai, userId, sess: styleState, role: "user", kind: "chat", text: body, timestamp: userAt });
+    recordChatHistory({
+      ai,
+      userId,
+      sess: styleState,
+      role: "assistant",
+      kind: "chat",
+      text: assistantFullText.trim(),
+      scenelet: sceneletResult?.innerScenelet || "",
+      sceneState: sceneletResult?.nextSceneState || "",
+      timestamp: assistantAt,
+    });
+  }
+  if (turnSucceeded) {
+    try {
+      await updateUserMemoryFromTurn(userId, body, turnProfile);
+      const notice = memoryMaintenanceNotice(userId, { profile: turnProfile, mark: true });
+      if (notice) await sendMessage(userId, notice, contextToken);
+    } catch (e) {
+      log("⚠️", `memory writer skipped: ${e.message}`);
+    }
+  } else {
+    log("⚠️", `[${ai}] [${sessionName}] turn failed before normal reply; user message kept out of completed context`);
   }
   log("\u{23F1}", `[${ai}] [${sessionName}] turn done in ${Date.now() - turnStarted}ms`);
   } finally {
@@ -1579,7 +2175,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     try { if (fmtStream) fmtStream.end(); } catch {}
   }
 
-  return newSid;
+  return { sid: newSid, ok: turnSucceeded, error: failureMessage };
 }
 
 // ─── SESSION LOOP ──────────────────────────────────────────
@@ -1612,13 +2208,31 @@ async function sessionLoop(ai, userId, sessionId) {
       await sleep(500);
     }
     try {
-      const newSid = await processTurn(ai, userId, sess.sid, sess.name, item.body, item.ctx, sess._firstTurn, (proc) => { sess._proc = proc; }, sess);
-      if (newSid) sess.sid = newSid;
-      sess._firstTurn = false;
+      const result = await processTurn(ai, userId, sess.sid, sess.name, item.body, item.ctx, sess._firstTurn, (proc) => { sess._proc = proc; }, sess, sess._lastFailedTurn);
+      if (result.ok) {
+        if (result.sid) sess.sid = result.sid;
+        sess._firstTurn = false;
+        sess._lastFailedTurn = null;
+      } else {
+        if (sess._firstTurn) sess.sid = uuid();
+        sess._lastFailedTurn = {
+          body: item.body,
+          timestamp: new Date().toISOString(),
+          reason: result.error || "turn failed before normal reply",
+          sid: result.sid || sess.sid,
+        };
+      }
       saveSessions();
     } catch (e) {
       log("❌", `[${sess.name}] error: ${e.message}`);
       await sendMessage(userId, `# ${replyPrefix(sess.name, ai)}\n❌ ${e.message}`, item.ctx);
+      sess._lastFailedTurn = {
+        body: item.body,
+        timestamp: new Date().toISOString(),
+        reason: e.message,
+        sid: sess.sid,
+      };
+      saveSessions();
     }
     sess._lastEnd = Date.now();
     sess._proc = null;
@@ -1631,6 +2245,8 @@ function queueTurn(messageAI, userId, body, ctx, sessionId = null) {
 
   log("\u{1F4E9}", `[${messageAI}] [${sess.name}] ${userId}: ${body.slice(0, 80)}`);
 
+  sess._lastUserAt = new Date().toISOString();
+  sess._lastContextToken = ctx || sess._lastContextToken || null;
   sess.queue.push({ body, ctx });
 
   if (!sess.busy) {
@@ -2144,6 +2760,7 @@ async function mainLoop() {
       for (const m of (resp.msgs || [])) {
         if (m.message_type === 1 && m.from_user_id) await handleMessage(m);
       }
+      await checkProactiveIntents();
     } catch (e) {
       if (isTransientGetUpdatesError(e)) {
         transientGetUpdatesFails++;
@@ -2200,6 +2817,7 @@ async function main() {
   registerSessionRoutes();
   registerProfileRoutes();
   registerConfigRoutes();
+  registerHistoryRoutes();
   startServer();
 
   // ─── WeChat login ────────────────────────────────────────────

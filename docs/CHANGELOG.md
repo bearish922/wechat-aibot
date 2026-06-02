@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.4.0 — Scenelet, Proactive Reply & Character Overhaul (2026-06-02)
+- Add **inner_scenelet** hidden middle layer: every character chat turn first runs an independent model call to generate a vivid, in-character inner scenelet (current life moment, physical state, emotional tone, why this reply feels natural) that guides the main reply but is never shown to the user
+- Add **scene_state** lightweight cross-turn continuity: only a very short 40-80 character state (time, place, body state, topic aftertaste) carries between turns with a 2-hour expiry, replacing unlimited Claude session history
+- Add **proactive reply** mechanism: scenelet generation can produce one-shot proactive candidates with scheduled_at/expires_at/cancel_if; a second-check evaluation at the scheduled time decides whether to send; only active character sessions are scanned, busy/idle/merging sessions are skipped, 1-hour cooldown between proactive messages
+- Add **chat history** storage (`app/lib/chat-history.mjs`) with persistent JSON backend and GUI History tab showing conversations, searchable messages, and expandable inner scenelet blocks
+- Add `models.scenelet` config field for independent scenelet model selection
+- Enable `--no-session-persistence` for character chats, keeping only 6-8 turns of visible context managed by the bot instead of unbounded Claude session history
+- Overhaul all 4 character profiles: add **生活世界** (daily life as ordinary students with realistic routines), add **事实与细节边界** (lore fact boundaries), expand **说话方式** with WeChat casual style guidance transferred from the slimmed global style prompt
+- Slim global style prompt from ~600 to ~100 characters, removing constraints now covered by per-profile speaking style and inner_scenelet atmosphere
+- Remove failed-turn guard text from the transient prompt body
+- Remove chat-history storage cap (previously 10,000 events)
+- Update Chisato profile: broader daily life, Kanon not always at home, Aya expanded beyond romantic tension, WeChat tone refinements
+
 ## v2.3.1 — RAG Trigger & Cleanup (2026-06-01)
 - Relax RAG trigger: add "你/自己 + question words" path so conversational probing about the character (without explicit lore keywords or name mention) still triggers knowledge base lookup
 - Remove dead code: unused imports, unreferenced functions, orphaned GUI routes (rag/media/logs/control), and the chat-mode rhetorical pattern detection system

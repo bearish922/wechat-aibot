@@ -25,3 +25,6 @@ data/.fastembed_cache/
 
 # RAG vector store (built locally)
 data/rag_vector_store/
+
+# Chat history (contains personal chat data)
+data/chat-history.json

@@ -582,6 +582,142 @@ pre {
   min-width: 72px;
 }
 
+.history-panel {
+  min-height: calc(100vh - 56px);
+}
+
+.history-search {
+  max-width: 360px;
+}
+
+.history-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: 16px;
+  min-height: 540px;
+}
+
+.history-conversations,
+.history-messages {
+  min-width: 0;
+}
+
+.history-conversations {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.history-conv {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.history-conv:hover,
+.history-conv.active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.history-conv-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.history-conv-top strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-conv-meta,
+.history-conv-last,
+.history-conv time {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.history-conv-last {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-messages {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  max-height: calc(100vh - 170px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.history-message {
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.history-message.assistant {
+  background: #fbfcfe;
+}
+
+.history-message header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.history-message header time {
+  font-weight: 600;
+}
+
+.history-kind {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--surface-quiet);
+  color: #526176;
+}
+
+.history-text {
+  color: #1d2a3d;
+  line-height: 1.72;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.scenelet-details {
+  margin-top: 10px;
+}
+
+.scenelet-details summary {
+  color: var(--primary-dark);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.scenelet-details pre {
+  margin-top: 8px;
+}
+
 .toast {
   position: fixed;
   top: 18px;
@@ -678,7 +814,7 @@ p {
   }
 
   #tabs {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
     margin-top: 14px;
   }
 
@@ -704,6 +840,24 @@ p {
 
   .resume-copy {
     width: fit-content;
+  }
+
+  .panel-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .history-search {
+    max-width: none;
+  }
+
+  .history-layout {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .history-messages {
+    max-height: none;
   }
 }
 

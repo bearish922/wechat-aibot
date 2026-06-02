@@ -14,7 +14,8 @@
   },
   "models": {
     "claudeFast": "deepseek-v4-flash[1m]",
-    "claudeFallback": "deepseek-v4-flash[1m]"
+    "claudeFallback": "deepseek-v4-flash[1m]",
+    "scenelet": "deepseek-v4-pro[1m]"
   },
   "timeouts": {
     "aiMs": 600000

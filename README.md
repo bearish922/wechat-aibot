@@ -1,6 +1,6 @@
 # WeChat AI Bot
 
-> v2.3.0 — Windows 本机运行的微信 AI 助手
+> v2.4.0 — Windows 本机运行的微信 AI 助手
 
 WeChat AI Bot 监听微信消息，将文字、图片、语音、文件、视频交给 Claude Code 或 Codex 回复。支持多线程会话、角色扮演、本地知识库和长期记忆。
 
@@ -12,9 +12,12 @@ WeChat AI Bot 监听微信消息，将文字、图片、语音、文件、视频
 - **多线程** — 创建、切换、重命名、关闭线程，状态持久化，重启可恢复
 - **角色扮演** — 内置长崎素世、千早爱音、丸山彩、白鹭千圣四个 BangDream 角色，可自定义
 - **长期记忆** — 每个角色独立维护对用户的记忆，自动写入长期信息
+- **主动回复** — 角色在合适时机会主动发起消息，经过候选生成和到点二次判断
+- **场景氛围** — inner_scenelet 隐藏中间层 + 跨轮轻量 scene_state，角色拥有真实的"此刻状态"
 - **知识库** — 本地 Markdown 向量索引，角色对话时自动锚定检索
 - **多媒体** — 图片/语音/文件/视频自动下载，图片和视频首帧可接视觉模型描述
-- **本地 GUI** — `http://127.0.0.1:18720`，Status / Sessions / Profiles / Config 四个页面
+- **聊天历史** — 持久化存储，GUI 内按对话浏览、搜索、展开 scenelet
+- **本地 GUI** — `http://127.0.0.1:18720`，Status / Sessions / Profiles / History / Config 五个页面
 
 ## 快速开始
 
@@ -60,7 +63,8 @@ launch.bat
   },
   "models": {
     "claudeFast": "快速模型",
-    "claudeFallback": "回退模型"
+    "claudeFallback": "回退模型",
+    "scenelet": "scenelet 专用模型"
   },
   "logs": { "retentionDays": 30 }
 }
@@ -135,6 +139,7 @@ scripts\rebuild-rag.bat
 | `data/wechat-sessions.json` | 会话状态 |
 | `wechat-profiles.json` | 角色模板 |
 | `wechat-memory.json` | 长期记忆（不入版本控制） |
+| `data/chat-history.json` | 聊天历史（不入版本控制） |
 | `data/logs/` | AI 调用日志（`.jsonl` + `.txt`） |
 | `data/inbound_media/` | 收到的附件，可用 `scripts\cleanup-media.bat` 清理 |
 | `data/rag_vector_store/` | 知识库向量索引 |
@@ -150,6 +155,7 @@ scripts\rebuild-rag.bat
 | Status | 在线状态、当前 AI、模型 |
 | Sessions | 线程列表、CLI 恢复指令 |
 | Profiles | 编辑/新增/删除角色模板 |
+| History | 聊天历史、按对话浏览、搜索、scenelet 展开 |
 | Config | 编辑 `data/config.json` |
 
 ## 许可
