@@ -132,7 +132,12 @@ export function startServer(port = 18720) {
 
   server.listen(port, "127.0.0.1", () => {
     log("\u{1F310}", `GUI: http://127.0.0.1:${port}`);
-    exec(`cmd /c start http://127.0.0.1:${port}`, { windowsHide: true });
+    const url = `http://127.0.0.1:${port}`;
+    setTimeout(() => {
+      exec(`start "" "${url}"`, { shell: "cmd.exe", windowsHide: true }, (err) => {
+        if (err) log("⚠", `GUI open failed: ${err.message}`);
+      });
+    }, 600);
   });
 }
 
