@@ -18,7 +18,7 @@ if %errorlevel% equ 0 (
 if not exist "%~dp0data\runtime" mkdir "%~dp0data\runtime"
 set "LOCK_FILE=%~dp0data\runtime\.wechat-aibot.lock"
 set "BOT_PID="
-for /f "tokens=5" %%P in (`netstat -ano ^| findstr /R ":18720.*LISTENING" 2^>nul`) do set "BOT_PID=%%P"
+for /f "tokens=5" %%P in ('netstat -ano ^| findstr /R ":18720.*LISTENING" 2^>nul') do set "BOT_PID=%%P"
 if not defined BOT_PID if exist "%LOCK_FILE%" set /p BOT_PID=<"%LOCK_FILE%"
 
 if defined BOT_PID (
