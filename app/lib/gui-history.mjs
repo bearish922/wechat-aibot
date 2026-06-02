@@ -11,19 +11,34 @@ export function registerHistoryRoutes() {
     const params = queryParams(req);
     return {
       ok: true,
-      conversations: listConversations({ q: params.get("q") || "" }),
+      conversations: listConversations({
+        q: params.get("q") || "",
+        dateFrom: params.get("dateFrom") || "",
+        dateTo: params.get("dateTo") || "",
+      }),
     };
   });
 
   addRoute("GET", "/api/history/messages", ({ req }) => {
     const params = queryParams(req);
+    const pageSize = Math.max(1, Math.min(Number(params.get("pageSize") || 50), 200));
+    const page = Math.max(1, Number(params.get("page") || 1));
+    const offset = (page - 1) * pageSize;
+    const result = listChatEvents({
+      sessionKey: params.get("sessionKey") || "",
+      q: params.get("q") || "",
+      dateFrom: params.get("dateFrom") || "",
+      dateTo: params.get("dateTo") || "",
+      offset,
+      limit: pageSize,
+    });
     return {
       ok: true,
-      messages: listChatEvents({
-        sessionKey: params.get("sessionKey") || "",
-        q: params.get("q") || "",
-        limit: params.get("limit") || 500,
-      }),
+      messages: result.events,
+      total: result.total,
+      page,
+      pageSize,
+      totalPages: Math.max(1, Math.ceil(result.total / pageSize)),
     };
   });
 }

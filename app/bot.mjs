@@ -2665,7 +2665,7 @@ function startupCheck() {
   }
 
   // Python
-  const py = spawnSync("python", ["--version"], { encoding: "utf8", timeout: 8000, windowsHide: true });
+  const py = spawnSync("python", ["--version"], { encoding: "utf8", timeout: 3000, windowsHide: true });
   if (py.status === 0) {
     pass("Python", (py.stdout || py.stderr || "").trim());
   } else {
@@ -2673,7 +2673,7 @@ function startupCheck() {
   }
 
   // ffmpeg (optional)
-  const ff = spawnSync("ffmpeg", ["-version"], { encoding: "utf8", timeout: 8000, windowsHide: true });
+  const ff = spawnSync("ffmpeg", ["-version"], { encoding: "utf8", timeout: 3000, windowsHide: true });
   if (ff.status === 0) {
     pass("ffmpeg", "已安装");
   } else {

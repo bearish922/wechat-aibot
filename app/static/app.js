@@ -270,47 +270,112 @@ window.deleteProfile = async (name) => {
 };
 
 // History
-let historyState = { q: "", sessionKey: "" };
+let historyState = { q: "", sessionKey: "", page: 1, dateFrom: "", dateTo: "" };
+const HISTORY_PAGE_SIZE = 20;
 
 async function renderHistory() {
   const q = historyState.q || "";
-  const conv = await get(`/api/history/conversations?q=${encodeURIComponent(q)}`);
+  const dateFrom = historyState.dateFrom || "";
+  const dateTo = historyState.dateTo || "";
+  const dfParam = dateFrom ? `&dateFrom=${encodeURIComponent(dateFrom)}` : "";
+  const dtParam = dateTo ? `&dateTo=${encodeURIComponent(dateTo)}` : "";
+  const conv = await get(`/api/history/conversations?q=${encodeURIComponent(q)}${dfParam}${dtParam}`);
   const conversations = conv.conversations || [];
   if (!historyState.sessionKey && conversations.length) historyState.sessionKey = conversations[0].key;
   if (historyState.sessionKey && !conversations.some(x => x.key === historyState.sessionKey) && conversations.length) {
     historyState.sessionKey = conversations[0].key;
   }
-  const msgPath = `/api/history/messages?limit=800${historyState.sessionKey ? `&sessionKey=${encodeURIComponent(historyState.sessionKey)}` : ""}${q ? `&q=${encodeURIComponent(q)}` : ""}`;
-  const msg = historyState.sessionKey ? await get(msgPath) : { messages: [] };
+
+  const page = historyState.page || 1;
+  const skParam = historyState.sessionKey ? `&sessionKey=${encodeURIComponent(historyState.sessionKey)}` : "";
+  const qParam = q ? `&q=${encodeURIComponent(q)}` : "";
+  const msgPath = `/api/history/messages?page=${page}&pageSize=${HISTORY_PAGE_SIZE}${skParam}${qParam}${dfParam}${dtParam}`;
+  const msg = historyState.sessionKey ? await get(msgPath) : { messages: [], total: 0, page: 1, totalPages: 1 };
+
   content.innerHTML = `
     <div class="panel history-panel">
       <div class="panel-head">
         <h2>Chat History</h2>
-        <input id="historySearch" class="history-search" placeholder="Search messages or scenelets" value="${escAttr(q)}">
+        <div class="history-toolbar">
+          <input id="historySearch" class="history-search" placeholder="Search messages or scenelets" value="${escAttr(q)}">
+          <input id="historyDateFrom" class="history-date" type="date" value="${escAttr(dateFrom)}" title="From date">
+          <span class="history-date-sep">-</span>
+          <input id="historyDateTo" class="history-date" type="date" value="${escAttr(dateTo)}" title="To date">
+        </div>
       </div>
       <div class="history-layout">
         <aside class="history-conversations">
           ${renderHistoryConversations(conversations)}
         </aside>
         <section class="history-messages">
+          ${renderPagination(msg.total || 0, msg.page || 1, msg.totalPages || 1)}
           ${renderHistoryMessages(msg.messages || [])}
+          ${renderPagination(msg.total || 0, msg.page || 1, msg.totalPages || 1)}
         </section>
       </div>
     </div>
   `;
-  content.querySelector("#historySearch").addEventListener("keydown", e => {
+
+  bindHistoryEvents();
+}
+
+function bindHistoryEvents() {
+  content.querySelector("#historySearch")?.addEventListener("keydown", e => {
     if (e.key === "Enter") {
       historyState.q = e.target.value.trim();
       historyState.sessionKey = "";
+      historyState.page = 1;
       renderHistory();
     }
+  });
+  content.querySelector("#historyDateFrom")?.addEventListener("change", e => {
+    historyState.dateFrom = e.target.value;
+    historyState.page = 1;
+    renderHistory();
+  });
+  content.querySelector("#historyDateTo")?.addEventListener("change", e => {
+    historyState.dateTo = e.target.value;
+    historyState.page = 1;
+    renderHistory();
   });
   content.querySelectorAll("[data-history-session]").forEach(btn => {
     btn.addEventListener("click", () => {
       historyState.sessionKey = btn.dataset.historySession;
+      historyState.page = 1;
       renderHistory();
     });
   });
+  content.querySelectorAll("[data-history-page]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      historyState.page = Number(btn.dataset.historyPage) || 1;
+      renderHistory();
+    });
+  });
+}
+
+function renderPagination(total, page, totalPages) {
+  if (totalPages <= 1) return "";
+  const pages = [];
+  const maxButtons = 7;
+  let start = Math.max(1, page - 3);
+  let end = Math.min(totalPages, start + maxButtons - 1);
+  if (end - start < maxButtons - 1) start = Math.max(1, end - maxButtons + 1);
+
+  if (page > 1) pages.push(`<button class="page-btn" data-history-page="${page - 1}" title="Previous">&#x2039;</button>`);
+  if (start > 1) {
+    pages.push(`<button class="page-btn" data-history-page="1">1</button>`);
+    if (start > 2) pages.push(`<span class="page-ellipsis">...</span>`);
+  }
+  for (let i = start; i <= end; i++) {
+    pages.push(`<button class="page-btn${i === page ? " active" : ""}" data-history-page="${i}">${i}</button>`);
+  }
+  if (end < totalPages) {
+    if (end < totalPages - 1) pages.push(`<span class="page-ellipsis">...</span>`);
+    pages.push(`<button class="page-btn" data-history-page="${totalPages}">${totalPages}</button>`);
+  }
+  if (page < totalPages) pages.push(`<button class="page-btn" data-history-page="${page + 1}" title="Next">&#x203A;</button>`);
+
+  return `<div class="pagination"><span class="page-info">${total} messages</span><div class="page-btns">${pages.join("")}</div></div>`;
 }
 
 function renderHistoryConversations(conversations) {

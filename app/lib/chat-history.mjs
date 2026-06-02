@@ -43,9 +43,21 @@ export function appendChatEvent(event) {
 export function listChatEvents(options = {}) {
   const q = String(options.q || "").trim().toLowerCase();
   const sessionKey = String(options.sessionKey || "").trim();
-  const rawLimit = Number(options.limit ?? 500);
+  const dateFrom = options.dateFrom ? String(options.dateFrom) : "";
+  const dateTo = options.dateTo ? String(options.dateTo) : "";
+  const offset = Math.max(0, Number(options.offset || 0));
+  const rawLimit = Number(options.limit ?? 50);
   const limit = rawLimit <= 0 ? Number.MAX_SAFE_INTEGER : Math.max(1, rawLimit);
+
   let events = loadAllEvents();
+
+  if (dateFrom) {
+    events = events.filter(e => String(e.timestamp || "") >= dateFrom);
+  }
+  if (dateTo) {
+    events = events.filter(e => String(e.timestamp || "") <= dateTo + "￿");
+  }
+
   if (sessionKey) {
     events = events.filter(e => conversationKey(e) === sessionKey);
   }
@@ -59,7 +71,10 @@ export function listChatEvents(options = {}) {
       e.userId,
     ].some(v => String(v || "").toLowerCase().includes(q)));
   }
-  return events.slice(-limit);
+
+  const total = events.length;
+  const page = events.slice(offset, offset + limit);
+  return { events: page, total };
 }
 
 export function conversationKey(event) {
@@ -68,7 +83,18 @@ export function conversationKey(event) {
 
 export function listConversations(options = {}) {
   const q = String(options.q || "").trim().toLowerCase();
-  const events = listChatEvents({ limit: 0 });
+  const dateFrom = options.dateFrom ? String(options.dateFrom) : "";
+  const dateTo = options.dateTo ? String(options.dateTo) : "";
+
+  let events = loadAllEvents();
+
+  if (dateFrom) {
+    events = events.filter(e => String(e.timestamp || "") >= dateFrom);
+  }
+  if (dateTo) {
+    events = events.filter(e => String(e.timestamp || "") <= dateTo + "￿");
+  }
+
   const map = new Map();
   for (const event of events) {
     if (q && ![
