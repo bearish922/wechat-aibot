@@ -1,10 +1,10 @@
 // ─── Common chat style prompt ───────────────────────────────
 export const COMMON_CHAT_STYLE_PROMPT = [
-  “【共同聊天风格】”,
-  “像熟人微信私聊：先接住当下，不把消息当任务处理。”,
-  “允许自然长短——轻松接话可以很短，认真回应时也允许展开。”,
-  “短不是敷衍，长也不是默认目标。”,
-].join(“\n”);
+  "【共同聊天风格】",
+  "像熟人微信私聊：先接住当下，不把消息当任务处理。",
+  "允许自然长短——轻松接话可以很短，认真回应时也允许展开。",
+  "短不是敷衍，长也不是默认目标。",
+].join("\n");
 
 export const MAX_REPLY_LEN = 3800;
 const SOCIAL_REPLY_MAX_PARTS = 6;
@@ -116,62 +116,52 @@ function makeChatBeats(sentences) {
 function limitSocialParts(parts, maxParts) {
   const clean = parts.map(p => p.trim()).filter(Boolean);
   if (clean.length <= maxParts) return clean;
-  if (maxParts <= 1) return [clean.join("")];
-  return [...clean.slice(0, maxParts - 1), clean.slice(maxParts - 1).join("")];
+  return clean.slice(0, maxParts);
 }
 
 export function splitSocialReply(text) {
-  const t = text.trim();
-  if (isStructuredReply(t)) return [t];
-
-  const explicitBeats = t.split(/\n+/).map(s => s.trim()).filter(Boolean);
-  if (explicitBeats.length >= 2 && explicitBeats.every(p => p.length <= 90)) {
-    return limitSocialParts(explicitBeats, SOCIAL_REPLY_MAX_PARTS);
+  const sentences = text
+    .replace(/\r/g, "")
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\s*\n\s*/g, "\n")
+    .replace(/([。！？!?\n])\s*/g, "$1\n")
+    .split("\n")
+    .map(s => s.trim())
+    .filter(Boolean);
+  if (!sentences.length) return [text.trim()];
+  if (shouldSplitImplicitly(text, sentences)) {
+    const beats = makeChatBeats(sentences);
+    return limitSocialParts(beats, SOCIAL_REPLY_MAX_PARTS);
   }
-
-  const sentences = t
-    .replace(/\s*\n+\s*/g, " ")
-    .match(/[^。！？!?…~～]+[。！？!?…~～]*|.+$/g)
-    ?.map(s => s.trim())
-    .filter(Boolean) || [t];
-
-  if (sentences.length <= 1) return [t];
-  if (!shouldSplitImplicitly(t, sentences)) return [t];
-
-  const chunks = makeChatBeats(sentences);
-  return limitSocialParts(chunks, SOCIAL_REPLY_MAX_PARTS);
+  return [text.trim()];
 }
 
-// ─── Kaomoji tracking ───────────────────────────────────────
-function extractKaomoji(text) {
-  const found = new Set();
-  const bracketed = text.match(/[（(][^）)\n]{1,24}[）)](?:[^\s\w一-鿿]{0,3})/gu) || [];
-  for (const item of bracketed) {
-    if (/[一-鿿]/u.test(item)) continue;
-    if (/[｡•̀́ᴗω▽︿﹏∀◍〃^><;｀´≧≦╯╰･_¯︶]/u.test(item)) found.add(item);
-  }
-  const standalone = text.match(/[ヾヽ][^\s\n]{2,24}/gu) || [];
-  for (const item of standalone) {
-    if (/[｡ωᴗ▽︿﹏∀◍¯︶]/u.test(item)) found.add(item);
-  }
-  return Array.from(found).slice(0, 5);
-}
+// ─── Kaomoji memory ────────────────────────────────────────
+let recentKaomojiMap = new Map();
+let lastCleanup = Date.now();
 
 export function rememberRecentKaomoji(sess, text) {
-  sess._kaomojiTurn = (sess._kaomojiTurn || 0) + 1;
-  const turn = sess._kaomojiTurn;
-  const current = (sess._recentKaomoji || [])
-    .map(item => typeof item === "string" ? { text: item, lastTurn: turn } : item)
-    .filter(item => item?.text && turn - (item.lastTurn || turn) <= 4);
-  const kaomoji = extractKaomoji(text);
-  if (!kaomoji.length) {
-    sess._recentKaomoji = current;
-    return;
+  if (!sess) return;
+  const extracted = extractKaomoji(text);
+  if (!extracted.length) return;
+  const now = Date.now();
+  if (now - lastCleanup > 3600 * 1000) {
+    for (const [k, v] of recentKaomojiMap) {
+      if (now - v > 3600 * 1000) recentKaomojiMap.delete(k);
+    }
+    lastCleanup = now;
   }
-  const updated = [
-    ...kaomoji.map(k => ({ text: k, lastTurn: turn })),
-    ...current.filter(item => !kaomoji.includes(item.text)),
-  ];
-  sess._recentKaomoji = updated.slice(0, 6);
+  const kaomojiTurn = (sess._kaomojiTurn || 0) + extracted.length;
+  sess._kaomojiTurn = kaomojiTurn;
+  sess._recentKaomoji = [...new Set([...(sess._recentKaomoji || []), ...extracted])].slice(-20);
 }
 
+function extractKaomoji(text) {
+  const results = [];
+  const regex = /[\u{1F600}-\u{1F64F}\u{1FAE0}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{200D}\u{FE0F}]|[(（][一-鿿぀-ゟ゠-ヿ（）()]{1,12}[。！？!?.…‥]?[)）]|[（(][A-Za-zÀ-ɏ\s]{1,12}[。！？!?.]?[）)]/gu;
+  let m;
+  while ((m = regex.exec(text)) !== null) {
+    results.push(m[0]);
+  }
+  return [...new Set(results)];
+}
