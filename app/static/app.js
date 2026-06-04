@@ -606,8 +606,7 @@ function renderPipelineStep({ n, title, desc, source, type, body = "", wide = fa
       <div class="pipeline-left">
         <div class="pipeline-field">
           <div class="pipeline-field-head">
-            <span class="pipeline-step-num">${String(n).padStart(2, "0")}</span>
-            <span class="pipeline-field-label">${escHtml(title)}</span>
+            <span class="pipeline-field-label">${String(n).padStart(2, "0")} ${escHtml(title)}</span>
             <span class="pipeline-field-desc">${escHtml(desc)}</span>
           </div>
           ${body}

@@ -1367,18 +1367,6 @@ pre {
   white-space: nowrap;
 }
 
-.pipeline-step-num {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 24px;
-  color: var(--muted);
-  font-family: Consolas, "Cascadia Mono", monospace;
-  font-size: 12px;
-  font-weight: 750;
-}
-
 .pipeline-field-desc {
   font-size: 14px;
   color: var(--muted);
