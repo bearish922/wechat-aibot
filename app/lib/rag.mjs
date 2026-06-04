@@ -9,19 +9,3 @@ export function shouldSkipRag(userMessage) {
   const q = userMessage.trim().toLowerCase();
   return !q || (q.length <= 24 && RAG_SKIP_PATTERNS.some(pattern => pattern.test(q)));
 }
-
-export function buildRagBody(userMessage, ragContext) {
-  if (!ragContext) return userMessage;
-  return [
-    "【本轮知识库检索结果】",
-    "以下内容来自本地角色知识库。涉及角色事实、关系、时间线、说话方式或当前状态时，应优先参考这些资料。",
-    "如果资料与旧印象冲突，以资料中的当前状态、模型规则和明确关系文档为准；如果资料明显无关，可以忽略。",
-    "不要把没有检索到的固定设定补编成事实。",
-    "",
-    ragContext,
-    "",
-    "---",
-    "",
-    userMessage,
-  ].join("\n");
-}

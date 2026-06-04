@@ -957,6 +957,7 @@ def cmd_query(
 
 
 def main():
+    global RESULT_MAX_CHARS
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("build")
@@ -966,6 +967,7 @@ def main():
     qp.add_argument("--file", default=None, help="Read query from file instead of command line")
     qp.add_argument("--top-k", type=int, default=TOP_K)
     qp.add_argument("--min-score", type=float, default=MIN_SCORE)
+    qp.add_argument("--result-max-chars", type=int, default=RESULT_MAX_CHARS)
     qp.add_argument("--profile", default="", help="Active role/profile name, e.g. 白鹭千圣")
     qp.add_argument("--query-type", default="auto", help="auto, relationship, speech_style, personality, ...")
     qp.add_argument("--time-policy", default="auto", help="auto, current, past_allowed")
@@ -981,6 +983,7 @@ def main():
         query_str = Path(args.file).read_text(encoding="utf-8").strip()
     else:
         query_str = " ".join(args.text)
+    RESULT_MAX_CHARS = max(100, int(args.result_max_chars or RESULT_MAX_CHARS))
     result = cmd_query(
         query_str,
         args.top_k,

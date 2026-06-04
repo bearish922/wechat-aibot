@@ -41,7 +41,7 @@ describe("local chat reality", () => {
     const text = formatLocalChatReality(new Date(2026, 4, 28, 2, 13));
     assert.match(text, /当前本地时间：2026-05-28 02:13，星期四，凌晨。/u);
     assert.match(text, /微信私聊/u);
-    assert.match(text, /不确定时可以不用动作/u);
+    assert.match(text, /不要编具体地点和活动/u);
   });
 });
 
@@ -49,7 +49,8 @@ describe("expression capability", () => {
   it("describes allowed expression surface", () => {
     const text = expressionCapabilityPrompt();
     assert.match(text, /\[旺柴\]/u);
-    assert.match(text, /不能主动发送微信内置表情包占位文本/u);
+    assert.match(text, /不能发送微信原生表情包/u);
+    assert.match(text, /Unicode emoji/u);
   });
 });
 

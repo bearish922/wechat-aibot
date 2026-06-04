@@ -258,8 +258,16 @@ function shouldUseRoleplayRag(userMessage) {
   const text = String(userMessage || "").trim();
   if (!text) return false;
   const kw = loadPrompts().ragKeywords || {};
-  // Only trigger RAG for explicit lore / world-building questions
-  if (kw.lore && new RegExp(kw.lore, "u").test(text)) return true;
+  // Only trigger RAG for explicit lore/world-building terms or configured names.
+  for (const key of ["lore", "names"]) {
+    const pattern = String(kw[key] || "").trim();
+    if (!pattern) continue;
+    try {
+      if (new RegExp(pattern, "u").test(text)) return true;
+    } catch (e) {
+      log("⚠️", `invalid RAG keyword regex (${key}): ${e.message}`);
+    }
+  }
   return false;
 }
 
@@ -284,6 +292,9 @@ function queryRag(userMessage, profile = null) {
     const args = ["-X", "utf8", RAG_SCRIPT, "query", "--file", queryFile];
     if (profile && profile !== "默认") args.push("--profile", profile);
     const sc = getSceneConfig();
+    args.push("--top-k", String(sc.ragTopK));
+    args.push("--min-score", String(sc.ragMinScore));
+    args.push("--result-max-chars", String(sc.ragResultMaxChars));
     const result = spawnSync("python", args, {
       cwd: path.dirname(RAG_SCRIPT),
       encoding: "utf-8",
@@ -1259,12 +1270,7 @@ function buildCodexPrompt(ai, userBody, ragContext, stylePrompt, memoryPrompt = 
   let prompt = systemParts.length ? `${systemParts.join("\n\n---\n\n")}\n\n---\n\n${userBody}` : userBody;
   if (ragContext) {
     prompt = [
-      "【本轮知识库检索结果】",
-      "以下内容来自本地角色知识库。涉及角色事实、关系、时间线、说话方式或当前状态时，应优先参考这些资料。",
-      "如果资料与旧印象冲突，以资料中的当前状态、模型规则和明确关系文档为准；如果资料明显无关，可以忽略。",
-      "不要把没有检索到的固定设定补编成事实。",
-      "",
-      ragContext,
+      buildRagContextBlock(ragContext),
       "",
       "---",
       "",
@@ -1354,6 +1360,16 @@ function buildStableStylePrompt() {
   ].join("\n");
 }
 
+function buildRagContextBlock(ragContext) {
+  if (!ragContext) return "";
+  const cfg = loadPrompts();
+  return [
+    "【本轮知识库检索结果】",
+    cfg.ragContextInstruction,
+    ragContext,
+  ].filter(Boolean).join("\n");
+}
+
 function buildTurnBody(userBody, ragContext = "", sceneContext = "") {
   const sections = [];
   const cfg = loadPrompts();
@@ -1362,16 +1378,9 @@ function buildTurnBody(userBody, ragContext = "", sceneContext = "") {
   }
   if (sceneContext) {
     sections.push(sceneContext);
-    sections.push("以上是千圣的内心活动，细腻、复杂、属于她自己，但她不会把这些都说出口。微信回复会轻很多，放松很多，自由很多。抓一个点，一个问句，或者一个吐槽。心里想了很多，但发出去的可能不过一句。");
   }
   if (ragContext) {
-    sections.push([
-      "【本轮知识库检索结果】",
-      "以下内容来自本地角色知识库。涉及角色事实、关系、时间线、说话方式或当前状态时，应优先参考这些资料。",
-      "如果资料与旧印象冲突，以资料中的当前状态、模型规则和明确关系文档为准；如果资料明显无关，可以忽略。",
-      "不要把没有检索到的固定设定补编成事实。",
-      ragContext,
-    ].join("\n"));
+    sections.push(buildRagContextBlock(ragContext));
   }
   const now = new Date();
   const weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
@@ -1409,17 +1418,6 @@ function appendVisibleHistory(sess, role, text, kind = "chat", timestamp = new D
     ...(sess._visibleHistory || []),
     { role, text: String(text), timestamp, kind },
   ]);
-}
-
-function formatVisibleContext(items) {
-  const normalized = Array.isArray(items) ? items : [];
-  if (!normalized.length) return "";
-  return normalized.map(item => {
-    const role = item.role === "assistant" ? "assistant" : "user";
-    const time = item.time ? ` ${item.time}` : "";
-    const kind = item.kind && item.kind !== "chat" ? `/${item.kind}` : "";
-    return `${role}${kind}${time}: ${item.text}`;
-  }).join("\n");
 }
 
 function stripJsonFences(text = "") {
@@ -1506,6 +1504,7 @@ function buildSceneletPrompt({ userId, sessionName, profile, userBody, carriedSc
       userId,
       sessionName,
       profile,
+      visible_context_instruction: cfg.chatHistoryIntro,
       carried_scene_state: carriedSceneState || null,
       recent_visible_context: visibleContext,
       user_message: userBody,
@@ -1554,13 +1553,14 @@ async function generateSceneletForTurn({ userId, sess, profile, userBody, memory
 }
 
 function buildSceneContextBlock(sess, sceneletResult, carriedState) {
+  const cfg = loadPrompts();
   const parts = [
-    carriedState ? ["【轻量 scene_state】", "这是极短、可过期、可被用户新消息覆盖的连续性状态；不要把它当成固定事实。", carriedState].join("\n") : "",
+    carriedState ? ["【轻量 scene_state】", cfg.sceneStateIntro, carriedState].filter(Boolean).join("\n") : "",
     sceneletResult?.innerScenelet ? [
       "【隐藏中间层：inner_scenelet】",
-      "下面内容不会展示给用户。它用于帮助你以角色此刻的状态接话；不要逐字复述，也不要解释它的存在。",
+      cfg.innerSceneletIntro,
       sceneletResult.innerScenelet,
-    ].join("\n") : "",
+    ].filter(Boolean).join("\n") : "",
   ].filter(Boolean);
   return parts.join("\n\n");
 }
@@ -1697,6 +1697,7 @@ function buildProactivePrompt({ userId, sessionName, profile, intent, memoryProm
         last_assistant_at: sess?._lastAssistantAt || null,
         last_proactive_at: sess?._lastProactiveAt || null,
       },
+      visible_context_instruction: cfg.chatHistoryIntro,
       carried_scene_state: carriedSceneState || null,
       recent_visible_context: visibleContext,
       candidate_intent: intent,

@@ -625,11 +625,6 @@ function renderTextPreview(key, value) {
 const RAG_KW_GROUPS = [
   { key: "lore", label: "Lore" },
   { key: "names", label: "Names" },
-  { key: "expression", label: "Expression" },
-  { key: "preferences", label: "Preferences" },
-  { key: "daily", label: "Daily" },
-  { key: "questionSubjects", label: "Q Subjects" },
-  { key: "questionContents", label: "Q Contents" },
 ];
 
 function renderRagKeywordChips(p) {
@@ -658,19 +653,11 @@ function renderRagKeywordChips(p) {
     <input class="rag-kw-add-input" placeholder="Add keyword and press Enter..." data-action="kw-add">
   </div>`;
 
-  const dMinLen = (window._ragKwEdits?.dailyMinLen) ?? (p.ragKeywords?.dailyMinLen) ?? 5;
-  const qMinLen = (window._ragKwEdits?.questionMinLen) ?? (p.ragKeywords?.questionMinLen) ?? 4;
-  const lens = `<div class="rag-kw-lens">
-    <label>Daily min len <input class="prompts-editable prompts-num rag-kw-len-input" type="number" min="1" max="20" value="${dMinLen}" data-kwkey="dailyMinLen"></label>
-    <label>Question min len <input class="prompts-editable prompts-num rag-kw-len-input" type="number" min="1" max="20" value="${qMinLen}" data-kwkey="questionMinLen"></label>
-  </div>`;
-
   return `<div class="rag-kw-section">
     <label class="pipeline-sub-label">Trigger Keywords</label>
     <div class="rag-kw-tabs">${tabs}</div>
     <div class="rag-kw-chips">${chips || '<span class="rag-kw-empty">(no keywords)</span>'}</div>
     ${addRow}
-    ${lens}
   </div>`;
 }
 
@@ -730,40 +717,6 @@ function renderPipelineText(key, label, desc, value, flowLabel, flowSrc, type) {
   `;
 }
 
-function renderPipelineRow(key, label, desc, controlHtml, flowLabel, flowSrc, type) {
-  return `
-    <div class="pipeline-row">
-      <div class="pipeline-left">
-        <div class="pipeline-field">
-          <div class="pipeline-field-head">
-            <span class="pipeline-field-label">${escHtml(label)}</span>
-            <span class="pipeline-field-desc">${escHtml(desc)}</span>
-          </div>
-          ${controlHtml}
-        </div>
-      </div>
-      <div class="pipeline-connector"><span>─</span></div>
-      <div class="pipeline-right">
-        <div class="pipeline-node pipeline-node-${type}">
-          <span class="pipeline-node-label">${escHtml(flowLabel)}</span>
-          <span class="pipeline-node-src">${escHtml(flowSrc)}</span>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function renderPipelineNum(key, label, desc, value, min, max, unit, flowLabel, flowSrc, type) {
-  const controlHtml = `<div class="pipeline-num-group"><input id="prompt_${key}" class="prompts-editable prompts-num" type="number" min="${min}" max="${max}" value="${value || 0}" data-key="${key}"><span class="pipeline-num-unit">${escHtml(unit)}</span></div>`;
-  return renderPipelineRow(key, label, desc, controlHtml, flowLabel, flowSrc, type);
-}
-
-function renderPipelineNumS(key, label, desc, valueMs, minS, maxS, unit, flowLabel, flowSrc, type) {
-  const valS = toS(valueMs);
-  const controlHtml = `<div class="pipeline-num-group"><input id="prompt_${key}" class="prompts-editable prompts-num" type="number" min="${minS}" max="${maxS}" value="${valS}" data-key="${key}" data-ms="1"><span class="pipeline-num-unit">${escHtml(unit)}</span></div>`;
-  return renderPipelineRow(key, label, desc, controlHtml, flowLabel, flowSrc, type);
-}
-
 function renderPipelineArrow(text) {
   return `
     <div class="pipeline-arrow-row">
@@ -801,42 +754,6 @@ async function savePrompts() {
   } else {
     toast(r.error, false);
   }
-}
-
-// Profiles (kept for backward compat)
-async function renderProfiles() {
-  const d = await get("/api/profiles");
-  const rows = d.profiles.map(p => `
-    <tr>
-      <td class="profile-name"><strong>${escHtml(p.name)}</strong></td>
-      <td class="prompt-preview">${escHtml(p.prompt.slice(0, 110))}${p.prompt.length > 110 ? '...' : ''}</td>
-      <td>${Number(p.bindings)} session${p.bindings !== 1 ? 's' : ''}</td>
-      <td class="actions-cell">
-        <button class="btn" data-action="edit-profile" data-profile="${escAttr(p.name)}">Edit</button>
-        ${p.name !== '默认' ? `<button class="btn btn-danger" data-action="delete-profile" data-profile="${escAttr(p.name)}">Del</button>` : ''}
-      </td>
-    </tr>
-  `).join("");
-
-  content.innerHTML = `
-    <div class="panel">
-      <div class="panel-head">
-        <h2>Profiles</h2>
-        <button class="btn btn-primary" onclick="showAddProfile()">+ Add</button>
-      </div>
-      <div class="table-wrap"><table>
-        <thead><tr><th>Name</th><th>Prompt</th><th>Bindings</th><th></th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table></div>
-      <div id="profileForm" class="mt"></div>
-    </div>
-  `;
-  content.querySelectorAll('[data-action="edit-profile"]').forEach(btn => {
-    btn.addEventListener("click", () => editProfile(btn.dataset.profile));
-  });
-  content.querySelectorAll('[data-action="delete-profile"]').forEach(btn => {
-    btn.addEventListener("click", () => deleteProfile(btn.dataset.profile));
-  });
 }
 
 window.editProfile = async (name) => {

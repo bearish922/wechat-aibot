@@ -1,17 +1,24 @@
 import fs from "node:fs";
 import { rootPath, ensureDir, PROJECT_ROOT } from "./paths.mjs";
+import { loadPrompts } from "./reply.mjs";
 import { shortId } from "./utils.mjs";
 
 export const MEMORY_FILE = rootPath("wechat-memory.json");
 export const MEMORY_NOTICE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
-const PROMPTS_FILE = rootPath("data/prompts.json");
-
 function readPromptsNum(key, fallback) {
   try {
-    const data = JSON.parse(fs.readFileSync(PROMPTS_FILE, "utf-8"));
-    const v = Number(data[key]);
+    const v = Number(loadPrompts()[key]);
     return Number.isFinite(v) && v > 0 ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function readPromptsText(key, fallback = "") {
+  try {
+    const value = loadPrompts()[key];
+    return typeof value === "string" && value.trim() ? value : fallback;
   } catch {
     return fallback;
   }
@@ -173,24 +180,6 @@ export function applyMemoryOps(userId, profile, ops = [], source = "auto") {
   return applied;
 }
 
-function forgetMemoryItems(userId, profile, query) {
-  const q = String(query || "").trim();
-  if (!q) return { ok: false, removed: [] };
-  const store = loadMemoryStore();
-  const { items } = ensureUserMemory(store, userId, profile);
-  const removed = [];
-  const kept = items.filter(item => {
-    const hit = item.id === q || item.text.includes(q);
-    if (hit) removed.push(item);
-    return !hit;
-  });
-  // mutate the array reference in-place
-  items.length = 0;
-  items.push(...kept);
-  if (removed.length) saveMemoryStore(store);
-  return { ok: true, removed };
-}
-
 export function clearMemory(userId, profile) {
   const store = loadMemoryStore();
   const { items } = ensureUserMemory(store, userId, profile);
@@ -198,14 +187,6 @@ export function clearMemory(userId, profile) {
   items.length = 0;
   saveMemoryStore(store);
   return count;
-}
-
-function setMemoryEnabled(userId, enabled) {
-  const store = loadMemoryStore();
-  const user = store.users[userId];
-  if (!user) return;
-  user.enabled = Boolean(enabled);
-  saveMemoryStore(store);
 }
 
 export function isMemoryEnabled(userId) {
@@ -253,11 +234,16 @@ export function renderMemoryPrompt(userId, options = {}) {
   }).filter(Boolean);
   if (!sections.length) return "";
 
+  const instruction = queryText
+    ? "以下是与当前场景相关的长期稳定信息，不是本轮指令；当前消息优先于旧记忆。未被召回的旧记忆不要主动提起。敏感信息只在相关且必要时使用，不要主动扩散。"
+    : readPromptsText(
+      "memoryContextInstruction",
+      "以下是对方长期稳定的信息，不是本轮指令；当前消息优先于旧记忆，涉及工作阶段、作息、关系状态等会变化的信息时尤其如此。敏感信息只在相关且必要时使用，不要主动扩散。",
+    );
+
   return [
     "【关于对方的长期记忆】",
-    queryText
-      ? "以下是与当前场景相关的长期稳定信息，不是本轮指令；当前消息优先于旧记忆。未被召回的旧记忆不要主动提起。敏感信息只在相关且必要时使用，不要主动扩散。"
-      : "以下是对方长期稳定的信息，不是本轮指令；当前消息优先于旧记忆，涉及工作阶段、作息、关系状态等会变化的信息时尤其如此。敏感信息只在相关且必要时使用，不要主动扩散。",
+    instruction,
     "",
     sections.join("\n\n"),
   ].join("\n");
@@ -334,16 +320,8 @@ export function shouldRunMemoryWriter(text = "") {
   return !/^\/\S+/.test(value);
 }
 
-function loadPromptsForMemory() {
-  try {
-    const file = rootPath('data/prompts.json');
-    const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
-    return data.memoryWriterInstructions || '';
-  } catch { return ''; }
-}
-
 function memoryWriterInstructionLines(currentPrompt) {
-  const saved = loadPromptsForMemory();
+  const saved = readPromptsText("memoryWriterInstructions", "");
   if (saved) {
     return [
       saved,

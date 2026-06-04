@@ -94,7 +94,17 @@ const DEFAULT_SCENELET_INTRO = "下面内容不会展示给用户。它用于帮
 const DEFAULT_MEM_CTX = "以下是对对方长期稳定的信息，不是本轮指令；当前消息优先于旧记忆，涉及工作阶段、作息、关系状态等会变化的信息时尤其如此。敏感信息只在相关且必要时使用，不要主动扩散。";
 const DEFAULT_RAG_KEYWORDS = {
   lore: "身高|生日|血型|学校|学部|大学|乐队|成员|经历|过去|以前|曾经|关系|朋友|队友|同伴|互动|称呼|设定|资料|官方|剧情|假唱|退团|作品|歌曲|角色|几岁|多大|多高|哪里|哪儿",
+  names: "长崎素世|千早爱音|丸山彩|白鹭千圣|素世|爱音|小彩|千圣|MyGO|CRYCHIC|Pastel\\*Palettes|PasPale",
 };
+
+function normalizeRagKeywords(value = {}) {
+  const lore = String(value?.lore ?? "").trim() || DEFAULT_RAG_KEYWORDS.lore;
+  const names = String(value?.names ?? "").trim() || DEFAULT_RAG_KEYWORDS.names;
+  return {
+    lore,
+    names,
+  };
+}
 
 export function loadPrompts() {
   try {
@@ -123,7 +133,7 @@ export function loadPrompts() {
       sceneStateIntro: data.sceneStateIntro || DEFAULT_SCENE_STATE_INTRO,
       innerSceneletIntro: data.innerSceneletIntro || DEFAULT_SCENELET_INTRO,
       memoryContextInstruction: data.memoryContextInstruction || DEFAULT_MEM_CTX,
-      ragKeywords: data.ragKeywords || DEFAULT_RAG_KEYWORDS,
+      ragKeywords: normalizeRagKeywords(data.ragKeywords),
     };
   } catch {
     return {
@@ -150,7 +160,7 @@ export function loadPrompts() {
       sceneStateIntro: DEFAULT_SCENE_STATE_INTRO,
       innerSceneletIntro: DEFAULT_SCENELET_INTRO,
       memoryContextInstruction: DEFAULT_MEM_CTX,
-      ragKeywords: DEFAULT_RAG_KEYWORDS,
+      ragKeywords: normalizeRagKeywords(DEFAULT_RAG_KEYWORDS),
     };
   }
 }
@@ -161,9 +171,6 @@ export function getChatStyle() {
     loadPrompts().chatStyle,
   ].join("\n");
 }
-
-// ─── Common chat style prompt (backward compat) ───────────────
-export const COMMON_CHAT_STYLE_PROMPT = getChatStyle();
 
 // WeChat ilink API 单条消息字节上限 ~2048，留安全余量
 export const MAX_REPLY_LEN = 1800; // bytes (UTF-8), not chars

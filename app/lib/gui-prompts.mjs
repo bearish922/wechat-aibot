@@ -32,13 +32,6 @@ export function registerPromptsRoutes() {
       updates.ragKeywords = {
         lore: kw.lore !== undefined ? String(kw.lore) : (current.ragKeywords?.lore || ""),
         names: kw.names !== undefined ? String(kw.names) : (current.ragKeywords?.names || ""),
-        expression: kw.expression !== undefined ? String(kw.expression) : (current.ragKeywords?.expression || ""),
-        preferences: kw.preferences !== undefined ? String(kw.preferences) : (current.ragKeywords?.preferences || ""),
-        daily: kw.daily !== undefined ? String(kw.daily) : (current.ragKeywords?.daily || ""),
-        dailyMinLen: kw.dailyMinLen !== undefined ? Number(kw.dailyMinLen) : (current.ragKeywords?.dailyMinLen || 5),
-        questionSubjects: kw.questionSubjects !== undefined ? String(kw.questionSubjects) : (current.ragKeywords?.questionSubjects || ""),
-        questionContents: kw.questionContents !== undefined ? String(kw.questionContents) : (current.ragKeywords?.questionContents || ""),
-        questionMinLen: kw.questionMinLen !== undefined ? Number(kw.questionMinLen) : (current.ragKeywords?.questionMinLen || 4),
       };
     }
     const merged = { ...current, ...updates };
