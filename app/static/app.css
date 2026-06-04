@@ -1373,9 +1373,6 @@ pre {
   justify-content: center;
   width: 32px;
   height: 24px;
-  border: 1px solid var(--line-strong);
-  border-radius: 4px;
-  background: var(--surface-soft);
   color: var(--muted);
   font-family: Consolas, "Cascadia Mono", monospace;
   font-size: 12px;
@@ -1418,14 +1415,21 @@ pre {
 .pipeline-meta-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 12px;
+  gap: 6px;
 }
 
 .pipeline-meta-list span {
-  color: var(--text);
-  font-size: 14px;
-  font-weight: 720;
-  line-height: 1.45;
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fbfcfe;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1.35;
 }
 
 .pipeline-embedded-table {
