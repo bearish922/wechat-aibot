@@ -193,10 +193,10 @@ async function renderPrompts() {
     <tr>
       <td class="profile-name"><strong>${escHtml(pr.name)}</strong></td>
       <td class="prompt-preview"><span class="prompt-preview-text">${escHtml(pr.prompt)}</span></td>
-      <td>${Number(pr.bindings)} session${pr.bindings !== 1 ? 's' : ''}</td>
+      <td>${Number(pr.bindings)} 个会话</td>
       <td class="actions-cell">
-        <button class="btn" data-action="edit-profile" data-profile="${escAttr(pr.name)}">Edit</button>
-        ${pr.name !== '默认' ? `<button class="btn btn-danger" data-action="delete-profile" data-profile="${escAttr(pr.name)}">Del</button>` : ''}
+        <button class="btn" data-action="edit-profile" data-profile="${escAttr(pr.name)}">编辑</button>
+        ${pr.name !== '默认' ? `<button class="btn btn-danger" data-action="delete-profile" data-profile="${escAttr(pr.name)}">删除</button>` : ''}
       </td>
     </tr>
   `).join("");
@@ -334,29 +334,6 @@ function switchTab(name) {
   render();
 }
 
-function renderPipelineInfo(label, desc, techNote, flowLabel, flowSrc, type) {
-  return `
-    <div class="pipeline-row">
-      <div class="pipeline-left">
-        <div class="pipeline-field">
-          <div class="pipeline-field-head">
-            <span class="pipeline-field-label">${escHtml(label)}</span>
-            <span class="pipeline-field-desc">${desc}</span>
-          </div>
-          <span class="pipeline-tech-note">${escHtml(techNote)}</span>
-        </div>
-      </div>
-      <div class="pipeline-connector"><span>─</span></div>
-      <div class="pipeline-right">
-        <div class="pipeline-node pipeline-node-${type}">
-          <span class="pipeline-node-label">${escHtml(flowLabel)}</span>
-          <span class="pipeline-node-src">${escHtml(flowSrc)}</span>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
 let promptsEditing = {};
 let promptDrafts = {};
 
@@ -364,11 +341,11 @@ function renderPromptsPipeline(p, profileRows) {
   const profileTable = `
     <div class="pipeline-embedded-table">
       <div class="table-wrap"><table>
-        <thead><tr><th>Name</th><th>Prompt Preview</th><th>Sessions</th><th></th></tr></thead>
-        <tbody>${profileRows || '<tr><td colspan="4">No profiles</td></tr>'}</tbody>
+        <thead><tr><th>名称</th><th>Prompt 预览</th><th>绑定会话</th><th></th></tr></thead>
+        <tbody>${profileRows || '<tr><td colspan="4">暂无 profiles</td></tr>'}</tbody>
       </table></div>
       <div class="pipeline-table-actions">
-        <button class="btn btn-primary" onclick="showAddProfile()">+ Add Profile</button>
+        <button class="btn btn-primary" onclick="showAddProfile()">+ 新增 Profile</button>
         <div id="profileForm"></div>
       </div>
     </div>`;
@@ -376,34 +353,34 @@ function renderPromptsPipeline(p, profileRows) {
   return `
     <div class="panel">
       <div class="panel-head">
-        <h2>Runtime Prompt Pipeline</h2>
-        <span class="status-pill online">Live config</span>
+        <h2>运行时 Prompt Pipeline</h2>
+        <span class="status-pill online">实时配置</span>
       </div>
       <div class="pipeline-summary">
-        <span>Ordered from WeChat input to post-turn persistence.</span>
-        <span>Editable controls write through <code>data/prompts.json</code>, profile templates, Memory, and History surfaces.</span>
+        <span>按真实执行顺序展示：从微信入站消息，到模型回复后的本地状态写回。</span>
+        <span>可编辑控件会写入 <code>data/prompts.json</code>、profile 模板，或引导你到 Memory / History 等对应观察面。</span>
       </div>
     </div>
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-input"><span>Phase 0 — Inbound, Session, Attachment</span><span class="pipeline-tag">before processTurn()</span></div>
+        <div class="pipeline-phase-label phase-input"><span>阶段 0 — 入站消息、会话、附件</span><span class="pipeline-tag">processTurn() 之前</span></div>
         ${renderPipelineStep({
           n: 1,
-          title: "WeChat Inbound Poll",
-          desc: "iLink update arrives, message enters the active session queue, then sessionLoop() calls processTurn().",
-          observe: "Status tab, runtime logs, queue/busy fields",
-          control: "Read-only in Prompts",
+          title: "WeChat 入站轮询",
+          desc: "iLink 收到新消息后，消息进入当前会话队列，再由 sessionLoop() 调用 processTurn()。",
+          observe: "Status 页、运行日志、queue/busy 字段",
+          control: "Prompts 页只读",
           source: "getUpdates → sessionLoop",
           type: "input",
-          body: renderPipelineMeta(["failed/test turns stay out of completed visible context", "new messages can cancel stale proactive intents"]),
+          body: renderPipelineMeta(["失败/测试轮次不会进入已完成的可见上下文", "新消息可以取消过期的 proactive intent"]),
         })}
         ${renderPipelineStep({
           n: 2,
-          title: "Session Profile Binding",
-          desc: "The active session profile selects the role template and decides whether roleplay-only context layers run.",
-          observe: "Profiles table and active session bindings",
-          control: "Edit role templates here; bind sessions in Sessions",
+          title: "会话 Profile 绑定",
+          desc: "当前会话绑定的 profile 会决定使用哪个角色模板，以及是否启用角色聊天专属上下文层。",
+          observe: "Profile 表格和当前会话绑定关系",
+          control: "这里可编辑角色模板；会话绑定在 Sessions 里调整",
           source: "wechat-profiles.json",
           type: "sys",
           wide: true,
@@ -411,252 +388,252 @@ function renderPromptsPipeline(p, profileRows) {
         })}
         ${renderPipelineStep({
           n: 3,
-          title: "Inbound Attachment / Vision Caption",
-          desc: "If the user sends an image, Vision runs before the text turn; RAG is skipped for attachment turns.",
-          observe: "Turn log includes image/caption context",
-          control: "Vision caption prompt",
+          title: "入站附件 / Vision Caption",
+          desc: "如果用户发送图片，Vision 会先生成图片描述；带附件的轮次不会触发 RAG 检索。",
+          observe: "轮次日志里的图片/描述上下文",
+          control: "Vision 描述 prompt",
           source: "visionCaptionPrompt",
           type: "input",
           body: renderTextPreview("visionCaptionPrompt", p.visionCaptionPrompt),
         })}
         ${renderPipelineStep({
           n: 4,
-          title: "Failed Turn Guard",
-          desc: "Only successful turns advance session state; failed turns are retained separately for retry context and not written as normal chat history.",
-          observe: "History tab and data/logs turn results",
-          control: "Read-only in Prompts",
+          title: "失败轮次保护",
+          desc: "只有成功完成的轮次才会推进会话状态；失败轮次单独保留为重试上下文，不写入普通聊天历史。",
+          observe: "History 页和 data/logs 中的轮次结果",
+          control: "Prompts 页只读",
           source: "_lastFailedTurn",
           type: "input",
-          body: renderPipelineMeta(["success required before visible history, scene_state, proactive candidates, and memory writer are updated"]),
+          body: renderPipelineMeta(["只有成功后才会更新 visible history、scene_state、proactive candidates 和 memory writer"]),
         })}
       </div>
     </div>
 
-    ${renderPipelineArrow("processTurn() begins: profile, style prompt, memory prompt, and logs are prepared")}
+    ${renderPipelineArrow("processTurn() 开始：读取 profile、style prompt、memory prompt，并创建本轮日志")}
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-sys"><span>Phase 1 — Stable System Context</span><span class="pipeline-tag">system prompt file / Codex prompt prefix</span></div>
+        <div class="pipeline-phase-label phase-sys"><span>阶段 1 — 稳定 System Context</span><span class="pipeline-tag">system prompt file / Codex prompt prefix</span></div>
         ${renderPipelineStep({
           n: 5,
           title: "Profile Template + Pinned Rules",
-          desc: "Role template is joined with profile-specific model rules from knowledge/05_模型规则 when a non-default profile is active.",
-          observe: "Profile preview plus pinned-rule file source",
-          control: "Profile editor; pinned rule files remain file-backed",
+          desc: "当当前会话不是默认 profile 时，角色模板会和 knowledge/05_模型规则 下的角色专属规则一起注入。",
+          observe: "Profile 预览，以及 pinned rule 的文件来源",
+          control: "可编辑 Profile；pinned rule 仍由文件维护",
           source: "profileTemplates + 05_模型规则",
           type: "sys",
-          body: renderPipelineMeta(["profileRuleMaxChars: 1400 chars", "default profile skips roleplay-only layers"]),
+          body: renderPipelineMeta(["profileRuleMaxChars: 1400 chars", "默认 profile 会跳过角色聊天专属上下文层"]),
         })}
         ${renderPipelineStep({
           n: 6,
-          title: "Long-term Memory Injection",
-          desc: "renderMemoryPrompt() selects stable memories by userId + profile and injects them before the model reply.",
-          observe: "Memory tab and memory prompt char counts in turn logs",
-          control: "Memory context instruction and retrieval limits",
+          title: "长期记忆注入",
+          desc: "renderMemoryPrompt() 会按 userId + profile 选择稳定记忆，并在主模型回复前注入。",
+          observe: "Memory 页，以及轮次日志里的 memory prompt 字符数",
+          control: "Memory 上下文说明和召回数量",
           source: "wechat-memory.json",
           type: "sys",
           body: `
             ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
             ${renderControlGrid([
-              renderNumberControl("memoryDefaultLimit", "Default Limit", p.memoryDefaultLimit || 6, 1, 30, "items"),
+              renderNumberControl("memoryDefaultLimit", "默认召回数", p.memoryDefaultLimit || 6, 1, 30, "items"),
             ])}
           `,
         })}
         ${renderPipelineStep({
           n: 7,
-          title: "Stable Chat Style",
-          desc: "buildStableStylePrompt() appends chat style and expression capability to the stable system layer.",
-          observe: "turn_context stableSystemChars",
-          control: "Chat style and expression prompt",
+          title: "稳定聊天风格",
+          desc: "buildStableStylePrompt() 会把聊天风格和表达能力规则加入稳定 system 层。",
+          observe: "turn_context 里的 stableSystemChars",
+          control: "聊天风格和表达能力 prompt",
           source: "reply.mjs / prompts.json",
           type: "sys",
           body: `
-            <label class="pipeline-sub-label">Chat Style</label>
+            <label class="pipeline-sub-label">聊天风格</label>
             ${renderTextPreview("chatStyle", p.chatStyle)}
-            <label class="pipeline-sub-label">Expression Capability</label>
+            <label class="pipeline-sub-label">表达能力</label>
             ${renderTextPreview("expressionCapability", p.expressionCapability)}
           `,
         })}
       </div>
     </div>
 
-    ${renderPipelineArrow("Roleplay context branch runs before main model when the active profile is not default")}
+    ${renderPipelineArrow("当当前会话不是默认 profile 时，会在主模型前运行角色聊天上下文分支")}
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-body"><span>Phase 2 — Roleplay Context Branch</span><span class="pipeline-tag">scenelet + RAG gates</span></div>
+        <div class="pipeline-phase-label phase-body"><span>阶段 2 — 角色聊天上下文分支</span><span class="pipeline-tag">scenelet + RAG gates</span></div>
         ${renderPipelineStep({
           n: 8,
-          title: "Visible Context Window",
-          desc: "recentVisibleContext() reads the latest visible chat turns for hidden scenelet and proactive evaluation.",
-          observe: "History tab and _visibleHistory",
-          control: "Visible context instruction and turn count",
+          title: "可见上下文窗口",
+          desc: "recentVisibleContext() 会读取最近的真实可见聊天轮次，供隐藏 scenelet 和 proactive 评估使用。",
+          observe: "History 页和 _visibleHistory",
+          control: "可见上下文说明和轮次数量",
           source: "chatHistoryIntro / visibleContextTurns",
           type: "body",
           body: `
             ${renderTextPreview("chatHistoryIntro", p.chatHistoryIntro)}
             ${renderControlGrid([
-              renderNumberControl("visibleContextTurns", "Visible Turns", p.visibleContextTurns || 8, 1, 30, "turns"),
+              renderNumberControl("visibleContextTurns", "可见轮次数", p.visibleContextTurns || 8, 1, 30, "turns"),
             ])}
           `,
         })}
         ${renderPipelineStep({
           n: 9,
-          title: "Carried Scene State",
-          desc: "sceneStateText() reads the previous lightweight scene_state, drops it after expiry, then later writes the next state only on success.",
-          observe: "History tab scene_state fields",
-          control: "Intro text and max chars",
+          title: "延续 scene_state",
+          desc: "sceneStateText() 会读取上一轮轻量 scene_state，过期后自动丢弃；新的状态只会在成功轮次后写回。",
+          observe: "History 页里的 scene_state 字段",
+          control: "注入说明和最大字符数",
           source: "_sceneState",
           type: "body",
           body: `
             ${renderTextPreview("sceneStateIntro", p.sceneStateIntro)}
             ${renderControlGrid([
-              renderNumberControl("sceneStateMaxChars", "Max Chars", p.sceneStateMaxChars || 220, 50, 2000, "chars"),
+              renderNumberControl("sceneStateMaxChars", "最大字符数", p.sceneStateMaxChars || 220, 50, 2000, "chars"),
             ])}
-            ${renderPipelineMeta(["current TTL: 2h, read-only in this tab"])}
+            ${renderPipelineMeta(["当前 TTL: 2h；本页只展示，不编辑 TTL"])}
           `,
         })}
         ${renderPipelineStep({
           n: 10,
-          title: "Hidden Inner Scenelet Call",
-          desc: "generateSceneletForTurn() calls a hidden JSON prompt to produce inner_scenelet, next_scene_state, and proactive candidates.",
-          observe: "History tab scenelet column and data/logs inner_scenelet events",
-          control: "Scenelet instructions and inner_scenelet injection intro",
+          title: "隐藏 inner_scenelet 调用",
+          desc: "generateSceneletForTurn() 会调用一个隐藏 JSON prompt，生成 inner_scenelet、next_scene_state 和 proactive candidates。",
+          observe: "History 页的 scenelet 列，以及 data/logs 里的 inner_scenelet 事件",
+          control: "Scenelet 指令和 inner_scenelet 注入说明",
           source: "sceneletInstructions",
           type: "body",
           body: `
             <label class="pipeline-sub-label">Scenelet System Prompt</label>
             ${renderTextPreview("sceneletInstructions", p.sceneletInstructions)}
-            <label class="pipeline-sub-label">Inner Scenelet Intro</label>
+            <label class="pipeline-sub-label">inner_scenelet 注入说明</label>
             ${renderTextPreview("innerSceneletIntro", p.innerSceneletIntro)}
           `,
         })}
         ${renderPipelineStep({
           n: 11,
           title: "RAG Eligibility Gate",
-          desc: "RAG runs only when enabled, message has no attachment, profile is non-default, casual-skip is false, and explicit profile/name/lore keywords match.",
-          observe: "turn_context ragChars plus RAG hit/miss log lines",
-          control: "Lore/name keywords and retrieval parameters",
+          desc: "只有在 RAG 已启用、消息无附件、profile 非默认、没有被 casual-skip 跳过，并且命中显式 profile / names / lore 条件时，才会检索。",
+          observe: "turn_context 里的 ragChars，以及 RAG hit/miss 日志",
+          control: "lore / names 关键词和检索参数",
           source: "shouldUseRagForTurn()",
           type: "body",
           body: `
-            ${renderPipelineMeta(["shouldSkipRag() casual greetings: read-only", "explicit other profile name: automatic trigger", "invalid keyword regex is logged and skipped"])}
+            ${renderPipelineMeta(["shouldSkipRag() 的寒暄跳过规则：本页只读", "显式提到其他 profile 名称：自动触发", "无效 keyword regex 会记录日志并跳过"])}
             ${renderRagKeywordChips(p)}
-            <label class="pipeline-sub-label">RAG Context Instruction</label>
+            <label class="pipeline-sub-label">RAG 上下文说明</label>
             ${renderTextPreview("ragContextInstruction", p.ragContextInstruction)}
             ${renderControlGrid([
               renderNumberControl("ragTopK", "Top-K", p.ragTopK || 6, 1, 20, "docs"),
-              renderNumberControl("ragMinScore", "Min Score", p.ragMinScore || 0.48, 0, 1, "score", { step: "0.01" }),
-              renderNumberControl("ragResultMaxChars", "Max Chars", p.ragResultMaxChars || 3600, 500, 10000, "chars"),
-              renderNumberControl("ragTimeoutMs", "Timeout", toS(p.ragTimeoutMs), 5, 120, "s", { ms: true }),
+              renderNumberControl("ragMinScore", "最低分数", p.ragMinScore || 0.48, 0, 1, "score", { step: "0.01" }),
+              renderNumberControl("ragResultMaxChars", "最大字符数", p.ragResultMaxChars || 3600, 500, 10000, "chars"),
+              renderNumberControl("ragTimeoutMs", "超时", toS(p.ragTimeoutMs), 5, 120, "s", { ms: true }),
             ])}
           `,
         })}
       </div>
     </div>
 
-    ${renderPipelineArrow("Turn Body is assembled in exact order: chat reality → scene context → RAG context → timestamped user message")}
+    ${renderPipelineArrow("Turn Body 按真实顺序组装：聊天现实规则 → scene context → RAG context → 带时间戳的用户消息")}
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-model"><span>Phase 3 — Main Model Turn</span><span class="pipeline-tag">Claude stream-json / Codex json</span></div>
+        <div class="pipeline-phase-label phase-model"><span>阶段 3 — 主模型轮次</span><span class="pipeline-tag">Claude stream-json / Codex json</span></div>
         ${renderPipelineStep({
           n: 12,
-          title: "Chat Reality + User Message",
-          desc: "buildTurnBody() prepends chat reality rules and appends the current local timestamp with the raw user body.",
-          observe: "turn_context transientBodyChars",
-          control: "Chat reality rules",
+          title: "聊天现实规则 + 用户消息",
+          desc: "buildTurnBody() 会先加入聊天现实规则，再把当前本地时间戳和用户原始消息放到最后。",
+          observe: "turn_context 里的 transientBodyChars",
+          control: "聊天现实规则",
           source: "buildTurnBody()",
           type: "model",
           body: renderTextPreview("chatRealityInstructions", p.chatRealityInstructions),
         })}
         ${renderPipelineStep({
           n: 13,
-          title: "Backend Prompt Assembly",
-          desc: "Claude writes stable context to --append-system-prompt-file; Codex prefixes the same stable context and adds RAG before the prompt.",
-          observe: "data/logs turn_context and CLI event stream",
-          control: "All upstream prompt controls in this page",
+          title: "后端 Prompt 组装",
+          desc: "Claude 会把稳定上下文写入 --append-system-prompt-file；Codex 会把同一份稳定上下文拼到 prompt 前，并在更前面加入 RAG。",
+          observe: "data/logs 里的 turn_context 和 CLI 事件流",
+          control: "本页上游所有 prompt 控件",
           source: "runClaudeStream() / runCodexStream()",
           type: "model",
-          body: renderPipelineMeta(["Claude receives RAG inside stdin body", "Codex receives RAG before the combined prompt", "profile chats use no-session-persistence"]),
+          body: renderPipelineMeta(["Claude 在 stdin body 中接收 RAG", "Codex 在组合 prompt 前接收 RAG", "profile 聊天使用 no-session-persistence"]),
         })}
         ${renderPipelineStep({
           n: 14,
-          title: "Streaming Flush, Split, Send",
-          desc: "Assistant text streams into a buffer, flushes during tool use or long output, then final role chats are split into natural WeChat messages.",
-          observe: "WeChat sent chunks and formatted turn log",
-          control: "Read-only in Prompts",
+          title: "流式输出、切分、发送",
+          desc: "assistant 文本先进入缓冲区；遇到工具调用或长输出会中途 flush，最终角色聊天会被切成更自然的微信消息。",
+          observe: "微信实际发送的消息片段和格式化轮次日志",
+          control: "Prompts 页只读",
           source: "flush() → splitSocialReply() → sendMessage()",
           type: "post",
-          body: renderPipelineMeta(["splitText() enforces MAX_REPLY_LEN", "final successful role replies append / on the last chunk"]),
+          body: renderPipelineMeta(["splitText() 强制执行 MAX_REPLY_LEN", "成功的角色聊天最终片段会附加 /"]),
         })}
       </div>
     </div>
 
-    ${renderPipelineArrow("Only successful turns advance durable local state; failed turns stop here")}
+    ${renderPipelineArrow("只有成功轮次会推进本地持久状态；失败轮次在这里停止")}
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-post"><span>Phase 4 — Post-turn Persistence and Proactive Loop</span><span class="pipeline-tag">after normal reply</span></div>
+        <div class="pipeline-phase-label phase-post"><span>阶段 4 — 回复后持久化和 Proactive 循环</span><span class="pipeline-tag">普通回复完成后</span></div>
         ${renderPipelineStep({
           n: 15,
-          title: "Success-only State Writeback",
-          desc: "On success, the turn updates timestamps, visible history, scene_state, proactive candidates, and append-only chat history.",
-          observe: "History tab, _visibleHistory, _sceneState, _proactiveIntents",
-          control: "Read-only here; inspect and audit in History",
+          title: "成功后状态写回",
+          desc: "轮次成功后，系统会更新时间戳、可见历史、scene_state、proactive candidates，以及追加式聊天历史。",
+          observe: "History 页、_visibleHistory、_sceneState、_proactiveIntents",
+          control: "本页只读；在 History 中检查和审计",
           source: "recordChatHistory()",
           type: "post",
-          body: renderPipelineMeta(["user and assistant events are both recorded", "scenelet and next_scene_state are attached to assistant history events"]),
+          body: renderPipelineMeta(["user 和 assistant 事件都会记录", "scenelet 和 next_scene_state 会附在 assistant history event 上"]),
         })}
         ${renderPipelineStep({
           n: 16,
           title: "Memory Writer",
-          desc: "After a successful turn, updateUserMemoryFromTurn() asks a separate writer to add/update/noop durable memory.",
-          observe: "Memory tab and memory writer logs",
-          control: "Memory writer prompt and soft maintenance limits",
+          desc: "成功轮次之后，updateUserMemoryFromTurn() 会调用独立写入器，让它判断是否 add / update / noop 长期记忆。",
+          observe: "Memory 页和 memory writer 日志",
+          control: "Memory writer prompt 和维护提醒阈值",
           source: "buildMemoryWriterPrompt()",
           type: "post",
           body: `
             ${renderTextPreview("memoryWriterInstructions", p.memoryWriterInstructions)}
             ${renderControlGrid([
-              renderNumberControl("memorySoftItemLimit", "Notice Item Limit", p.memorySoftItemLimit || 60, 10, 200, "items"),
-              renderNumberControl("memorySoftPromptChars", "Notice Prompt Chars", p.memorySoftPromptChars || 1200, 200, 5000, "chars"),
+              renderNumberControl("memorySoftItemLimit", "提醒条目数", p.memorySoftItemLimit || 60, 10, 200, "items"),
+              renderNumberControl("memorySoftPromptChars", "提醒字符数", p.memorySoftPromptChars || 1200, 200, 5000, "chars"),
             ])}
           `,
         })}
         ${renderPipelineStep({
           n: 17,
           title: "Proactive Candidate Queue",
-          desc: "Scenelet candidates are normalized into one-shot pending intents; they can expire, be cancelled, or be sent.",
-          observe: "Proactive tab pending/sent/cancelled intents",
-          control: "Inspect and manage in Proactive tab",
+          desc: "scenelet 产生的 candidates 会被规范化成一次性的 pending intents；之后可能过期、取消或发送。",
+          observe: "Proactive 页里的 pending / sent / cancelled intents",
+          control: "在 Proactive 页检查和管理",
           source: "_proactiveIntents",
           type: "post",
-          body: renderPipelineMeta(["max 3 candidates per scenelet result", "candidate windows are ISO scheduled_at/expires_at values"]),
+          body: renderPipelineMeta(["每次 scenelet 结果最多接收 3 个 candidates", "候选时间窗使用 ISO scheduled_at / expires_at"]),
         })}
         ${renderPipelineStep({
           n: 18,
           title: "Proactive Evaluation",
-          desc: "Periodic checker evaluates due pending intents with current observable state and may send a proactive visible_reply.",
-          observe: "Proactive tab and proactive chat history events",
-          control: "Evaluation prompt, check interval, cooldown",
+          desc: "定期检查器会结合当前可观察状态评估到期的 pending intents，并可能发送 proactive visible_reply。",
+          observe: "Proactive 页和 proactive 类型聊天历史事件",
+          control: "评估 prompt、检查间隔、冷却时间",
           source: "buildProactivePrompt()",
           type: "post",
           body: `
             ${renderTextPreview("proactiveInstructions", p.proactiveInstructions)}
             ${renderControlGrid([
-              renderNumberControl("proactiveCheckIntervalMs", "Check Interval", toS(p.proactiveCheckIntervalMs), 5, 300, "s", { ms: true }),
-              renderNumberControl("proactiveCooldownMs", "Cooldown", toS(p.proactiveCooldownMs), 60, 86400, "s", { ms: true }),
+              renderNumberControl("proactiveCheckIntervalMs", "检查间隔", toS(p.proactiveCheckIntervalMs), 5, 300, "s", { ms: true }),
+              renderNumberControl("proactiveCooldownMs", "冷却时间", toS(p.proactiveCooldownMs), 60, 86400, "s", { ms: true }),
             ])}
           `,
         })}
       </div>
     </div>
 
-    ${renderPipelineArrow("Bot returns to polling and waits for the next inbound message")}
+    ${renderPipelineArrow("Bot 回到轮询状态，等待下一条入站消息")}
     <div id="promptsSaveBar" class="prompts-savebar" style="display:none">
       <span>有未保存的修改</span>
-      <button class="btn btn-primary" id="promptsSaveBtn">Save All</button>
+      <button class="btn btn-primary" id="promptsSaveBtn">全部保存</button>
     </div>
   `;
 }
@@ -672,8 +649,8 @@ function renderPipelineStep({ n, title, desc, observe, control, source, type, bo
             <span class="pipeline-field-desc">${escHtml(desc)}</span>
           </div>
           <div class="pipeline-stage-meta">
-            <span class="pipeline-chip observe">Observe: ${escHtml(observe)}</span>
-            <span class="pipeline-chip control">Control: ${escHtml(control)}</span>
+            <span class="pipeline-chip observe">可观察：${escHtml(observe)}</span>
+            <span class="pipeline-chip control">可控制：${escHtml(control)}</span>
           </div>
           ${body}
         </div>
@@ -724,12 +701,12 @@ function renderTextPreview(key, value) {
     const h = key === 'sceneletInstructions' || key === 'proactiveInstructions' || key === 'memoryWriterInstructions' ? '220px' : '110px';
     return `<textarea id="prompt_${key}" class="prompts-editable prompts-textarea" data-key="${key}" style="min-height:${h}">${escHtml(draft || '')}</textarea>
       <div class="editor-actions" style="margin-top:4px">
-        <button class="btn btn-primary" data-action="save-text" data-key="${key}">Save</button>
-        <button class="btn" data-action="cancel-text" data-key="${key}">Cancel</button>
+        <button class="btn btn-primary" data-action="save-text" data-key="${key}">保存</button>
+        <button class="btn" data-action="cancel-text" data-key="${key}">取消</button>
       </div>`;
   }
   const preview = draft || '(empty)';
-  return `<div class="pipeline-preview"><span class="pipeline-preview-text">${escHtml(preview)}</span><button class="btn" data-action="edit-text" data-key="${key}" style="min-height:26px;padding:2px 10px;font-size:11px;flex-shrink:0">Edit</button></div>`;
+  return `<div class="pipeline-preview"><span class="pipeline-preview-text">${escHtml(preview)}</span><button class="btn" data-action="edit-text" data-key="${key}" style="min-height:26px;padding:2px 10px;font-size:11px;flex-shrink:0">编辑</button></div>`;
 }
 
 const RAG_KW_GROUPS = [
@@ -750,81 +727,25 @@ function renderRagKeywordChips(p) {
 
   const chips = keywords.map((word, i) => {
     if (editingIdx === i) {
-      return `<span class="rag-kw-chip editing"><input class="rag-kw-chip-input" value="${escAttr(word)}" data-kwidx="${i}" data-action="kw-save-inline" placeholder="enter to save"><button class="rag-kw-chip-ok" data-action="kw-save-inline" data-kwidx="${i}" title="Save">OK</button></span>`;
+      return `<span class="rag-kw-chip editing"><input class="rag-kw-chip-input" value="${escAttr(word)}" data-kwidx="${i}" data-action="kw-save-inline" placeholder="回车保存"><button class="rag-kw-chip-ok" data-action="kw-save-inline" data-kwidx="${i}" title="保存">OK</button></span>`;
     }
     return `<span class="rag-kw-chip">
       ${escHtml(word)}
-      <button class="rag-kw-chip-del" data-action="kw-delete" data-kwidx="${i}" title="Delete">&times;</button>
-      <button class="rag-kw-chip-edit" data-action="kw-edit" data-kwidx="${i}" title="Edit">&#9998;</button>
+      <button class="rag-kw-chip-del" data-action="kw-delete" data-kwidx="${i}" title="删除">&times;</button>
+      <button class="rag-kw-chip-edit" data-action="kw-edit" data-kwidx="${i}" title="编辑">&#9998;</button>
     </span>`;
   }).join("");
 
   const addRow = `<div class="rag-kw-add-row">
-    <input class="rag-kw-add-input" placeholder="Add keyword and press Enter..." data-action="kw-add">
+    <input class="rag-kw-add-input" placeholder="添加关键词后按回车..." data-action="kw-add">
   </div>`;
 
   return `<div class="rag-kw-section">
-    <label class="pipeline-sub-label">Trigger Keywords</label>
+    <label class="pipeline-sub-label">触发关键词</label>
     <div class="rag-kw-tabs">${tabs}</div>
-    <div class="rag-kw-chips">${chips || '<span class="rag-kw-empty">(no keywords)</span>'}</div>
+    <div class="rag-kw-chips">${chips || '<span class="rag-kw-empty">（暂无关键词）</span>'}</div>
     ${addRow}
   </div>`;
-}
-
-function renderPipelineText(key, label, desc, value, flowLabel, flowSrc, type) {
-  const id = `prompt_${key}`;
-  const isOpen = promptsEditing[key];
-  const preview = (value || "").slice(0, 120);
-  const hasMore = (value || "").length > 120;
-  if (isOpen) {
-    return `
-      <div class="pipeline-row">
-        <div class="pipeline-left">
-          <div class="pipeline-field">
-            <div class="pipeline-field-head">
-              <span class="pipeline-field-label">${escHtml(label)}</span>
-              <span class="pipeline-field-desc">${escHtml(desc)}</span>
-            </div>
-            <textarea id="${id}" class="prompts-editable prompts-textarea" data-key="${key}" style="min-height:130px">${escHtml(value || "")}</textarea>
-            <div class="editor-actions" style="margin-top:6px">
-              <button class="btn btn-primary" data-action="save-text" data-key="${key}">Save</button>
-              <button class="btn" data-action="cancel-text" data-key="${key}">Cancel</button>
-            </div>
-          </div>
-        </div>
-        <div class="pipeline-connector"><span>─</span></div>
-        <div class="pipeline-right">
-          <div class="pipeline-node pipeline-node-${type}">
-            <span class="pipeline-node-label">${escHtml(flowLabel)}</span>
-            <span class="pipeline-node-src">${escHtml(flowSrc)}</span>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-  return `
-    <div class="pipeline-row">
-      <div class="pipeline-left">
-        <div class="pipeline-field">
-          <div class="pipeline-field-head">
-            <span class="pipeline-field-label">${escHtml(label)}</span>
-            <span class="pipeline-field-desc">${escHtml(desc)}</span>
-          </div>
-          <div class="pipeline-preview">
-            <span class="pipeline-preview-text">${escHtml(preview)}${hasMore ? '…' : ''}</span>
-            <button class="btn" data-action="edit-text" data-key="${key}" style="min-height:28px;padding:3px 12px;font-size:12px;flex-shrink:0">Edit</button>
-          </div>
-        </div>
-      </div>
-      <div class="pipeline-connector"><span>─</span></div>
-      <div class="pipeline-right">
-        <div class="pipeline-node pipeline-node-${type}">
-          <span class="pipeline-node-label">${escHtml(flowLabel)}</span>
-          <span class="pipeline-node-src">${escHtml(flowSrc)}</span>
-        </div>
-      </div>
-    </div>
-  `;
 }
 
 function renderPipelineArrow(text) {
@@ -862,7 +783,7 @@ async function savePrompts() {
   const r = await api("PUT", "/api/prompts", updates);
   if (r.ok) {
     promptDrafts = {};
-    toast("Saved — text changes take effect next turn; numeric params are live.");
+    toast("已保存：文本改动会在下一轮生效，数值参数实时生效。");
     const bar = content.querySelector("#promptsSaveBar");
     if (bar) bar.style.display = "none";
   } else {
@@ -877,11 +798,11 @@ window.editProfile = async (name) => {
   document.getElementById("profileForm").innerHTML = `
     <div class="profile-editor">
     <div class="editor-head">
-      <h3>Edit: ${escHtml(name)}</h3>
+      <h3>编辑：${escHtml(name)}</h3>
       <span>${p.prompt.length.toLocaleString()} chars</span>
     </div>
     <div class="form-group"><label>Prompt</label><textarea id="editPrompt" class="profile-prompt-editor" spellcheck="false">${escHtml(p.prompt)}</textarea></div>
-    <div class="editor-actions"><button class="btn btn-primary" id="saveProfileBtn">Save</button></div>
+    <div class="editor-actions"><button class="btn btn-primary" id="saveProfileBtn">保存</button></div>
     </div>
   `;
   document.getElementById("saveProfileBtn").addEventListener("click", () => saveProfile(name));
@@ -891,17 +812,17 @@ window.editProfile = async (name) => {
 window.saveProfile = async (name) => {
   const prompt = document.getElementById("editPrompt").value;
   const r = await api("PUT", "/api/profiles", { name, prompt });
-  toast(r.ok ? "Saved" : r.error, r.ok);
+  toast(r.ok ? "已保存" : r.error, r.ok);
   if (r.ok) render();
 };
 
 window.showAddProfile = () => {
   document.getElementById("profileForm").innerHTML = `
     <div class="profile-editor">
-    <div class="editor-head"><h3>New Profile</h3></div>
-    <div class="form-grid one"><div class="form-group"><label>Name</label><input id="newName"></div></div>
+    <div class="editor-head"><h3>新增 Profile</h3></div>
+    <div class="form-grid one"><div class="form-group"><label>名称</label><input id="newName"></div></div>
     <div class="form-group"><label>Prompt</label><textarea id="newPrompt" class="profile-prompt-editor" spellcheck="false"></textarea></div>
-    <div class="editor-actions"><button class="btn btn-primary" onclick="addProfile()">Add</button></div>
+    <div class="editor-actions"><button class="btn btn-primary" onclick="addProfile()">新增</button></div>
     </div>
   `;
   document.getElementById("newName").focus();
@@ -910,16 +831,16 @@ window.showAddProfile = () => {
 window.addProfile = async () => {
   const name = document.getElementById("newName").value.trim();
   const prompt = document.getElementById("newPrompt").value.trim();
-  if (!name || !prompt) { toast("Name and prompt required", false); return; }
+  if (!name || !prompt) { toast("名称和 prompt 不能为空", false); return; }
   const r = await post("/api/profiles", { name, prompt });
-  toast(r.ok ? "Added" : r.error, r.ok);
+  toast(r.ok ? "已新增" : r.error, r.ok);
   if (r.ok) render();
 };
 
 window.deleteProfile = async (name) => {
-  if (!confirm(`Delete profile "${name}"?`)) return;
+  if (!confirm(`删除 profile "${name}"？`)) return;
   const r = await del("/api/profiles", { name });
-  toast(r.ok ? `Deleted (${r.reverted} sessions reverted)` : r.error, r.ok);
+  toast(r.ok ? `已删除（${r.reverted} 个会话已回退）` : r.error, r.ok);
   if (r.ok) render();
 };
 
