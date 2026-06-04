@@ -105,12 +105,24 @@ const SCENELET_MODEL = envOrConfig("WECHAT_SCENELET_MODEL", "models.scenelet", "
 const CLAUDE_TIMEOUT_MS = configNumber("timeouts.aiMs", 600_000);
 const RAG_SCRIPT = resolveProjectPath(configValue("paths.ragScript", "app/rag.py"));
 const RAG_ENABLED = configBool("rag.enabled", true);
+const RAG_KNOWLEDGE_DIR = resolveProjectPath(configValue("rag.knowledgeDir", "data/knowledge"));
+const RAG_TIMEOUT_MS = configNumber("rag.timeoutMs", 45_000);
+const RAG_PROFILE_RULE_MAX_CHARS = configNumber("rag.profileRuleMaxChars", 1400);
 const INPUT_BATCH_MS = 30_000;
 const DUPLICATE_INPUT_MS = 5000;
-const SCENE_VISIBLE_CONTEXT_TURNS = 8;
-const SCENE_STATE_MAX_CHARS = 220;
-const PROACTIVE_CHECK_INTERVAL_MS = 20_000;
-const PROACTIVE_COOLDOWN_MS = 60 * 60 * 1000;
+function getSceneConfig() {
+  const p = loadPrompts();
+  return {
+    visibleContextTurns: p.visibleContextTurns || 8,
+    sceneStateMaxChars: p.sceneStateMaxChars || 220,
+    proactiveCheckIntervalMs: p.proactiveCheckIntervalMs || 20000,
+    proactiveCooldownMs: p.proactiveCooldownMs || 3600000,
+    ragTopK: p.ragTopK || 6,
+    ragMinScore: p.ragMinScore || 0.48,
+    ragResultMaxChars: p.ragResultMaxChars || 3600,
+    ragTimeoutMs: p.ragTimeoutMs || 45000,
+  };
+}
 const SESSION_LOCK_RETRIES = 3;
 const SESSION_LOCK_RETRY_MS = 2_000;
 const SESSION_RELEASE_GRACE_MS = 800;
@@ -133,7 +145,7 @@ const VISION_API_KEY = usableConfigString(process.env.WECHAT_VISION_API_KEY ?? p
 const VISION_MODEL = usableConfigString(envOrConfig("WECHAT_VISION_MODEL", "vision.model", DEFAULT_VISION_MODEL), DEFAULT_VISION_MODEL);
 const VISION_DETAIL = envOrConfig("WECHAT_VISION_DETAIL", "vision.detail", "high");
 const VISION_TIMEOUT_MS = configNumber("vision.timeoutMs", 180_000);
-import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, rememberRecentKaomoji, COMMON_CHAT_STYLE_PROMPT, formatLocalChatReality, expressionCapabilityPrompt } from "./lib/reply.mjs";
+import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, rememberRecentKaomoji, getChatStyle, localTimePeriod, expressionCapabilityPrompt, loadPrompts } from "./lib/reply.mjs";
 import { shouldSkipRag } from "./lib/rag.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
@@ -141,6 +153,9 @@ import { registerSessionRoutes } from "./lib/gui-sessions.mjs";
 import { registerProfileRoutes } from "./lib/gui-profiles.mjs";
 import { registerConfigRoutes } from "./lib/gui-config.mjs";
 import { registerHistoryRoutes } from "./lib/gui-history.mjs";
+import { registerProactiveRoutes } from "./lib/gui-proactive.mjs";
+import { registerMemoryRoutes } from "./lib/gui-memory.mjs";
+import { registerPromptsRoutes } from "./lib/gui-prompts.mjs";
 import { appendChatEvent } from "./lib/chat-history.mjs";
 
 // ─── STATE ──────────────────────────────────────────────────
@@ -235,20 +250,24 @@ function loadProfiles() {
 }
 
 // ── RAG query ──
-function hasExplicitProfileName(userMessage) {
-  return Object.keys(profileTemplates).some(name => name !== "默认" && userMessage.includes(name));
+function hasExplicitProfileName(userMessage, currentProfile = "") {
+  return Object.keys(profileTemplates).some(name => name !== "默认" && name !== currentProfile && userMessage.includes(name));
+}
+
+function shouldUseRoleplayRag(userMessage) {
+  const text = String(userMessage || "").trim();
+  if (!text) return false;
+  const kw = loadPrompts().ragKeywords || {};
+  // Only trigger RAG for explicit lore / world-building questions
+  if (kw.lore && new RegExp(kw.lore, "u").test(text)) return true;
+  return false;
 }
 
 function shouldUseRagForTurn(userMessage, profile) {
   if (!profile || profile === "默认") return false;
   if (shouldSkipRag(userMessage)) return false;
-  // 1) explicit profile name mention
-  if (hasExplicitProfileName(userMessage)) return true;
-  // 2) hard lore keywords
-  if (/身高|生日|血型|学校|学部|乐队|成员|经历|过去|关系|朋友|队友|称呼|设定|资料|官方|剧情|假唱|退团|作品|歌曲|角色/u.test(userMessage)) return true;
-  // 3) "你/自己" + question/curiosity — conversational probing about the character
-  if (/(?:你|自己).*(?:为什么|怎么(?:会|能|回事|这样|办)|是不是|真的|以前|曾经|喜欢|讨厌|知道|觉得|记得|想|会|能)/u.test(userMessage) && userMessage.length > 6) return true;
-  return false;
+  if (hasExplicitProfileName(userMessage, profile)) return true;
+  return shouldUseRoleplayRag(userMessage);
 }
 
 function queryRag(userMessage, profile = null) {
@@ -257,16 +276,18 @@ function queryRag(userMessage, profile = null) {
     log("\u{1F50D}", "RAG skip (casual)");
     return null;
   }
-  const queryText = (profile && profile !== "默认") ? `${profile} ${userMessage}` : userMessage;
   ensureDir(RUNTIME_DIR);
   const queryFile = path.join(RUNTIME_DIR, `.rag_query_${crypto.randomUUID()}.txt`);
   const started = Date.now();
   try {
-    fs.writeFileSync(queryFile, queryText, "utf-8");
-    const result = spawnSync("python", ["-X", "utf8", RAG_SCRIPT, "query", "--file", queryFile], {
+    fs.writeFileSync(queryFile, userMessage, "utf-8");
+    const args = ["-X", "utf8", RAG_SCRIPT, "query", "--file", queryFile];
+    if (profile && profile !== "默认") args.push("--profile", profile);
+    const sc = getSceneConfig();
+    const result = spawnSync("python", args, {
       cwd: path.dirname(RAG_SCRIPT),
       encoding: "utf-8",
-      timeout: 8000,
+      timeout: sc.ragTimeoutMs,
       windowsHide: true,
       env: envWithProxy(RAG_HTTPS_PROXY, {
         HF_HUB_DISABLE_SYMLINKS_WARNING: "1",
@@ -287,6 +308,38 @@ function queryRag(userMessage, profile = null) {
   } finally {
     try { fs.rmSync(queryFile, { force: true }); } catch {}
   }
+}
+
+function profileRuleCandidates(profile) {
+  if (!profile || profile === "默认") return [];
+  const rulesDir = path.join(RAG_KNOWLEDGE_DIR, "05_模型规则");
+  const candidates = [
+    path.join(rulesDir, `${profile}-核心规则.md`),
+    path.join(rulesDir, `${profile}-边界规则.md`),
+  ];
+  if (profile === "白鹭千圣") {
+    candidates.unshift(path.join(rulesDir, "白鹭千圣-核心规则.md"));
+  }
+  return [...new Set(candidates)];
+}
+
+function loadPinnedProfileRules(profile) {
+  for (const file of profileRuleCandidates(profile)) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const raw = fs.readFileSync(file, "utf-8").trim();
+      if (!raw) continue;
+      const text = raw.length > RAG_PROFILE_RULE_MAX_CHARS
+        ? `${raw.slice(0, RAG_PROFILE_RULE_MAX_CHARS)}\n\n[...]`
+        : raw;
+      return [
+        "【固定角色规则】",
+        "以下规则每轮固定生效，用于约束角色扮演边界。它不是剧情原文，也不是用户消息。",
+        text,
+      ].join("\n");
+    } catch {}
+  }
+  return "";
 }
 
 function sessionProfile(sess) {
@@ -332,7 +385,7 @@ function normalizeSceneState(raw) {
   const text = typeof raw === "string" ? raw : raw.text;
   if (!text) return null;
   return {
-    text: String(text).slice(0, SCENE_STATE_MAX_CHARS),
+    text: String(text).slice(0, getSceneConfig().sceneStateMaxChars),
     updatedAt: raw.updatedAt ? String(raw.updatedAt) : new Date().toISOString(),
     expiresAt: raw.expiresAt ? String(raw.expiresAt) : null,
   };
@@ -342,7 +395,7 @@ function normalizeVisibleHistory(raw) {
   if (!Array.isArray(raw)) return [];
   return raw
     .filter(item => item?.role && item?.text)
-    .slice(-SCENE_VISIBLE_CONTEXT_TURNS * 2)
+    .slice(-getSceneConfig().visibleContextTurns * 2)
     .map(item => ({
       role: item.role === "assistant" ? "assistant" : "user",
       text: String(item.text).slice(0, 4000),
@@ -825,16 +878,12 @@ async function captionImageCloud(filePath, hint = "") {
   const imageBuffer = fs.readFileSync(filePath);
   const mime = detectMimeFromBuffer(imageBuffer, getMimeFromFilename(filePath));
   const imageBase64 = imageBuffer.toString("base64");
+  const vcfg = loadPrompts();
+  const basePrompt = vcfg.visionCaptionPrompt || `请为另一个聊天模型客观解析这张图片，输出中文。\n优先识别：画面主体、可见文字/OCR、物品类型、作品名或品牌名、场景、数量/分量。\n请区分'看清楚的事实'和'不确定的推测'。不要把推测写成事实。\n如果能清楚读出漫画/书/商品的标题，请写出标题；如果读不清，明确说读不清。\n如果存在电脑屏幕、桌面、背景物体等，只描述确实入镜且清晰可见的内容。\n不要从少量视觉线索脑补作品类型、剧情、用餐人数、几碗饭或用户偏好。\n输出 3-6 句；需要时可加一行'低置信度/不确定点'。不要角色扮演。`;
   const prompt = [
-    "请为另一个聊天模型客观解析这张图片，输出中文。",
-    "优先识别：画面主体、可见文字/OCR、物品类型、作品名或品牌名、场景、数量/分量。",
-    "请区分“看清楚的事实”和“不确定的推测”。不要把推测写成事实。",
-    "如果能清楚读出漫画/书/商品的标题，请写出标题；如果读不清，明确说读不清。",
-    "如果存在电脑屏幕、桌面、背景物体等，只描述确实入镜且清晰可见的内容。",
-    "不要从少量视觉线索脑补作品类型、剧情、用餐人数、几碗饭或用户偏好。",
-    "输出 3-6 句；需要时可加一行“低置信度/不确定点”。不要角色扮演。",
-    hint ? `用户补充文字（可能不完整或带偏）：${hint.slice(0, 300)}` : "",
-  ].filter(Boolean).join("\n");
+    basePrompt,
+    hint ? `用户补充文字（可能不完整或带偏）：${hint.slice(0, 300)}` : '',
+  ].filter(Boolean).join('\n');
 
   try {
     const result = await fetchJsonWithTimeout(completionsUrl(VISION_BASE_URL), {
@@ -1113,6 +1162,8 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
   const fastCasual = shouldSkipRag(options.routingBody || body);
   const systemPromptParts = [];
   if (profile && profileTemplates[profile]) systemPromptParts.push(profileTemplates[profile]);
+  const pinnedProfileRules = loadPinnedProfileRules(profile);
+  if (pinnedProfileRules) systemPromptParts.push(pinnedProfileRules);
   if (memoryPrompt && options.includeMemoryInSystem !== false) systemPromptParts.push(memoryPrompt);
   if (stylePrompt && options.includeStyleInSystem !== false) systemPromptParts.push(stylePrompt);
   const systemPromptFile = systemPromptParts.length
@@ -1201,14 +1252,17 @@ function buildCodexPrompt(ai, userBody, ragContext, stylePrompt, memoryPrompt = 
   if (profile && profileTemplates[profile]) {
     systemParts.push(profileTemplates[profile]);
   }
+  const pinnedProfileRules = loadPinnedProfileRules(profile);
+  if (pinnedProfileRules) systemParts.push(pinnedProfileRules);
   if (memoryPrompt) systemParts.push(memoryPrompt);
   if (stylePrompt) systemParts.push(stylePrompt);
   let prompt = systemParts.length ? `${systemParts.join("\n\n---\n\n")}\n\n---\n\n${userBody}` : userBody;
   if (ragContext) {
     prompt = [
-      "【可能相关的背景资料】",
-      "以下资料由向量检索自动召回，可能相关，也可能无关。",
-      "不要假设用户正在阅读、分享或讨论这些资料；只有当它确实能帮助回答时才使用。",
+      "【本轮知识库检索结果】",
+      "以下内容来自本地角色知识库。涉及角色事实、关系、时间线、说话方式或当前状态时，应优先参考这些资料。",
+      "如果资料与旧印象冲突，以资料中的当前状态、模型规则和明确关系文档为准；如果资料明显无关，可以忽略。",
+      "不要把没有检索到的固定设定补编成事实。",
       "",
       ragContext,
       "",
@@ -1294,28 +1348,36 @@ function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragConte
 
 function buildStableStylePrompt() {
   return [
-    COMMON_CHAT_STYLE_PROMPT,
+    getChatStyle(),
     "",
     expressionCapabilityPrompt(),
   ].join("\n");
 }
 
 function buildTurnBody(userBody, ragContext = "", sceneContext = "") {
-  const sections = [
-    [
-      "【本轮临时上下文】",
-      formatLocalChatReality(),
-    ].join("\n"),
-  ];
-  if (sceneContext) sections.push(sceneContext);
+  const sections = [];
+  const cfg = loadPrompts();
+  if (cfg.chatRealityInstructions) {
+    sections.push(cfg.chatRealityInstructions);
+  }
+  if (sceneContext) {
+    sections.push(sceneContext);
+    sections.push("以上是千圣的内心活动，细腻、复杂、属于她自己，但她不会把这些都说出口。微信回复会轻很多，放松很多，自由很多。抓一个点，一个问句，或者一个吐槽。心里想了很多，但发出去的可能不过一句。");
+  }
   if (ragContext) {
     sections.push([
-      "【可能相关的背景资料】",
-      "以下资料由本地向量检索自动召回，可能相关，也可能无关；只有当它确实能帮助回答时才使用。",
+      "【本轮知识库检索结果】",
+      "以下内容来自本地角色知识库。涉及角色事实、关系、时间线、说话方式或当前状态时，应优先参考这些资料。",
+      "如果资料与旧印象冲突，以资料中的当前状态、模型规则和明确关系文档为准；如果资料明显无关，可以忽略。",
+      "不要把没有检索到的固定设定补编成事实。",
       ragContext,
     ].join("\n"));
   }
-  sections.push(["【用户消息】", userBody].join("\n"));
+  const now = new Date();
+  const weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  const datePart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const timeTag = `${datePart} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")} ${weekdays[now.getDay()]}${localTimePeriod(now)}`;
+  sections.push([`【用户消息】- ${timeTag}`, userBody].join("\n"));
   return sections.join("\n\n---\n\n");
 }
 
@@ -1330,7 +1392,7 @@ function sceneStateText(sess) {
   return state.text || "";
 }
 
-function recentVisibleContext(sess, limit = SCENE_VISIBLE_CONTEXT_TURNS) {
+function recentVisibleContext(sess, limit = getSceneConfig().visibleContextTurns) {
   return normalizeVisibleHistory(sess?._visibleHistory)
     .slice(-limit * 2)
     .map(item => ({
@@ -1416,26 +1478,20 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000 } =
 
 function buildSceneletPrompt({ userId, sessionName, profile, userBody, carriedSceneState, visibleContext, memoryPrompt }) {
   const now = new Date();
-  return [
+  const cfg = loadPrompts();
+  const instructions = cfg.sceneletInstructions || [
     "你在为微信角色私聊生成隐藏中间层，不会发送任何消息，不能调用工具，不能联网，不能写文件。",
     "",
     "任务：先生成本轮 inner_scenelet，再给出极短 next_scene_state，并判断是否存在一次性主动回复候选。",
+  ].join("\n");
+  return [
+    instructions,
     "",
     "角色 prompt：",
     profile && profileTemplates[profile] ? profileTemplates[profile] : "",
+    loadPinnedProfileRules(profile),
     "",
     memoryPrompt ? `长期记忆：\n${memoryPrompt}` : "",
-    "",
-    "机制要求：",
-    "- inner_scenelet 贴近角色视角，写清此刻生活瞬间、身体动作、心理落点、为什么这样接话。它不会直接展示给用户。",
-    "- inner_scenelet 可以细腻、具体、有生活感，但必须服从当前时间和上下文。",
-    "- next_scene_state 极短，40-80 个中文字符左右，只记录可帮助下一轮连续性的轻状态；不能固化复杂心理和重大日程。",
-    "- proactive_candidates 只在确实存在一次性、可观察、适合未来主动发消息的意图时生成；没有就给空数组。",
-    "- 主动候选不是定时循环，是一次性小任务。候选的 inner_scenelet 职能是 timing reason：为什么这个时间主动说话自然。",
-    "- 主动候选必须给 scheduled_at 和 expires_at，ISO 8601；不要卡点，可自然一点。",
-    "- 主动候选 cancel_if 只写系统可观察条件：用户已发来消息、事项已完成/取消、超过窗口、近期已主动发过、当前对话有更强主题等。",
-    "- 绝对不要在角色内提及 bot/AI/模型/角色扮演身份。",
-    "- 固定角色事实不要为了漂亮类比而编造；不确定就模糊。",
     "",
     "当前时间：",
     JSON.stringify({
@@ -1475,7 +1531,7 @@ function normalizeSceneletResult(raw) {
   if (!raw || typeof raw !== "object") return null;
   return {
     innerScenelet: raw.inner_scenelet ? String(raw.inner_scenelet).trim() : "",
-    nextSceneState: raw.next_scene_state ? String(raw.next_scene_state).trim().slice(0, SCENE_STATE_MAX_CHARS) : "",
+    nextSceneState: raw.next_scene_state ? String(raw.next_scene_state).trim().slice(0, getSceneConfig().sceneStateMaxChars) : "",
     proactiveCandidates: Array.isArray(raw.proactive_candidates) ? raw.proactive_candidates : [],
   };
 }
@@ -1498,9 +1554,7 @@ async function generateSceneletForTurn({ userId, sess, profile, userBody, memory
 }
 
 function buildSceneContextBlock(sess, sceneletResult, carriedState) {
-  const visible = formatVisibleContext(recentVisibleContext(sess, SCENE_VISIBLE_CONTEXT_TURNS));
   const parts = [
-    visible ? ["【最近可见聊天】", "以下是真实微信最终发送内容，只保留最近 6-8 轮；优先回应当前用户消息。", visible].join("\n") : "",
     carriedState ? ["【轻量 scene_state】", "这是极短、可过期、可被用户新消息覆盖的连续性状态；不要把它当成固定事实。", carriedState].join("\n") : "",
     sceneletResult?.innerScenelet ? [
       "【隐藏中间层：inner_scenelet】",
@@ -1601,15 +1655,16 @@ function markProactiveIntent(intent, status, reason = "") {
   if (reason) intent.cancelReason = String(reason).slice(0, 500);
 }
 
-function buildProactivePrompt({ userId, sessionName, profile, intent, memoryPrompt, carriedSceneState, visibleContext }) {
+function buildProactivePrompt({ userId, sessionName, profile, intent, memoryPrompt, carriedSceneState, visibleContext, sess }) {
   const now = new Date();
+  const cfg = loadPrompts();
+  const instr = (cfg.proactiveInstructions || "你在为微信角色私聊做一次性主动回复的到点二次判断。\n\n任务：根据系统可观察状态、上下文和候选意图，判断现在是否应该主动发送。如果发送，生成 inner_scenelet 和最终 visible_reply。");
   return [
-    "你在为微信角色私聊做一次性主动回复的到点二次判断。不能调用工具，不能联网，不能写文件。",
-    "",
-    "任务：根据系统可观察状态、上下文和候选意图，判断现在是否应该主动发送。如果发送，生成 inner_scenelet 和最终 visible_reply。",
+    instr,
     "",
     "角色 prompt：",
     profile && profileTemplates[profile] ? profileTemplates[profile] : "",
+    loadPinnedProfileRules(profile),
     "",
     memoryPrompt ? `长期记忆：\n${memoryPrompt}` : "",
     "",
@@ -1617,9 +1672,10 @@ function buildProactivePrompt({ userId, sessionName, profile, intent, memoryProm
     "- 这不是定时循环，而是一次性候选；发送或取消后结束。",
     "- inner_scenelet 在这里承担 timing reason：贴近角色视角说明为什么此刻主动说话自然，并帮助生成回复；它不会直接发给用户。",
     "- 取消条件必须基于系统可观察事实：用户已经发来消息、事项已完成/取消、超过窗口、近期已主动发过、当前对话有更强主题、静默时段不适合打扰等。",
-    "- 不要把角色生活氛围当成执行逻辑；例如“她忘了/她很忙”只能写在 inner_scenelet 的氛围里，不能作为系统取消原因。",
+    "- 不要把角色生活氛围当成执行逻辑；例如'她忘了/她很忙'只能写在 inner_scenelet 的氛围里，不能作为系统取消原因。",
     "- visible_reply 可以长可以短，由语境决定；不要泄露 inner_scenelet、机制、JSON、bot/AI/model 身份。",
     "- 固定角色事实不要为了漂亮类比而编造；不确定就模糊处理。",
+    "- 用户（沃沃）是女性，指代用户时始终使用「她」。",
     "",
     "当前时间：",
     JSON.stringify({
@@ -1664,7 +1720,7 @@ function normalizeProactiveDecision(raw) {
     cancelReason: raw.cancel_reason ? String(raw.cancel_reason).slice(0, 500) : "",
     innerScenelet: raw.inner_scenelet ? String(raw.inner_scenelet).trim() : "",
     visibleReply: raw.visible_reply ? String(raw.visible_reply).trim() : "",
-    nextSceneState: raw.next_scene_state ? String(raw.next_scene_state).trim().slice(0, SCENE_STATE_MAX_CHARS) : "",
+    nextSceneState: raw.next_scene_state ? String(raw.next_scene_state).trim().slice(0, getSceneConfig().sceneStateMaxChars) : "",
   };
 }
 
@@ -1678,6 +1734,7 @@ async function evaluateProactiveIntent({ ai, userId, sess, profile, intent }) {
     memoryPrompt,
     carriedSceneState: sceneStateText(sess),
     visibleContext: recentVisibleContext(sess),
+    sess,
   });
   const raw = await runHiddenJson(prompt, { label: "proactive" });
   return normalizeProactiveDecision(raw);
@@ -1685,7 +1742,7 @@ async function evaluateProactiveIntent({ ai, userId, sess, profile, intent }) {
 
 async function checkProactiveIntents() {
   const nowMs = Date.now();
-  if (nowMs - lastProactiveCheckAt < PROACTIVE_CHECK_INTERVAL_MS) return;
+  if (nowMs - lastProactiveCheckAt < getSceneConfig().proactiveCheckIntervalMs) return;
   lastProactiveCheckAt = nowMs;
 
   for (const { ai, userId, sess, profile } of activeProfileSessionEntries()) {
@@ -1708,7 +1765,7 @@ async function checkProactiveIntents() {
         continue;
       }
       if (nowMs < scheduled) continue;
-      if (sess._lastProactiveAt && nowMs - Date.parse(sess._lastProactiveAt) < PROACTIVE_COOLDOWN_MS) continue;
+      if (sess._lastProactiveAt && nowMs - Date.parse(sess._lastProactiveAt) < getSceneConfig().proactiveCooldownMs) continue;
 
       intent.lastCheckedAt = new Date().toISOString();
       const decision = await evaluateProactiveIntent({ ai, userId, sess, profile, intent });
@@ -1892,7 +1949,6 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     const t = textBuf.trim();
     if (!t || t === lastSent) { textBuf = ""; return true; }
     if (!force && t.length < 300 && Date.now() - lastFlush < 3000) return true;
-    lastSent = t;
     const socialParts = isFinal && isProfileChat ? splitSocialReply(t) : [t];
     const messages = [];
     for (let i = 0; i < socialParts.length; i++) {
@@ -1907,6 +1963,8 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       if (messages.length > 1) await sleep(450);
     }
     textBuf = "";
+    // Only mark as sent if all chunks succeeded; otherwise allow retry
+    if (sentOk) lastSent = t;
     lastFlush = Date.now();
     return sentOk;
   }
@@ -1984,6 +2042,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     }
 
     const profile = turnProfile;
+    const pinnedProfileRules = loadPinnedProfileRules(profile);
     const useRagCdx = RAG_ENABLED && !hasInboundAttachment(body) && profile && profile !== "默认" && profileTemplates[profile] && shouldUseRagForTurn(body, profile);
     const ragContext = useRagCdx ? queryRag(body, profile) : null;
     const sceneContext = isProfileChat ? buildSceneContextBlock(styleState, sceneletResult, carriedSceneState) : "";
@@ -1992,9 +2051,10 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       type: "turn_context",
       backend: "codex",
       memoryChars: memoryPrompt.length,
+      profileRuleChars: pinnedProfileRules.length,
       ragChars: ragContext?.length || 0,
       transientBodyChars: turnBody.length,
-      stableSystemChars: stylePrompt.length + memoryPrompt.length + (profile && profileTemplates[profile] ? profileTemplates[profile].length : 0),
+      stableSystemChars: stylePrompt.length + memoryPrompt.length + pinnedProfileRules.length + (profile && profileTemplates[profile] ? profileTemplates[profile].length : 0),
       timestamp: new Date().toISOString(),
     }));
     const task = runCodexStream(ai, sid, sessionName, turnBody, firstTurn, handleCodexEvent, ragContext, stylePrompt, memoryPrompt, profile, {
@@ -2081,6 +2141,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     }
 
     const profile = turnProfile;
+    const pinnedProfileRules = loadPinnedProfileRules(profile);
     const useRag = RAG_ENABLED && !hasInboundAttachment(body) && profile && profile !== "默认" && profileTemplates[profile] && shouldUseRagForTurn(body, profile);
     const ragContext = useRag ? queryRag(body, profile) : null;
     const sceneContext = isProfileChat ? buildSceneContextBlock(styleState, sceneletResult, carriedSceneState) : "";
@@ -2089,9 +2150,10 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       type: "turn_context",
       backend: "claude_stream",
       memoryChars: memoryPrompt.length,
+      profileRuleChars: pinnedProfileRules.length,
       ragChars: ragContext?.length || 0,
       transientBodyChars: claudeBody.length,
-      stableSystemChars: stylePrompt.length + memoryPrompt.length + (profile && profileTemplates[profile] ? profileTemplates[profile].length : 0),
+      stableSystemChars: stylePrompt.length + memoryPrompt.length + pinnedProfileRules.length + (profile && profileTemplates[profile] ? profileTemplates[profile].length : 0),
       timestamp: new Date().toISOString(),
     }));
     const task = runClaudeStream(ai, sid, sessionName, claudeBody, firstTurn, handleClaudeEvent, stylePrompt, memoryPrompt, profile, {
@@ -2818,6 +2880,9 @@ async function main() {
   registerProfileRoutes();
   registerConfigRoutes();
   registerHistoryRoutes();
+  registerProactiveRoutes();
+  registerMemoryRoutes();
+  registerPromptsRoutes();
   startServer();
 
   // ─── WeChat login ────────────────────────────────────────────

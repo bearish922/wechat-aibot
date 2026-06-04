@@ -20,6 +20,14 @@
   "timeouts": {
     "aiMs": 600000
   },
+  "sessions": {
+    "profileNoSessionPersistence": false
+  },
+  "scene": {
+    "mainVisibleContextTurns": 12,
+    "sceneletVisibleContextTurns": 8,
+    "proactiveVisibleContextTurns": 8
+  },
   "vision": {
     "mode": "auto",
     "baseUrl": "https://api.siliconflow.cn/v1",
@@ -38,6 +46,8 @@
     "topK": 3,
     "minScore": 0.48,
     "scoreMargin": 0.16,
+    "timeoutMs": 45000,
+    "rerankLimit": 256,
     "chunkMaxChars": 1600,
     "resultMaxChars": 1200,
     "batchSize": 32

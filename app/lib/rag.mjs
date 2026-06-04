@@ -13,9 +13,10 @@ export function shouldSkipRag(userMessage) {
 export function buildRagBody(userMessage, ragContext) {
   if (!ragContext) return userMessage;
   return [
-    "【可能相关的背景资料】",
-    "以下资料由向量检索自动召回，可能相关，也可能无关。",
-    "不要假设用户正在阅读、分享或讨论这些资料；只有当它确实能帮助回答时才使用。",
+    "【本轮知识库检索结果】",
+    "以下内容来自本地角色知识库。涉及角色事实、关系、时间线、说话方式或当前状态时，应优先参考这些资料。",
+    "如果资料与旧印象冲突，以资料中的当前状态、模型规则和明确关系文档为准；如果资料明显无关，可以忽略。",
+    "不要把没有检索到的固定设定补编成事实。",
     "",
     ragContext,
     "",
