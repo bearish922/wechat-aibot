@@ -417,14 +417,12 @@ function renderPromptsPipeline(p, profileRows) {
         ${renderPipelineStep({
           n: 6,
           title: "长期记忆注入",
-          desc: "renderMemoryPrompt() 会按 userId + profile 选择稳定记忆，并在主模型回复前注入。",
+          desc: "主回复路径会把当前 userId + profile 下的完整 memory snapshot 注入稳定 prompt；不按本轮 query 过滤，也不受 memoryDefaultLimit 截断。",
           source: "wechat-memory.json",
           type: "sys",
           body: `
             ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
-            ${renderControlGrid([
-              renderNumberControl("memoryDefaultLimit", "默认召回数", p.memoryDefaultLimit || 6, 1, 30, "items"),
-            ])}
+            ${renderPipelineMeta(["memoryDefaultLimit 默认值是 6；当前只作为带 query 相关召回的 fallback，主回复路径没有使用"])}
           `,
         })}
         ${renderPipelineStep({

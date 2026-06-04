@@ -36,7 +36,7 @@ describe("Prompts runtime pipeline UI", () => {
     }
   });
 
-  it("exposes every editable prompt field accepted by /api/prompts", () => {
+  it("exposes editable controls used by the runtime prompt pipeline", () => {
     const textFields = [
       "chatStyle",
       "expressionCapability",
@@ -54,7 +54,6 @@ describe("Prompts runtime pipeline UI", () => {
     const numFields = [
       "visibleContextTurns",
       "sceneStateMaxChars",
-      "memoryDefaultLimit",
       "memorySoftItemLimit",
       "memorySoftPromptChars",
       "proactiveCheckIntervalMs",
@@ -71,6 +70,7 @@ describe("Prompts runtime pipeline UI", () => {
     for (const key of numFields) {
       assert.match(appJs, new RegExp(`renderNumberControl\\("${key}"`), `${key} should be editable`);
     }
+    assert.doesNotMatch(appJs, /renderNumberControl\("memoryDefaultLimit"/, "memoryDefaultLimit is not used by the current stable memory snapshot path");
   });
 
   it("keeps RAG keyword controls limited to lore and names", () => {
