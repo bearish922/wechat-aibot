@@ -1415,38 +1415,6 @@ pre {
   font-weight: 650;
 }
 
-.pipeline-stage-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.pipeline-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 24px;
-  padding: 3px 8px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--surface-soft);
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 650;
-  line-height: 1.35;
-}
-
-.pipeline-chip.observe {
-  border-color: #cddbeb;
-  background: #f4f8fc;
-  color: #41617f;
-}
-
-.pipeline-chip.control {
-  border-color: #d7d0e9;
-  background: #f8f6fc;
-  color: #67598c;
-}
-
 .pipeline-meta-list {
   display: flex;
   flex-wrap: wrap;

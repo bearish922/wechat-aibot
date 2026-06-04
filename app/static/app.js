@@ -369,18 +369,14 @@ function renderPromptsPipeline(p, profileRows) {
           n: 1,
           title: "WeChat 入站轮询",
           desc: "iLink 收到新消息后，消息进入当前会话队列，再由 sessionLoop() 调用 processTurn()。",
-          observe: "Status 页、运行日志、queue/busy 字段",
-          control: "Prompts 页只读",
           source: "getUpdates → sessionLoop",
           type: "input",
-          body: renderPipelineMeta(["失败/测试轮次不会进入已完成的可见上下文", "新消息可以取消过期的 proactive intent"]),
+          body: renderPipelineMeta(["本环节只读", "失败/测试轮次不会进入已完成的可见上下文", "新消息可以取消过期的 proactive intent"]),
         })}
         ${renderPipelineStep({
           n: 2,
           title: "会话 Profile 绑定",
           desc: "当前会话绑定的 profile 会决定使用哪个角色模板，以及是否启用角色聊天专属上下文层。",
-          observe: "Profile 表格和当前会话绑定关系",
-          control: "这里可编辑角色模板；会话绑定在 Sessions 里调整",
           source: "wechat-profiles.json",
           type: "sys",
           wide: true,
@@ -390,8 +386,6 @@ function renderPromptsPipeline(p, profileRows) {
           n: 3,
           title: "入站附件 / Vision Caption",
           desc: "如果用户发送图片，Vision 会先生成图片描述；带附件的轮次不会触发 RAG 检索。",
-          observe: "轮次日志里的图片/描述上下文",
-          control: "Vision 描述 prompt",
           source: "visionCaptionPrompt",
           type: "input",
           body: renderTextPreview("visionCaptionPrompt", p.visionCaptionPrompt),
@@ -400,11 +394,9 @@ function renderPromptsPipeline(p, profileRows) {
           n: 4,
           title: "失败轮次保护",
           desc: "只有成功完成的轮次才会推进会话状态；失败轮次单独保留为重试上下文，不写入普通聊天历史。",
-          observe: "History 页和 data/logs 中的轮次结果",
-          control: "Prompts 页只读",
           source: "_lastFailedTurn",
           type: "input",
-          body: renderPipelineMeta(["只有成功后才会更新 visible history、scene_state、proactive candidates 和 memory writer"]),
+          body: renderPipelineMeta(["本环节只读", "只有成功后才会更新 visible history、scene_state、proactive candidates 和 memory writer"]),
         })}
       </div>
     </div>
@@ -418,18 +410,14 @@ function renderPromptsPipeline(p, profileRows) {
           n: 5,
           title: "Profile Template + Pinned Rules",
           desc: "当当前会话不是默认 profile 时，角色模板会和 knowledge/05_模型规则 下的角色专属规则一起注入。",
-          observe: "Profile 预览，以及 pinned rule 的文件来源",
-          control: "可编辑 Profile；pinned rule 仍由文件维护",
           source: "profileTemplates + 05_模型规则",
           type: "sys",
-          body: renderPipelineMeta(["profileRuleMaxChars: 1400 chars", "默认 profile 会跳过角色聊天专属上下文层"]),
+          body: renderPipelineMeta(["Profile 模板在上方表格编辑；pinned rule 由文件维护", "profileRuleMaxChars: 1400 chars", "默认 profile 会跳过角色聊天专属上下文层"]),
         })}
         ${renderPipelineStep({
           n: 6,
           title: "长期记忆注入",
           desc: "renderMemoryPrompt() 会按 userId + profile 选择稳定记忆，并在主模型回复前注入。",
-          observe: "Memory 页，以及轮次日志里的 memory prompt 字符数",
-          control: "Memory 上下文说明和召回数量",
           source: "wechat-memory.json",
           type: "sys",
           body: `
@@ -443,8 +431,6 @@ function renderPromptsPipeline(p, profileRows) {
           n: 7,
           title: "稳定聊天风格",
           desc: "buildStableStylePrompt() 会把聊天风格和表达能力规则加入稳定 system 层。",
-          observe: "turn_context 里的 stableSystemChars",
-          control: "聊天风格和表达能力 prompt",
           source: "reply.mjs / prompts.json",
           type: "sys",
           body: `
@@ -466,8 +452,6 @@ function renderPromptsPipeline(p, profileRows) {
           n: 8,
           title: "可见上下文窗口",
           desc: "recentVisibleContext() 会读取最近的真实可见聊天轮次，供隐藏 scenelet 和 proactive 评估使用。",
-          observe: "History 页和 _visibleHistory",
-          control: "可见上下文说明和轮次数量",
           source: "chatHistoryIntro / visibleContextTurns",
           type: "body",
           body: `
@@ -481,8 +465,6 @@ function renderPromptsPipeline(p, profileRows) {
           n: 9,
           title: "延续 scene_state",
           desc: "sceneStateText() 会读取上一轮轻量 scene_state，过期后自动丢弃；新的状态只会在成功轮次后写回。",
-          observe: "History 页里的 scene_state 字段",
-          control: "注入说明和最大字符数",
           source: "_sceneState",
           type: "body",
           body: `
@@ -497,8 +479,6 @@ function renderPromptsPipeline(p, profileRows) {
           n: 10,
           title: "隐藏 inner_scenelet 调用",
           desc: "generateSceneletForTurn() 会调用一个隐藏 JSON prompt，生成 inner_scenelet、next_scene_state 和 proactive candidates。",
-          observe: "History 页的 scenelet 列，以及 data/logs 里的 inner_scenelet 事件",
-          control: "Scenelet 指令和 inner_scenelet 注入说明",
           source: "sceneletInstructions",
           type: "body",
           body: `
@@ -512,8 +492,6 @@ function renderPromptsPipeline(p, profileRows) {
           n: 11,
           title: "RAG Eligibility Gate",
           desc: "只有在 RAG 已启用、消息无附件、profile 非默认、没有被 casual-skip 跳过，并且命中显式 profile / names / lore 条件时，才会检索。",
-          observe: "turn_context 里的 ragChars，以及 RAG hit/miss 日志",
-          control: "lore / names 关键词和检索参数",
           source: "shouldUseRagForTurn()",
           type: "body",
           body: `
@@ -541,8 +519,6 @@ function renderPromptsPipeline(p, profileRows) {
           n: 12,
           title: "聊天现实规则 + 用户消息",
           desc: "buildTurnBody() 会先加入聊天现实规则，再把当前本地时间戳和用户原始消息放到最后。",
-          observe: "turn_context 里的 transientBodyChars",
-          control: "聊天现实规则",
           source: "buildTurnBody()",
           type: "model",
           body: renderTextPreview("chatRealityInstructions", p.chatRealityInstructions),
@@ -551,21 +527,17 @@ function renderPromptsPipeline(p, profileRows) {
           n: 13,
           title: "后端 Prompt 组装",
           desc: "Claude 会把稳定上下文写入 --append-system-prompt-file；Codex 会把同一份稳定上下文拼到 prompt 前，并在更前面加入 RAG。",
-          observe: "data/logs 里的 turn_context 和 CLI 事件流",
-          control: "本页上游所有 prompt 控件",
           source: "runClaudeStream() / runCodexStream()",
           type: "model",
-          body: renderPipelineMeta(["Claude 在 stdin body 中接收 RAG", "Codex 在组合 prompt 前接收 RAG", "profile 聊天使用 no-session-persistence"]),
+          body: renderPipelineMeta(["本环节只读；由上游控件共同决定", "Claude 在 stdin body 中接收 RAG", "Codex 在组合 prompt 前接收 RAG", "profile 聊天使用 no-session-persistence"]),
         })}
         ${renderPipelineStep({
           n: 14,
           title: "流式输出、切分、发送",
           desc: "assistant 文本先进入缓冲区；遇到工具调用或长输出会中途 flush，最终角色聊天会被切成更自然的微信消息。",
-          observe: "微信实际发送的消息片段和格式化轮次日志",
-          control: "Prompts 页只读",
           source: "flush() → splitSocialReply() → sendMessage()",
           type: "post",
-          body: renderPipelineMeta(["splitText() 强制执行 MAX_REPLY_LEN", "成功的角色聊天最终片段会附加 /"]),
+          body: renderPipelineMeta(["本环节只读", "splitText() 强制执行 MAX_REPLY_LEN", "成功的角色聊天最终片段会附加 /"]),
         })}
       </div>
     </div>
@@ -579,18 +551,14 @@ function renderPromptsPipeline(p, profileRows) {
           n: 15,
           title: "成功后状态写回",
           desc: "轮次成功后，系统会更新时间戳、可见历史、scene_state、proactive candidates，以及追加式聊天历史。",
-          observe: "History 页、_visibleHistory、_sceneState、_proactiveIntents",
-          control: "本页只读；在 History 中检查和审计",
           source: "recordChatHistory()",
           type: "post",
-          body: renderPipelineMeta(["user 和 assistant 事件都会记录", "scenelet 和 next_scene_state 会附在 assistant history event 上"]),
+          body: renderPipelineMeta(["本环节只读；在 History 页检查和审计", "user 和 assistant 事件都会记录", "scenelet 和 next_scene_state 会附在 assistant history event 上"]),
         })}
         ${renderPipelineStep({
           n: 16,
           title: "Memory Writer",
           desc: "成功轮次之后，updateUserMemoryFromTurn() 会调用独立写入器，让它判断是否 add / update / noop 长期记忆。",
-          observe: "Memory 页和 memory writer 日志",
-          control: "Memory writer prompt 和维护提醒阈值",
           source: "buildMemoryWriterPrompt()",
           type: "post",
           body: `
@@ -605,18 +573,14 @@ function renderPromptsPipeline(p, profileRows) {
           n: 17,
           title: "Proactive Candidate Queue",
           desc: "scenelet 产生的 candidates 会被规范化成一次性的 pending intents；之后可能过期、取消或发送。",
-          observe: "Proactive 页里的 pending / sent / cancelled intents",
-          control: "在 Proactive 页检查和管理",
           source: "_proactiveIntents",
           type: "post",
-          body: renderPipelineMeta(["每次 scenelet 结果最多接收 3 个 candidates", "候选时间窗使用 ISO scheduled_at / expires_at"]),
+          body: renderPipelineMeta(["在 Proactive 页检查和管理", "每次 scenelet 结果最多接收 3 个 candidates", "候选时间窗使用 ISO scheduled_at / expires_at"]),
         })}
         ${renderPipelineStep({
           n: 18,
           title: "Proactive Evaluation",
-          desc: "定期检查器会结合当前可观察状态评估到期的 pending intents，并可能发送 proactive visible_reply。",
-          observe: "Proactive 页和 proactive 类型聊天历史事件",
-          control: "评估 prompt、检查间隔、冷却时间",
+          desc: "定期检查器会结合当前系统状态评估到期的 pending intents，并可能发送 proactive visible_reply。",
           source: "buildProactivePrompt()",
           type: "post",
           body: `
@@ -638,7 +602,7 @@ function renderPromptsPipeline(p, profileRows) {
   `;
 }
 
-function renderPipelineStep({ n, title, desc, observe, control, source, type, body = "", wide = false }) {
+function renderPipelineStep({ n, title, desc, source, type, body = "", wide = false }) {
   return `
     <div class="pipeline-row${wide ? " pipeline-row-wide" : ""}">
       <div class="pipeline-left">
@@ -647,10 +611,6 @@ function renderPipelineStep({ n, title, desc, observe, control, source, type, bo
             <span class="pipeline-step-num">${String(n).padStart(2, "0")}</span>
             <span class="pipeline-field-label">${escHtml(title)}</span>
             <span class="pipeline-field-desc">${escHtml(desc)}</span>
-          </div>
-          <div class="pipeline-stage-meta">
-            <span class="pipeline-chip observe">可观察：${escHtml(observe)}</span>
-            <span class="pipeline-chip control">可控制：${escHtml(control)}</span>
           </div>
           ${body}
         </div>
