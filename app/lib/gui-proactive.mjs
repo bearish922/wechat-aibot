@@ -10,6 +10,30 @@ function uniqueIntents(intents = []) {
   return [...byId.values()];
 }
 
+function activeLifeArcs(arcs = []) {
+  const now = Date.now();
+  return arcs
+    .filter(a => a?.id && (a.status || "active") === "active")
+    .filter(a => {
+      const expires = Date.parse(a.expiresAt || "");
+      return !Number.isFinite(expires) || expires >= now;
+    })
+    .map(a => ({
+      id: a.id,
+      title: a.title || "",
+      summary: a.summary || "",
+      currentState: a.currentState || "",
+      nextUsefulMoment: a.nextUsefulMoment || "",
+      source: a.source || "",
+      kind: a.kind || null,
+      timeStart: a.timeStart || null,
+      timeEnd: a.timeEnd || null,
+      createdAt: a.createdAt || null,
+      updatedAt: a.updatedAt || null,
+      expiresAt: a.expiresAt || null,
+    }));
+}
+
 export function registerProactiveRoutes() {
   addRoute("GET", "/api/proactive/intents", () => {
     const result = [];
@@ -17,7 +41,8 @@ export function registerProactiveRoutes() {
       for (const [, u] of map) {
         for (const s of u.list) {
           const intents = uniqueIntents(s._proactiveIntents || []);
-          if (!intents.length) continue;
+          const lifeArcs = activeLifeArcs(s._lifeArcs || []);
+          if (!intents.length && !lifeArcs.length) continue;
           result.push({
             sessionId: s.id,
             sessionName: s.name,
@@ -25,6 +50,7 @@ export function registerProactiveRoutes() {
             profile: s._profile || "default",
             active: s.id === u.activeId,
             busy: s.busy || false,
+            lifeArcs,
             intents: intents.map(i => ({
               id: i.id,
               status: i.status,

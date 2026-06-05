@@ -6,6 +6,7 @@ import {
   isStructuredReply,
   splitSocialReply,
   localTimePeriod,
+  formatZonedTimeParts,
   formatLocalChatReality,
   expressionCapabilityPrompt,
 } from "../lib/reply.mjs";
@@ -39,9 +40,28 @@ describe("local chat reality", () => {
 
   it("formats local time and action guidance", () => {
     const text = formatLocalChatReality(new Date(2026, 4, 28, 2, 13));
-    assert.match(text, /当前本地时间：2026-05-28 02:13，星期四，凌晨。/u);
+    assert.match(text, /当前用户侧时间：2026-05-28 02:13，星期四，凌晨（北京时间，Asia\/Shanghai）。/u);
+    assert.match(text, /当前角色侧时间：2026-05-28 03:13，星期四，凌晨（东京时间，Asia\/Tokyo；千圣所处时间以此为准）。/u);
     assert.match(text, /微信私聊/u);
     assert.match(text, /当前时间\/日期已注入/u);
+  });
+
+  it("formats explicit Beijing and Tokyo time parts", () => {
+    const date = new Date(2026, 4, 28, 23, 13);
+    assert.deepEqual(formatZonedTimeParts(date, "Asia/Shanghai"), {
+      stamp: "2026-05-28 23:13",
+      weekday: "星期四",
+      shortWeekday: "周四",
+      period: "深夜",
+      timeZone: "Asia/Shanghai",
+    });
+    assert.deepEqual(formatZonedTimeParts(date, "Asia/Tokyo"), {
+      stamp: "2026-05-29 00:13",
+      weekday: "星期五",
+      shortWeekday: "周五",
+      period: "凌晨",
+      timeZone: "Asia/Tokyo",
+    });
   });
 });
 

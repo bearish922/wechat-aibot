@@ -17,6 +17,27 @@ function saveAllEvents(events) {
   fs.writeFileSync(CHAT_HISTORY_FILE, JSON.stringify({ events }, null, 2), "utf-8");
 }
 
+function normalizeToolUsage(raw = null) {
+  if (!raw || typeof raw !== "object") return null;
+  const tools = Array.isArray(raw.tools)
+    ? [...new Set(raw.tools.map(x => String(x || "").trim()).filter(Boolean))]
+    : [];
+  return {
+    webSearch: Math.max(0, Number(raw.webSearch || 0) || 0),
+    webFetch: Math.max(0, Number(raw.webFetch || 0) || 0),
+    tools,
+  };
+}
+
+function normalizeRagUsage(raw = null) {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    eligible: Boolean(raw.eligible),
+    used: Boolean(raw.used),
+    chars: Math.max(0, Number(raw.chars || 0) || 0),
+  };
+}
+
 export function appendChatEvent(event) {
   if (!event?.text && !event?.scenelet) return null;
   const events = loadAllEvents();
@@ -33,7 +54,11 @@ export function appendChatEvent(event) {
     text: String(event.text || ""),
     scenelet: event.scenelet ? String(event.scenelet) : "",
     sceneState: event.sceneState ? String(event.sceneState) : "",
+    sceneletStatus: event.sceneletStatus ? String(event.sceneletStatus) : "",
+    sceneletError: event.sceneletError ? String(event.sceneletError) : "",
     proactiveIntentId: event.proactiveIntentId || "",
+    toolUsage: normalizeToolUsage(event.toolUsage),
+    ragUsage: normalizeRagUsage(event.ragUsage),
   };
   events.push(item);
   saveAllEvents(events);
@@ -66,9 +91,13 @@ export function listChatEvents(options = {}) {
       e.text,
       e.scenelet,
       e.sceneState,
+      e.sceneletStatus,
+      e.sceneletError,
       e.sessionName,
       e.profile,
       e.userId,
+      e.toolUsage ? `WebSearch:${e.toolUsage.webSearch > 0 ? "yes" : "no"} WebFetch:${e.toolUsage.webFetch > 0 ? "yes" : "no"} ${(e.toolUsage.tools || []).join(" ")}` : "",
+      e.ragUsage ? `RAG:${e.ragUsage.used ? "yes" : "no"} eligible:${e.ragUsage.eligible ? "yes" : "no"} chars:${e.ragUsage.chars || 0}` : "",
     ].some(v => String(v || "").toLowerCase().includes(q)));
   }
 

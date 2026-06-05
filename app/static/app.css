@@ -559,6 +559,76 @@ pre {
   white-space: nowrap;
 }
 
+.world-session-card {
+  margin-top: 14px;
+}
+
+.world-session-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.world-box {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.world-box h3 {
+  margin-bottom: 10px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 780;
+}
+
+.world-kv {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 8px;
+  min-height: 24px;
+  align-items: baseline;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.world-kv strong {
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.world-state-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr);
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.world-json {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.world-json summary {
+  padding: 10px 12px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.world-json pre {
+  margin: 0;
+  border-width: 1px 0 0;
+  border-radius: 0 0 8px 8px;
+  max-height: 420px;
+}
+
 .resume-current {
   background: var(--success-soft);
   color: var(--success);
@@ -580,6 +650,12 @@ pre {
   font: 13px/1.55 Consolas, "Cascadia Mono", monospace;
   overflow-x: auto;
   white-space: nowrap;
+}
+
+.resume-command-stack {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
 }
 
 .resume-copy {
@@ -712,6 +788,13 @@ pre {
   line-height: 1.72;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.history-tool-note {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .scenelet-details {
@@ -954,7 +1037,7 @@ pre {
 /* Proactive intents */
 .proactive-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 16px;
 }
@@ -988,6 +1071,7 @@ pre {
 .proactive-summary-item.sent    { border-left: 3px solid var(--success); }
 .proactive-summary-item.cancelled { border-left: 3px solid #9aa4b2; }
 .proactive-summary-item.sessions { border-left: 3px solid #8b5cf6; }
+.proactive-summary-item.life-arcs { border-left: 3px solid #d97706; }
 
 .proactive-session-card {
   margin-bottom: 14px;
@@ -1023,6 +1107,91 @@ pre {
 .proactive-intent-list {
   display: grid;
   gap: 0;
+}
+
+.life-arc-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.life-arc-item {
+  border: 1px solid var(--line);
+  border-left: 3px solid #d97706;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: rgba(217, 119, 6, 0.04);
+}
+
+.life-arc-item.expiring {
+  border-left-color: var(--danger);
+  background: rgba(194, 65, 61, 0.04);
+}
+
+.life-arc-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.life-arc-top strong {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.life-arc-top time {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.life-arc-state {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.life-arc-summary,
+.life-arc-next {
+  margin-top: 5px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.life-arc-kind {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 7px;
+  border-radius: 4px;
+  margin-right: 6px;
+  vertical-align: middle;
+  line-height: 1.6;
+}
+
+.life-arc-kind-travel        { background: #fef3c7; color: #b45309; }
+.life-arc-kind-work          { background: #dbeafe; color: #1d4ed8; }
+.life-arc-kind-school        { background: #e0e7ff; color: #4338ca; }
+.life-arc-kind-personal      { background: #f3e8ff; color: #7c3aed; }
+.life-arc-kind-special_date  { background: #fce7f3; color: #be185d; }
+
+.life-arc-timerange {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  display: flex;
+  gap: 12px;
+}
+
+.life-arc-timerange time {
+  font-family: var(--font-mono);
 }
 
 .proactive-intent-item {
