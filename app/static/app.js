@@ -35,6 +35,7 @@ async function render() {
     switch (activeTab) {
       case "status": await renderStatus(); break;
       case "prompts": await renderPrompts(); break;
+      case "world": await renderWorld(); break;
       case "history": await renderHistory(); break;
       case "proactive": await renderProactive(); break;
       case "memory": await renderMemory(); break;
@@ -137,7 +138,10 @@ function renderResumeCommands(commands) {
             ${item.active ? '<span class="resume-current">Current</span>' : ''}
             ${item.profile ? `<span class="resume-profile">${escHtml(item.profile)}</span>` : ''}
           </div>
-          <code class="resume-command">${escHtml(item.command)}</code>
+          <div class="resume-command-stack">
+            <code class="resume-command">${escHtml(item.command)}</code>
+            ${item.hiddenWorldSid ? `<code class="resume-command">hidden-world: claude --resume ${escHtml(item.hiddenWorldSid)}${item.hiddenWorldFirstTurn ? " (first turn)" : ""}</code>` : '<code class="resume-command">hidden-world: not started</code>'}
+          </div>
           <button class="btn resume-copy" data-action="copy-resume" data-command="${escAttr(item.command)}">Copy</button>
         </div>
       `).join("")}
@@ -416,17 +420,6 @@ function renderPromptsPipeline(p, profileRows) {
         })}
         ${renderPipelineStep({
           n: 6,
-          title: "长期记忆注入",
-          desc: "主回复路径会把当前 userId + profile 下的完整 memory snapshot 注入稳定 prompt；不按本轮 query 过滤，也不受 memoryDefaultLimit 截断。",
-          source: "wechat-memory.json",
-          type: "sys",
-          body: `
-            ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
-            ${renderPipelineMeta(["memoryDefaultLimit 默认值是 6；当前只作为带 query 相关召回的 fallback，主回复路径没有使用"])}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 7,
           title: "稳定表达能力",
           desc: "buildStableStylePrompt() 只把表情和表达能力规则加入稳定 system 层；聊天写法会在主模型轮次里靠近用户消息注入。",
           source: "reply.mjs / prompts.json",
@@ -439,55 +432,32 @@ function renderPromptsPipeline(p, profileRows) {
       </div>
     </div>
 
-    ${renderPipelineArrow("当当前会话不是默认 profile 时，会在主模型前运行角色聊天上下文分支")}
+    ${renderPipelineArrow("稳定 system context 到这里结束；接下来组装主回复动态 turn body")}
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-body"><span>阶段 2 — 角色聊天上下文分支</span><span class="pipeline-tag">scenelet + RAG gates</span></div>
+        <div class="pipeline-phase-label phase-body"><span>阶段 2 — 主回复动态 Turn Body</span><span class="pipeline-tag">stdin body prefix</span></div>
         ${renderPipelineStep({
-          n: 8,
-          title: "可见上下文窗口",
-          desc: "recentVisibleContext() 会读取最近的真实可见聊天轮次，供隐藏 scenelet 和 proactive 评估使用。",
-          source: "chatHistoryIntro / visibleContextTurns",
+          n: 7,
+          title: "长期记忆注入",
+          desc: "主回复路径会把当前 userId + profile 下的完整 memory snapshot 放在 turn body 最前面；不再进入稳定 system prompt。",
+          source: "wechat-memory.json",
           type: "body",
           body: `
-            ${renderTextPreview("chatHistoryIntro", p.chatHistoryIntro)}
-            ${renderControlGrid([
-              renderNumberControl("visibleContextTurns", "可见轮次数", p.visibleContextTurns || 8, 1, 30, "turns"),
-            ])}
+            ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
+            ${renderPipelineMeta(["memoryDefaultLimit 默认值是 6；当前只作为带 query 相关召回的 fallback，主回复路径没有使用", "memory snapshot 变化只影响本轮动态 body，不再打断稳定 system prompt cache"])}
           `,
+        })}
+        ${renderPipelineStep({
+          n: 8,
+          title: "Hidden-world 输出注入",
+          desc: "主回复不读取可见上下文窗口；它依赖自己的 Claude/Codex session 历史，再接收本轮 hidden-world 直接传入的 scene_state、life_arc 简述、inner_scenelet 和 bridge instruction。",
+          source: "buildSceneContextBlock()",
+          type: "body",
+          body: renderPipelineMeta(["这些内容由 Hidden World 页配置和观察", "主回复页不编辑 hidden-world 生成提示词", "life_arc 只传简述，不传完整 active life_arcs JSON"]),
         })}
         ${renderPipelineStep({
           n: 9,
-          title: "延续 scene_state",
-          desc: "sceneStateText() 会读取上一轮轻量 scene_state，过期后自动丢弃；新的状态只会在成功轮次后写回。",
-          source: "_sceneState",
-          type: "body",
-          body: `
-            ${renderTextPreview("sceneStateIntro", p.sceneStateIntro)}
-            ${renderControlGrid([
-              renderNumberControl("sceneStateMaxChars", "最大字符数", p.sceneStateMaxChars || 220, 50, 2000, "chars"),
-            ])}
-            ${renderPipelineMeta(["当前 TTL: 2h；本页只展示，不编辑 TTL"])}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 10,
-          title: "隐藏 inner_scenelet 调用",
-          desc: "generateSceneletForTurn() 会调用一个隐藏 JSON prompt，生成 inner_scenelet、next_scene_state 和 proactive candidates。",
-          source: "sceneletInstructions",
-          type: "body",
-          body: `
-            <label class="pipeline-sub-label">Scenelet System Prompt</label>
-            ${renderTextPreview("sceneletInstructions", p.sceneletInstructions)}
-            <label class="pipeline-sub-label">inner_scenelet 注入说明</label>
-            ${renderTextPreview("innerSceneletIntro", p.innerSceneletIntro)}
-            <label class="pipeline-sub-label">scenelet 到微信回复转换说明</label>
-            ${renderTextPreview("sceneletReplyBridgeInstruction", p.sceneletReplyBridgeInstruction)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 11,
           title: "RAG Eligibility Gate",
           desc: "只有在 RAG 已启用、消息无附件、profile 非默认、没有被 casual-skip 跳过，并且命中显式 profile / names / lore 条件时，才会检索。",
           source: "shouldUseRagForTurn()",
@@ -505,37 +475,37 @@ function renderPromptsPipeline(p, profileRows) {
             ])}
           `,
         })}
-      </div>
-    </div>
-
-    ${renderPipelineArrow("Turn Body 按真实顺序组装：scene context → RAG context → 聊天写法/聊天现实规则 → 带时间戳的用户消息")}
-
-    <div class="panel">
-      <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-model"><span>阶段 3 — 主模型轮次</span><span class="pipeline-tag">Claude stream-json / Codex json</span></div>
         ${renderPipelineStep({
-          n: 12,
+          n: 10,
           title: "聊天写法 / 聊天现实 + 用户消息",
-          desc: "buildTurnBody() 会在用户消息前加入聊天写法和当前聊天现实，再把当前本地时间戳和用户原始消息放到最后。",
+          desc: "buildTurnBody() 在用户消息前加入聊天写法和当前聊天现实，明确用户侧北京时间与角色侧东京时间，再把带北京时间标记的用户原始消息放到最后。",
           source: "buildTurnBody()",
           type: "model",
           body: `
             <label class="pipeline-sub-label">聊天写法</label>
             ${renderTextPreview("chatStyle", p.chatStyle)}
-            <label class="pipeline-sub-label">聊天现实规则</label>
+            <label class="pipeline-sub-label">聊天现实规则 / 时间戳描述</label>
             ${renderTextPreview("chatRealityInstructions", p.chatRealityInstructions)}
           `,
         })}
+      </div>
+    </div>
+
+    ${renderPipelineArrow("Turn Body 按真实顺序组装：memory snapshot → scene_state + inner_scenelet → RAG context → 聊天写法/聊天现实规则 → 带时间戳的用户消息")}
+
+    <div class="panel">
+      <div class="pipeline-phase-box">
+        <div class="pipeline-phase-label phase-model"><span>阶段 3 — 主模型轮次</span><span class="pipeline-tag">Claude stream-json / Codex json</span></div>
         ${renderPipelineStep({
-          n: 13,
+          n: 11,
           title: "后端 Prompt 组装",
-          desc: "Claude 会把稳定上下文写入 --append-system-prompt-file；Codex 会把同一份稳定上下文拼到 prompt 前，并在更前面加入 RAG。",
+          desc: "Claude 只把 profile 和稳定表达能力写入 --append-system-prompt-file；memory snapshot、scene_state、inner_scenelet 和 RAG 从 stdin body 进入，不属于稳定 system prompt。",
           source: "runClaudeStream() / runCodexStream()",
           type: "model",
-          body: renderPipelineMeta(["本环节只读；由上游控件共同决定", "Claude 在 stdin body 中接收 RAG", "Codex 在组合 prompt 前接收 RAG", "profile 聊天使用 no-session-persistence"]),
+          body: renderPipelineMeta(["本环节只读；由上游控件共同决定", "主回复不直接读取完整 active life_arcs", "Claude 在 stdin body 中接收 memory、scene_state、inner_scenelet 和 RAG", "Codex 在组合 prompt 前接收 RAG；memory 仍随 turn body 注入", "Claude profile 聊天默认走可 resume 的缓存路径；Codex profile 聊天仍使用 no-session-persistence"]),
         })}
         ${renderPipelineStep({
-          n: 14,
+          n: 12,
           title: "流式输出、切分、发送",
           desc: "assistant 文本先进入缓冲区；遇到工具调用或长输出会中途 flush，最终角色聊天会被切成更自然的微信消息。",
           source: "flush() → splitSocialReply() → sendMessage()",
@@ -549,20 +519,20 @@ function renderPromptsPipeline(p, profileRows) {
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-post"><span>阶段 4 — 回复后持久化和 Proactive 循环</span><span class="pipeline-tag">普通回复完成后</span></div>
+        <div class="pipeline-phase-label phase-post"><span>阶段 4 — 回复后持久化</span><span class="pipeline-tag">普通回复完成后</span></div>
         ${renderPipelineStep({
-          n: 15,
+          n: 13,
           title: "成功后状态写回",
           desc: "轮次成功后，系统会更新时间戳、可见历史、scene_state、proactive candidates，以及追加式聊天历史。",
           source: "recordChatHistory()",
           type: "post",
-          body: renderPipelineMeta(["本环节只读；在 History 页检查和审计", "user 和 assistant 事件都会记录", "scenelet 和 next_scene_state 会附在 assistant history event 上"]),
+          body: renderPipelineMeta(["本环节只读；在 History 页检查和审计", "user 和 assistant 事件都会记录", "scenelet、next_scene_state 和 life_arc_ops 会随成功轮次写入本地状态"]),
         })}
         ${renderPipelineStep({
-          n: 16,
+          n: 14,
           title: "Memory Writer",
-          desc: "成功轮次之后，updateUserMemoryFromTurn() 会调用独立写入器，让它判断是否 add / update / noop 长期记忆。",
-          source: "buildMemoryWriterPrompt()",
+          desc: "成功轮次之后，updateUserMemoryFromTurn() 先抽取长期记忆候选，再用完整 memory items 做 add / update / noop 合并规划。",
+          source: "memory_candidate_extractor / memory_merge_planner",
           type: "post",
           body: `
             ${renderTextPreview("memoryWriterInstructions", p.memoryWriterInstructions)}
@@ -570,44 +540,16 @@ function renderPromptsPipeline(p, profileRows) {
               renderNumberControl("memorySoftItemLimit", "提醒条目数", p.memorySoftItemLimit || 60, 10, 200, "items"),
               renderNumberControl("memorySoftPromptChars", "提醒字符数", p.memorySoftPromptChars || 1200, 200, 5000, "chars"),
             ])}
+            ${renderPipelineMeta(["候选抽取使用 fast model", "合并规划读取带 id 的正式 memory items", "两个重要环节都会写入 hidden usage 日志"])}
           `,
         })}
         ${renderPipelineStep({
-          n: 17,
-          title: "Proactive Candidate Queue",
-          desc: "scenelet 或 daily share seed 产生的 candidates 会被规范化成一次性的 pending intents；之后可能过期、取消或发送。",
-          source: "_proactiveIntents",
+          n: 15,
+          title: "Hidden-world 后续工序",
+          desc: "proactive candidate queue、daily share seed、schedule finalization 和 proactive evaluation 都在 Hidden World 页配置；主回复页只保留这一条总览。",
+          source: "Hidden World Pipeline",
           type: "post",
-          body: renderPipelineMeta(["在 Proactive 页检查和管理", "每次 scenelet 结果最多接收 3 个 candidates", "intent kind 可区分 follow_up / daily_share", "候选时间窗使用 ISO scheduled_at / expires_at"]),
-        })}
-        ${renderPipelineStep({
-          n: 18,
-          title: "Daily Share Seed",
-          desc: "当没有 pending intent 且会话已有一段自然空档时，系统可以生成一条 daily_share 候选，之后仍交给 proactive evaluation 二次判断。",
-          source: "dailyShareSeedInstructions",
-          type: "post",
-          body: `
-            ${renderTextPreview("dailyShareSeedInstructions", p.dailyShareSeedInstructions)}
-            ${renderControlGrid([
-              renderNumberControl("dailyShareSeedIntervalMs", "Seed 间隔", toS(p.dailyShareSeedIntervalMs), 60, 86400, "s", { ms: true }),
-              renderNumberControl("dailyShareMinIdleMs", "自然空档", toS(p.dailyShareMinIdleMs), 60, 86400, "s", { ms: true }),
-            ])}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 19,
-          title: "Proactive Evaluation",
-          desc: "定期检查器会结合当前系统状态评估到期的 pending intents，并可能发送 proactive visible_reply。",
-          source: "buildProactivePrompt()",
-          type: "post",
-          body: `
-            ${renderTextPreview("proactiveInstructions", p.proactiveInstructions)}
-            ${renderControlGrid([
-              renderNumberControl("proactiveCheckIntervalMs", "检查间隔", toS(p.proactiveCheckIntervalMs), 5, 300, "s", { ms: true }),
-              renderNumberControl("proactiveCooldownMs", "冷却时间", toS(p.proactiveCooldownMs), 60, 86400, "s", { ms: true }),
-              renderNumberControl("proactiveDailyMax", "每日上限", p.proactiveDailyMax || 8, 1, 24, "msgs"),
-            ])}
-          `,
+          body: renderPipelineMeta(["候选生成与二次判断不在主回复 prompt 中调参", "History 页记录 RAG 是否触发", "Hidden World 页记录 hidden-world sid、usage/cache 和 reset 快照"]),
         })}
       </div>
     </div>
@@ -675,7 +617,7 @@ function renderTextPreview(key, value) {
   const isOpen = promptsEditing[key];
   const draft = Object.prototype.hasOwnProperty.call(promptDrafts, key) ? promptDrafts[key] : value;
   if (isOpen) {
-    const h = key === 'sceneletInstructions' || key === 'dailyShareSeedInstructions' || key === 'proactiveInstructions' || key === 'memoryWriterInstructions' ? '220px' : '110px';
+    const h = key === 'sceneletInstructions' || key === 'lifeArcInstructions' || key === 'dailyShareSeedInstructions' || key === 'proactiveInstructions' || key === 'memoryWriterInstructions' || key === 'scheduleCreatorInstructions' ? '220px' : '110px';
     return `<textarea id="prompt_${key}" class="prompts-editable prompts-textarea" data-key="${key}" style="min-height:${h}">${escHtml(draft || '')}</textarea>
       <div class="editor-actions" style="margin-top:4px">
         <button class="btn btn-primary" data-action="save-text" data-key="${key}">保存</button>
@@ -820,6 +762,339 @@ window.deleteProfile = async (name) => {
   toast(r.ok ? `已删除（${r.reverted} 个会话已回退）` : r.error, r.ok);
   if (r.ok) render();
 };
+
+// Hidden World
+let worldState = { profile: "", resetProfile: "" };
+
+async function renderWorld() {
+  const [wd, pd] = await Promise.all([get("/api/world/roles"), get("/api/prompts")]);
+  const profiles = wd.profiles || [];
+  if (!worldState.profile && profiles.length) worldState.profile = profiles.includes("白鹭千圣") ? "白鹭千圣" : profiles[0];
+  const role = (wd.roles || []).find(r => r.profile === worldState.profile) || wd.roles?.[0] || {};
+  const p = pd.prompts || {};
+  if (worldState.resetProfile) {
+    renderWorldReset(role, p);
+    return;
+  }
+
+  content.innerHTML = `
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Hidden World Pipeline</h2>
+        <span class="history-toolbar">
+          <select id="worldProfileSelect" class="history-date">${profiles.map(name => `<option value="${escAttr(name)}"${name === role.profile ? " selected" : ""}>${escHtml(name)}</option>`).join("")}</select>
+          <button class="btn" data-action="open-world-reset">Reset / Edit Snapshot</button>
+        </span>
+      </div>
+      <div class="pipeline-summary">
+        <span>Hidden world 以 profile 为单位持久化；多个微信线程共享同一个角色世界线和 hidden-world sid。</span>
+        <span>本页只调整 hidden-world 的提示词、判断器和状态参数；主回复写法留在 Prompts 页。</span>
+      </div>
+    </div>
+
+    ${renderWorldPipeline(role, p)}
+
+    <div id="promptsSaveBar" class="prompts-savebar" style="display:none">
+      <span>有未保存的 hidden-world prompt 修改</span>
+      <button class="btn btn-primary" id="promptsSaveBtn">全部保存</button>
+    </div>
+  `;
+  bindWorldEvents();
+  bindPromptEditorEvents(renderWorld);
+}
+
+function renderWorldPipeline(role, p) {
+  const world = role.worldSession || {};
+  const usage = world.lastUsage || {};
+  return `
+    <div class="panel">
+      <div class="pipeline-phase-box">
+        <div class="pipeline-phase-label phase-sys"><span>阶段 1 — Hidden World System Prompt</span><span class="pipeline-tag">role-level claude session</span></div>
+        ${renderPipelineStep({
+          n: 1,
+          title: "Role Profile + Chat Style",
+          desc: "hidden-world 读取 profile template、固定角色信息和聊天写法参考，用于构建稳定隐藏世界；不使用主回复的 buildStableStylePrompt()。",
+          source: "profileTemplates / getChatStyle()",
+          type: "sys",
+          body: `
+            ${renderPipelineMeta(["profile template 只在 Profiles 表里维护", "chatStyle 可编辑，但最终微信回复仍在主回复页靠近用户消息注入", "hidden-world 的目标是世界连续性，不承担最终措辞"])}
+            ${renderTextPreview("chatStyle", p.chatStyle)}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 2,
+          title: "Scenelet + Life Arc Instructions",
+          desc: "这些提示词定义 hidden-world 每轮要生成的 scene_state、life_arcs、inner_scenelet 和世界线更新规则。",
+          source: "sceneletInstructions / lifeArcInstructions",
+          type: "sys",
+          body: `
+            ${renderTextPreview("sceneletInstructions", p.sceneletInstructions)}
+            ${renderTextPreview("lifeArcInstructions", p.lifeArcInstructions)}
+            ${renderTextPreview("sceneStateIntro", p.sceneStateIntro)}
+            ${renderTextPreview("innerSceneletIntro", p.innerSceneletIntro)}
+            ${renderTextPreview("sceneletReplyBridgeInstruction", p.sceneletReplyBridgeInstruction)}
+          `,
+        })}
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="pipeline-phase-box">
+        <div class="pipeline-phase-label phase-body"><span>阶段 2 — Dynamic Context</span><span class="pipeline-tag">each user turn</span></div>
+        ${renderPipelineStep({
+          n: 3,
+          title: "当前 role-level session",
+          desc: "hidden-world 首轮使用 --session-id；之后使用 --resume。这里的 sid 是角色级，不随微信线程变化。",
+          source: "_worldSession",
+          type: "body",
+          body: renderWorldSessionSnapshot(role, usage),
+        })}
+        ${renderPipelineStep({
+          n: 4,
+          title: "Memory + Recent Visible Chat",
+          desc: "hidden-world 当前沿用旧 scenelet 层输入：读取 memoryPrompt 和最近可见聊天窗口；主回复不读取这个可见窗口，只依赖自身 session 历史。",
+          source: "renderMemoryPrompt() / recentVisibleContext()",
+          type: "body",
+          body: `
+            ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
+            ${renderTextPreview("chatHistoryIntro", p.chatHistoryIntro)}
+            ${renderControlGrid([
+              renderNumberControl("visibleContextTurns", "可见轮次数", p.visibleContextTurns || 8, 1, 30, "turns"),
+            ])}
+            ${renderPipelineMeta(["Memory 是否应该继续进 hidden-world：当前保留，原因是 scenelet 需要知道用户长期偏好和关系事实", "RAG context 当前不进 hidden-world；旧 scenelet 层也不接收 RAG，只允许 WebSearch/WebFetch guard 控制需要时搜索"])}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 5,
+          title: "Time Reality + Search Guard",
+          desc: "hidden-world 每轮拿到双时区当前时间、微信聊天现实、当前用户消息和 Web/Search guard。时间字段由代码生成，提示词可通过聊天现实规则调整。",
+          source: "currentTimeContext() / chatRealityInstructions / CURRENT_SITE_AND_SEARCH_GUARD",
+          type: "body",
+          body: `
+            ${renderTextPreview("chatRealityInstructions", p.chatRealityInstructions)}
+            ${renderPipelineMeta(["时间戳 JSON 本身只读，由 currentTimeContext() 生成", "Web/Search guard 当前是代码常量，只读", "RAG 检索上下文当前只传主回复，不传 hidden-world"])}
+          `,
+        })}
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="pipeline-phase-box">
+        <div class="pipeline-phase-label phase-model"><span>阶段 3 — Generated Hidden Outputs</span><span class="pipeline-tag">JSON contract</span></div>
+        ${renderPipelineStep({
+          n: 6,
+          title: "Scene State / Life Arcs / Inner Scenelet",
+          desc: "hidden-world 输出最新 scene_state、完整 active life_arcs JSON 和 inner_scenelet；主回复只接收 scene_state、life_arc 简述、inner_scenelet 和 bridge instruction。",
+          source: "inner_scenelet / next_scene_state / life_arc_ops",
+          type: "model",
+          body: renderPipelineMeta(["完整 life_arcs 留在 hidden-world 和本地快照", "主回复只拿简版，避免自行扩写日程", "last scene_state 不再作为 hidden-world 的依赖输入"]),
+        })}
+        ${renderPipelineStep({
+          n: 7,
+          title: "World State Patch",
+          desc: "结构化记录当前地点、活动、清醒状态、近几小时计划和未闭合线索。该字段偏数据契约，正常只读。",
+          source: "world_state_patch",
+          type: "model",
+          body: renderPipelineMeta(["字段：location / activity / awake_state / current_plan / open_threads / last_world_event_at", "具体内容在 reset 快照页编辑，不在正常 pipeline 中直接改"]),
+        })}
+        ${renderPipelineStep({
+          n: 8,
+          title: "Daily Share + Schedule Candidates",
+          desc: "hidden-world 先生成 daily_share_candidates 和 schedule_candidates；后续二次判断决定是否真正进入 proactive queue 或 schedule life_arc。",
+          source: "daily_share_candidates / schedule_candidates",
+          type: "model",
+          body: `
+            ${renderTextPreview("dailyShareSeedInstructions", p.dailyShareSeedInstructions)}
+            ${renderTextPreview("scheduleCreatorInstructions", p.scheduleCreatorInstructions)}
+            ${renderTextPreview("scheduleSpecialDates", p.scheduleSpecialDates)}
+            ${renderControlGrid([
+              renderNumberControl("dailyShareSeedIntervalMs", "Seed 间隔", toS(p.dailyShareSeedIntervalMs), 60, 86400, "s", { ms: true }),
+              renderNumberControl("dailyShareMinIdleMs", "自然空档", toS(p.dailyShareMinIdleMs), 60, 86400, "s", { ms: true }),
+              renderNumberControl("scheduleCheckIntervalMs", "日程检查", toS(p.scheduleCheckIntervalMs), 600, 604800, "s", { ms: true }),
+              renderNumberControl("scheduleMaxActive", "最大日程", p.scheduleMaxActive || 2, 1, 5, "items"),
+            ])}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 9,
+          title: "Time Reasoning + Continuity Warnings",
+          desc: "hidden-world 每轮输出时间推理和连续性警告供日志审计；页面只保留相关约束说明，不展示每轮内容。",
+          source: "time_reasoning / continuity_warnings",
+          type: "model",
+          body: renderPipelineMeta(["连续 10 分钟内多轮对话不能累计为多次被叫醒", "睡眠和日程时长必须能由当前时间算通", "用户纠正时间逻辑时优先修正 hidden-world 快照"]),
+        })}
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="pipeline-phase-box">
+        <div class="pipeline-phase-label phase-post"><span>阶段 4 — Independent Finalizers</span><span class="pipeline-tag">after normal turn / idle checks</span></div>
+        ${renderPipelineStep({
+          n: 10,
+          title: "Proactive / Daily / Schedule Finalization",
+          desc: "回复完成后，程序把 hidden-world 的候选交给独立判断器：proactive evaluation、daily share seeding 和 schedule finalization。",
+          source: "proactiveInstructions / schedule_finalization",
+          type: "post",
+          body: `
+            ${renderTextPreview("proactiveInstructions", p.proactiveInstructions)}
+            ${renderControlGrid([
+              renderNumberControl("proactiveCheckIntervalMs", "检查间隔", toS(p.proactiveCheckIntervalMs), 5, 300, "s", { ms: true }),
+              renderNumberControl("proactiveCooldownMs", "冷却时间", toS(p.proactiveCooldownMs), 60, 86400, "s", { ms: true }),
+              renderNumberControl("proactiveDailyMax", "每日上限", p.proactiveDailyMax || 8, 1, 24, "msgs"),
+            ])}
+          `,
+        })}
+      </div>
+    </div>
+  `;
+}
+
+function renderWorldSessionSnapshot(role, usage) {
+  const world = role.worldSession || {};
+  const sessions = role.sessions || [];
+  return `
+    <div class="world-session-grid">
+      ${renderWorldBox("Hidden World", [
+        ["sid", world.sid || "(not started)"],
+        ["resume", world.sid ? `claude --resume ${world.sid}` : "(not started)"],
+        ["model", world.model || "(default scenelet model)"],
+        ["firstTurn", String(Boolean(world.firstTurn))],
+        ["lastUsedAt", world.lastUsedAt || ""],
+      ])}
+      ${renderWorldBox("Last Usage", [
+        ["duration", usage?.duration_ms ? `${usage.duration_ms}ms` : ""],
+        ["input", usage?.input_tokens ?? ""],
+        ["cacheRead", usage?.cache_read_input_tokens ?? ""],
+        ["cacheCreate", usage?.cache_creation_input_tokens ?? ""],
+        ["output", usage?.output_tokens ?? ""],
+      ])}
+      ${renderWorldBox("Wechat Threads", [
+        ["count", sessions.length],
+        ["active", sessions.filter(s => s.active).length],
+        ["pending", sessions.reduce((sum, s) => sum + Number(s.pendingIntents || 0), 0)],
+      ])}
+    </div>
+    ${sessions.length ? `<div class="table-wrap"><table><thead><tr><th>AI</th><th>Thread</th><th>Main sid</th><th>Visible turns</th><th>Pending</th></tr></thead><tbody>${sessions.map(s => `
+      <tr><td>${escHtml(s.ai)}</td><td>${escHtml(s.sessionName)}${s.active ? " · active" : ""}</td><td>${escHtml(s.sid || "")}</td><td>${Number(s.visibleTurns || 0)}</td><td>${Number(s.pendingIntents || 0)}</td></tr>
+    `).join("")}</tbody></table></div>` : '<p class="empty-text">No bound WeChat threads for this profile</p>'}
+  `;
+}
+
+function renderWorldBox(title, rows) {
+  return `
+    <div class="world-box">
+      <h3>${escHtml(title)}</h3>
+      ${rows.map(([k, v]) => `
+        <div class="world-kv"><span>${escHtml(k)}</span><strong>${escHtml(String(v ?? ""))}</strong></div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function bindWorldEvents() {
+  content.querySelector("#worldProfileSelect")?.addEventListener("change", e => {
+    worldState.profile = e.target.value;
+    renderWorld();
+  });
+  content.querySelector('[data-action="open-world-reset"]')?.addEventListener("click", () => {
+    worldState.resetProfile = worldState.profile;
+    renderWorld();
+  });
+}
+
+function renderWorldReset(role) {
+  content.innerHTML = `
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Reset Hidden World — ${escHtml(role.profile || worldState.resetProfile)}</h2>
+        <button class="btn" data-action="cancel-world-reset">Back</button>
+      </div>
+      <div class="pipeline-summary">
+        <span>这里编辑的是权威快照。保存后会重置 hidden-world sid，下一轮用这些静态状态冷启动。</span>
+      </div>
+      <div class="form-grid one">
+        ${renderSnapshotTextarea("worldState", "world_state", role.worldState)}
+        ${renderSnapshotTextarea("sceneState", "scene_state", role.sceneState)}
+        ${renderSnapshotTextarea("lifeArcs", "active life_arcs", role.lifeArcs || [])}
+        ${renderSnapshotTextarea("threadIntents", "thread proactive intents", role.threadIntents || [])}
+        ${renderSnapshotTextarea("lastOutput", "last hidden output", role.lastOutput)}
+        <div class="form-grid">
+          <div class="form-group"><label>lastDailyShareSeedAt</label><input id="snap_lastDailyShareSeedAt" value="${escAttr(role.lastDailyShareSeedAt || "")}"></div>
+          <div class="form-group"><label>lastScheduleCheckAt</label><input id="snap_lastScheduleCheckAt" value="${escAttr(role.lastScheduleCheckAt || "")}"></div>
+        </div>
+      </div>
+      <div class="editor-actions">
+        <button class="btn btn-primary" data-action="save-world-reset">Save Snapshot and Reset Session</button>
+        <button class="btn" data-action="cancel-world-reset">Cancel</button>
+      </div>
+    </div>
+  `;
+  content.querySelectorAll('[data-action="cancel-world-reset"]').forEach(btn => {
+    btn.addEventListener("click", () => { worldState.resetProfile = ""; renderWorld(); });
+  });
+  content.querySelector('[data-action="save-world-reset"]')?.addEventListener("click", saveWorldReset);
+}
+
+function renderSnapshotTextarea(id, label, value) {
+  return `<div class="form-group"><label>${escHtml(label)}</label><textarea id="snap_${id}" class="profile-prompt-editor" spellcheck="false" style="min-height:180px">${escHtml(JSON.stringify(value || null, null, 2))}</textarea></div>`;
+}
+
+async function saveWorldReset() {
+  const profile = worldState.resetProfile || worldState.profile;
+  const payload = {
+    profile,
+    worldState: JSON.parse(content.querySelector("#snap_worldState")?.value || "null"),
+    sceneState: JSON.parse(content.querySelector("#snap_sceneState")?.value || "null"),
+    lifeArcs: JSON.parse(content.querySelector("#snap_lifeArcs")?.value || "[]"),
+    threadIntents: JSON.parse(content.querySelector("#snap_threadIntents")?.value || "[]"),
+    lastOutput: JSON.parse(content.querySelector("#snap_lastOutput")?.value || "null"),
+    lastDailyShareSeedAt: content.querySelector("#snap_lastDailyShareSeedAt")?.value || null,
+    lastScheduleCheckAt: content.querySelector("#snap_lastScheduleCheckAt")?.value || null,
+  };
+  const r = await post("/api/world/reset", payload);
+  toast(r.ok ? "Hidden world reset" : r.error, r.ok);
+  if (r.ok) {
+    worldState.resetProfile = "";
+    renderWorld();
+  }
+}
+
+function bindPromptEditorEvents(afterSave = render) {
+  content.querySelectorAll('.prompts-editable').forEach(el => {
+    el.addEventListener('input', () => {
+      if (el.tagName === "TEXTAREA" && el.dataset.key) promptDrafts[el.dataset.key] = el.value;
+      showSaveBar();
+    });
+    el.addEventListener('change', () => {
+      if (el.tagName === "TEXTAREA" && el.dataset.key) promptDrafts[el.dataset.key] = el.value;
+      showSaveBar();
+    });
+  });
+  content.querySelectorAll('[data-action="edit-text"]').forEach(btn => {
+    btn.addEventListener("click", () => { promptsEditing[btn.dataset.key] = true; afterSave(); });
+  });
+  content.querySelectorAll('[data-action="cancel-text"]').forEach(btn => {
+    btn.addEventListener("click", () => {
+      delete promptDrafts[btn.dataset.key];
+      promptsEditing[btn.dataset.key] = false;
+      afterSave();
+    });
+  });
+  content.querySelectorAll('[data-action="save-text"]').forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const key = btn.dataset.key;
+      const el = content.querySelector(`#prompt_${key}`);
+      if (el) promptDrafts[key] = el.value;
+      promptsEditing[key] = false;
+      await savePrompts();
+      afterSave();
+    });
+  });
+  content.querySelector("#promptsSaveBtn")?.addEventListener("click", async () => {
+    await savePrompts();
+    afterSave();
+  });
+}
 
 // History
 let historyState = { q: "", sessionKey: "", page: 1, dateFrom: "", dateTo: "" };
@@ -980,9 +1255,41 @@ function renderHistoryMessages(messages) {
         ${item.kind && item.kind !== "chat" ? `<span class="history-kind">${escHtml(item.kind)}</span>` : ""}
       </header>
       <div class="history-text">${escHtml(item.text || "")}</div>
+      ${renderHistorySceneletNote(item)}
+      ${renderHistoryToolNote(item)}
       ${item.scenelet ? `<details class="scenelet-details"><summary>inner scenelet</summary><pre>${escHtml(item.scenelet)}</pre></details>` : ""}
     </article>
   `).join("");
+}
+
+function renderHistorySceneletNote(item) {
+  if (item.role !== "assistant") return "";
+  if (item.scenelet) return "";
+  if (item.sceneletStatus !== "missing") return "";
+  const reason = item.sceneletError ? `: ${item.sceneletError}` : "";
+  return `<div class="history-tool-note">Scenelet: missing${escHtml(reason)}</div>`;
+}
+
+function renderHistoryToolNote(item) {
+  if (item.role !== "assistant") return "";
+  const usage = item.toolUsage;
+  const rag = item.ragUsage;
+  const webLine = (() => {
+    if (!usage) return "WebSearch: not recorded";
+    const searched = Number(usage.webSearch || 0) > 0;
+    const fetched = Number(usage.webFetch || 0) > 0;
+    const detail = [
+      searched ? `${Number(usage.webSearch)} search` : "",
+      fetched ? `${Number(usage.webFetch)} fetch` : "",
+    ].filter(Boolean).join(" · ");
+    return `WebSearch: ${searched ? "yes" : "no"}${detail ? ` (${detail})` : ""}`;
+  })();
+  const ragLine = (() => {
+    if (!rag) return "RAG: not recorded";
+    const detail = rag.eligible ? (Number(rag.chars || 0) > 0 ? `${Number(rag.chars)} chars` : "eligible") : "not eligible";
+    return `RAG: ${rag.used ? "yes" : "no"} (${detail})`;
+  })();
+  return `<div class="history-tool-note">${escHtml(webLine)}<br>${escHtml(ragLine)}</div>`;
 }
 
 function formatTime(value) {
@@ -1012,26 +1319,40 @@ function statusLabel(status) {
 }
 
 // Proactive
+let proactiveState = { profile: "" };
+
 async function renderProactive() {
   const d = await get("/api/proactive/intents");
-  const sessions = d.sessions || [];
+  const allSessions = d.sessions || [];
+  const profiles = [...new Set(allSessions.map(s => s.profile || "default"))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  if (!proactiveState.profile && profiles.length) proactiveState.profile = profiles.includes("白鹭千圣") ? "白鹭千圣" : profiles[0];
+  const sessions = proactiveState.profile ? allSessions.filter(s => (s.profile || "default") === proactiveState.profile) : allSessions;
   const now = Date.now();
 
-  const allIntents = sessions.flatMap(s => s.intents.map(i => ({ ...i, sessionName: s.sessionName, profile: s.profile, ai: s.ai, active: s.active, busy: s.busy })));
+  const allIntents = sessions.flatMap(s => (s.intents || []).map(i => ({ ...i, sessionName: s.sessionName, profile: s.profile, ai: s.ai, active: s.active, busy: s.busy })));
+  const lifeArcCount = sessions.reduce((sum, s) => sum + (s.lifeArcs || []).length, 0);
   const pendingCount = allIntents.filter(i => i.status === "pending").length;
   const sentCount = allIntents.filter(i => i.status === "sent").length;
   const cancelledCount = allIntents.filter(i => i.status === "cancelled").length;
 
   content.innerHTML = `
     <div class="panel">
-      <div class="panel-head"><h2>Proactive Intents</h2></div>
+      <div class="panel-head">
+        <h2>Proactive Intents</h2>
+        <span class="history-toolbar">
+          <select id="proactiveProfileSelect" class="history-date">
+            ${profiles.map(name => `<option value="${escAttr(name)}"${name === proactiveState.profile ? " selected" : ""}>${escHtml(name)}</option>`).join("")}
+          </select>
+        </span>
+      </div>
       <div class="proactive-summary">
         <div class="proactive-summary-item sessions"><span class="label">Sessions</span><span class="value">${sessions.length}</span></div>
         <div class="proactive-summary-item pending"><span class="label">Pending</span><span class="value">${pendingCount}</span></div>
         <div class="proactive-summary-item sent"><span class="label">Sent</span><span class="value">${sentCount}</span></div>
         <div class="proactive-summary-item cancelled"><span class="label">Done</span><span class="value">${cancelledCount}</span></div>
+        <div class="proactive-summary-item life-arcs"><span class="label">Life Arcs</span><span class="value">${lifeArcCount}</span></div>
       </div>
-      ${sessions.length ? sessions.map(s => renderProactiveSession(s, now)).join("") : '<div class="proactive-empty">No proactive intents yet. Intents are created when the scenelet engine detects opportunities for proactive replies.</div>'}
+      ${sessions.length ? sessions.map(s => renderProactiveSession(s, now)).join("") : '<div class="proactive-empty">No proactive intents or active life lines yet. They are created when the scenelet engine detects natural continuity.</div>'}
     </div>
   `;
 
@@ -1039,10 +1360,15 @@ async function renderProactive() {
   content.querySelectorAll(".proactive-intent-scenelet").forEach(el => {
     el.addEventListener("toggle", () => {});
   });
+  content.querySelector("#proactiveProfileSelect")?.addEventListener("change", e => {
+    proactiveState.profile = e.target.value;
+    renderProactive();
+  });
 }
 
 function renderProactiveSession(session, now) {
-  const intents = session.intents;
+  const intents = session.intents || [];
+  const lifeArcs = session.lifeArcs || [];
   const pending = intents.filter(i => i.status === "pending").reverse();
   const sent = intents.filter(i => i.status === "sent").reverse();
   const cancelled = intents.filter(i => i.status === "cancelled").reverse();
@@ -1093,8 +1419,9 @@ function renderProactiveSession(session, now) {
           <span class="badge badge-default">${escHtml(session.profile)}</span>
           ${session.active ? '<span class="resume-current">Active</span>' : ''}
         </div>
-        <span style="font-size:12px;color:var(--muted)">${total} intent${total !== 1 ? 's' : ''}</span>
+        <span style="font-size:12px;color:var(--muted)">${total} intent${total !== 1 ? 's' : ''} · ${lifeArcs.length} life line${lifeArcs.length !== 1 ? 's' : ''}</span>
       </div>
+      ${lifeArcs.length ? renderLifeArcList(lifeArcs, now) : ""}
       <div class="proactive-intent-list">
         ${pendingItems.length
           ? pendingItems.join("")
@@ -1102,6 +1429,38 @@ function renderProactiveSession(session, now) {
         ${sentVisible ? renderCollapsibleGroup("sent", sentVisible, sentItems) : ""}
         ${doneVisible ? renderCollapsibleGroup("done", doneVisible, standalone.map(i => renderProactiveIntent(i, now, 0))) : ""}
       </div>
+    </div>
+  `;
+}
+
+function renderLifeArcList(lifeArcs, now) {
+  return `
+    <div class="life-arc-list">
+      ${lifeArcs.map(a => renderLifeArc(a, now)).join("")}
+    </div>
+  `;
+}
+
+function renderLifeArc(arc, now) {
+  const expires = arc.expiresAt ? Date.parse(arc.expiresAt) : NaN;
+  const isExpiring = Number.isFinite(expires) && expires - now < 6 * 60 * 60 * 1000;
+  const kindLabels = { travel: "旅行", work: "工作/通告", school: "学校", personal: "个人", special_date: "特殊日" };
+  const kindBadge = arc.kind ? `<span class="life-arc-kind life-arc-kind-${escHtml(arc.kind)}">${kindLabels[arc.kind] || arc.kind}</span>` : "";
+  const timeRange = (arc.timeStart || arc.timeEnd) ? `
+    <div class="life-arc-timerange">
+      ${arc.timeStart ? `<span>开始: <time>${formatTime(arc.timeStart)}</time></span>` : ""}
+      ${arc.timeEnd ? `<span>结束: <time>${formatTime(arc.timeEnd)}</time></span>` : ""}
+    </div>` : "";
+  return `
+    <div class="life-arc-item ${isExpiring ? 'expiring' : ''}">
+      <div class="life-arc-top">
+        <strong>${kindBadge}${escHtml(arc.title || "(untitled life line)")}</strong>
+        ${arc.expiresAt ? `<time>到期: ${formatTime(arc.expiresAt)}</time>` : ""}
+      </div>
+      ${timeRange}
+      ${arc.currentState ? `<div class="life-arc-state">${escHtml(arc.currentState)}</div>` : ""}
+      ${arc.summary ? `<div class="life-arc-summary">${escHtml(arc.summary)}</div>` : ""}
+      ${arc.nextUsefulMoment ? `<div class="life-arc-next">${escHtml(arc.nextUsefulMoment)}</div>` : ""}
     </div>
   `;
 }

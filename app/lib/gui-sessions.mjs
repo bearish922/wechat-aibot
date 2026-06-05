@@ -1,6 +1,12 @@
 import { addRoute } from "./server.mjs";
 import { sessions, activeAI } from "./state.mjs";
 
+function hiddenWorldForProfile(profile) {
+  const worlds = globalThis.__wechatRoleWorlds;
+  const world = worlds?.get?.(profile || "默认");
+  return world?._worldSession || null;
+}
+
 export function registerSessionRoutes() {
   addRoute("GET", "/api/sessions", () => {
     const all = [];
@@ -17,6 +23,7 @@ export function registerSessionRoutes() {
             queue: s.queue?.length || 0,
             profile: s._profile || "默认",
             firstTurn: s._firstTurn,
+            hiddenWorld: hiddenWorldForProfile(s._profile || "默认"),
           });
         }
       }
@@ -37,10 +44,12 @@ export function registerSessionRoutes() {
         for (const s of u.list) {
           const active = s.id === u.activeId ? " [当前]" : "";
           const profile = s._profile || "默认";
+          const hiddenWorld = hiddenWorldForProfile(profile);
           const command = ai === "cc" ? `claude --resume ${s.sid}` : `codex resume ${s.sid}`;
           lines.push(`  ${s.name}${active}`);
           lines.push(`    角色: ${profile}`);
           lines.push(`    ${command}`);
+          if (hiddenWorld?.sid) lines.push(`    Hidden world: claude --resume ${hiddenWorld.sid}`);
           commands.push({
             ai,
             aiLabel,
@@ -49,6 +58,8 @@ export function registerSessionRoutes() {
             active: s.id === u.activeId,
             sid: s.sid,
             command,
+            hiddenWorldSid: hiddenWorld?.sid || "",
+            hiddenWorldFirstTurn: Boolean(hiddenWorld?.firstTurn),
           });
           lines.push("");
         }

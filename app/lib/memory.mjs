@@ -290,6 +290,21 @@ export function memoryListText(userId, options = {}) {
   return lines.join("\n");
 }
 
+export function listMemoryItems(userId, options = {}) {
+  const profile = options.profile || DEFAULT_ROLE;
+  const store = loadMemoryStore();
+  const { items } = ensureUserMemory(store, userId, profile);
+  return items.map(item => ({
+    id: item.id,
+    category: item.category,
+    text: item.text,
+    sensitive: Boolean(item.sensitive),
+    source: item.source || "",
+    createdAt: item.createdAt || null,
+    updatedAt: item.updatedAt || null,
+  }));
+}
+
 export function memoryMaintenanceNotice(userId, options = {}) {
   const profile = options.profile || DEFAULT_ROLE;
   const store = loadMemoryStore();

@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "roles": {
+    "白鹭千圣": {
+      "profile": "白鹭千圣",
+      "_worldState": null,
+      "_worldSession": {
+        "sid": "c43cce58-8443-4e32-b8cb-b11817d3e78d",
+        "firstTurn": true,
+        "model": "deepseek-v4-pro[1m]",
+        "startedAt": "2026-06-05T20:43:42.953Z",
+        "lastUsedAt": null,
+        "resetReason": "",
+        "lastUsage": null
+      },
+      "_worldLastOutput": null,
+      "_sceneState": {
+        "text": "凌晨关于晚安是否算数连续聊了几轮，沃沃最后用日语语音收场。手机扣枕边继续睡；十点排练，白天沃沃大概率会续上话题。",
+        "updatedAt": "2026-06-05T18:22:36.234Z",
+        "expiresAt": "2026-06-05T20:22:36.234Z"
+      },
+      "_lifeArcs": [
+        {
+          "id": "2c1ca7b6-71fb-408a-952a-e9daa9eeaf04",
+          "status": "active",
+          "title": "今日PasPale排练",
+          "summary": "周六有Pastel*Palettes排练，今晚不过分熬夜，明天需要保持状态",
+          "currentState": "晚间长聊后准备睡觉；凌晨被沃沃消息叫醒后连续聊了约二十分钟，最后以沃沃用日语语音道晚安收场。03:20 左右继续睡，十点排练，仍有数小时休息时间。",
+          "nextUsefulMoment": "排练前或休息时可能自然想起凌晨这场关于晚安有效期的小辩论。",
+          "source": "手动修正时间逻辑：凌晨几轮是一次被叫醒后的连续对话，不应累计为多次叫醒。",
+          "kind": "work",
+          "timeStart": "2026-06-06T10:00:00+09:00",
+          "timeEnd": "2026-06-06T17:00:00+09:00",
+          "createdAt": "2026-06-05T10:58:24.151Z",
+          "updatedAt": "2026-06-05T18:22:36.235Z",
+          "expiresAt": "2026-06-07T00:00:00+09:00",
+          "closedAt": null,
+          "closeReason": ""
+        }
+      ],
+      "_lastDailyShareSeedAt": "2026-06-05T03:05:30.466Z",
+      "_lastScheduleCheckAt": "2026-06-05T11:50:48.218Z",
+      "updatedAt": "2026-06-05T20:43:42.953Z"
+    },
+    "默认": {
+      "profile": "默认",
+      "_worldState": null,
+      "_worldSession": {
+        "sid": "69527c6f-03e7-410a-bc33-e32ea8beb72c",
+        "firstTurn": true,
+        "model": "deepseek-v4-pro[1m]",
+        "startedAt": "2026-06-05T20:43:42.954Z",
+        "lastUsedAt": null,
+        "resetReason": "",
+        "lastUsage": null
+      },
+      "_worldLastOutput": null,
+      "_sceneState": null,
+      "_lifeArcs": [],
+      "_lastDailyShareSeedAt": null,
+      "_lastScheduleCheckAt": null,
+      "updatedAt": "2026-06-05T20:43:42.954Z"
+    },
+    "长崎素世": {
+      "profile": "长崎素世",
+      "_worldState": null,
+      "_worldSession": {
+        "sid": "daccd0d5-f55c-44ee-8662-e92d40bffa58",
+        "firstTurn": true,
+        "model": "deepseek-v4-pro[1m]",
+        "startedAt": "2026-06-05T20:43:42.954Z",
+        "lastUsedAt": null,
+        "resetReason": "",
+        "lastUsage": null
+      },
+      "_worldLastOutput": null,
+      "_sceneState": null,
+      "_lifeArcs": [],
+      "_lastDailyShareSeedAt": null,
+      "_lastScheduleCheckAt": null,
+      "updatedAt": "2026-06-05T20:43:42.954Z"
+    },
+    "千早爱音": {
+      "profile": "千早爱音",
+      "_worldState": null,
+      "_worldSession": {
+        "sid": "55978167-f3eb-4c96-b4d7-1a532a43bcf7",
+        "firstTurn": true,
+        "model": "deepseek-v4-pro[1m]",
+        "startedAt": "2026-06-05T20:43:42.954Z",
+        "lastUsedAt": null,
+        "resetReason": "",
+        "lastUsage": null
+      },
+      "_worldLastOutput": null,
+      "_sceneState": null,
+      "_lifeArcs": [],
+      "_lastDailyShareSeedAt": null,
+      "_lastScheduleCheckAt": null,
+      "updatedAt": "2026-06-05T20:43:42.954Z"
+    },
+    "丸山彩": {
+      "profile": "丸山彩",
+      "_worldState": null,
+      "_worldSession": {
+        "sid": "701f81fd-245b-4597-b801-d53ddaaa098b",
+        "firstTurn": true,
+        "model": "deepseek-v4-pro[1m]",
+        "startedAt": "2026-06-05T20:43:42.954Z",
+        "lastUsedAt": null,
+        "resetReason": "",
+        "lastUsage": null
+      },
+      "_worldLastOutput": null,
+      "_sceneState": null,
+      "_lifeArcs": [],
+      "_lastDailyShareSeedAt": null,
+      "_lastScheduleCheckAt": null,
+      "updatedAt": "2026-06-05T20:43:42.954Z"
+    }
+  }
+}

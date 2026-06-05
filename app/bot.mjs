@@ -132,6 +132,8 @@ function getSceneConfig() {
     proactiveDailyMax: p.proactiveDailyMax || 8,
     dailyShareSeedIntervalMs: p.dailyShareSeedIntervalMs || 2700000,
     dailyShareMinIdleMs: p.dailyShareMinIdleMs || 1800000,
+    scheduleCheckIntervalMs: p.scheduleCheckIntervalMs || 86400000,
+    scheduleMaxActive: p.scheduleMaxActive || 2,
     ragTopK: p.ragTopK || 6,
     ragMinScore: p.ragMinScore || 0.48,
     ragResultMaxChars: p.ragResultMaxChars || 3600,
@@ -144,6 +146,7 @@ const SESSION_RELEASE_GRACE_MS = 800;
 const TOKEN_FILE = dataPath("wechat-token.json");
 const PROFILE_FILE = rootPath("wechat-profiles.json");
 const SESSION_FILE = dataPath("wechat-sessions.json");
+const ROLE_WORLD_FILE = dataPath("wechat-worlds.json");
 const SESSION_REF_FILE = dataPath("会话恢复指令.txt");
 const LOGS_DIR = dataPath("logs");
 const LOG_RETENTION_DAYS = Number(process.env.WECHAT_LOG_RETENTION_DAYS ?? configValue("logs.retentionDays", 30));
@@ -169,7 +172,7 @@ const VOICE_BATCH_SIZE = configNumber("voice.batchSize", 8);
 const VOICE_SAMPLE_RATE = configNumber("voice.sampleRate", 24000);
 const VOICE_NO_ALIGN = configBool("voice.noAlign", true);
 const VOICE_TIMEOUT_MS = configNumber("voice.timeoutMs", 180_000);
-import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, rememberRecentKaomoji, getChatStyle, localTimePeriod, formatLocalChatReality, expressionCapabilityPrompt, loadPrompts } from "./lib/reply.mjs";
+import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, rememberRecentKaomoji, getChatStyle, formatZonedTimeParts, formatLocalChatReality, expressionCapabilityPrompt, loadPrompts } from "./lib/reply.mjs";
 import { shouldSkipRag } from "./lib/rag.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
@@ -180,15 +183,20 @@ import { registerHistoryRoutes } from "./lib/gui-history.mjs";
 import { registerProactiveRoutes } from "./lib/gui-proactive.mjs";
 import { registerMemoryRoutes } from "./lib/gui-memory.mjs";
 import { registerPromptsRoutes } from "./lib/gui-prompts.mjs";
+import { registerWorldRoutes } from "./lib/gui-world.mjs";
 import { appendChatEvent } from "./lib/chat-history.mjs";
 
 // ─── STATE ──────────────────────────────────────────────────
 import { getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, recentInputs, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
 import { uuid, sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost, CDN_BASE_URL } from "./lib/wechat.mjs";
-import { applyMemoryOps, buildMemoryWriterSystemPrompt, isMemoryEnabled, shouldRunMemoryWriter, memoryListText, memoryMaintenanceNotice, normalizeMemoryCategory, parseMemoryWriterOutput, renderMemoryPrompt } from "./lib/memory.mjs";
+import { applyMemoryOps, isMemoryEnabled, listMemoryItems, shouldRunMemoryWriter, memoryListText, memoryMaintenanceNotice, normalizeMemoryCategory, renderMemoryPrompt } from "./lib/memory.mjs";
 const LONG_POLL_TIMEOUT_MS = 35_000;
 let lastProactiveCheckAt = 0;
+const roleWorlds = new Map();
+globalThis.__wechatRoleWorlds = roleWorlds;
+globalThis.__wechatSaveRoleWorlds = saveRoleWorlds;
+globalThis.__wechatSaveSessions = saveSessions;
 
 function loadModelNames() {
   // CC: read from ~/.claude/settings.json
@@ -395,13 +403,18 @@ function makeSession(name, profile = null) {
     _kaomojiTurn: 0,
     _profile: profile,
     _lastFailedTurn: null,
+    _worldState: null,
+    _worldSession: null,
+    _worldLastOutput: null,
     _sceneState: null,
+    _lifeArcs: [],
     _visibleHistory: [],
     _proactiveIntents: [],
     _lastUserAt: null,
     _lastAssistantAt: null,
     _lastProactiveAt: null,
     _lastDailyShareSeedAt: null,
+    _lastScheduleCheckAt: null,
     _lastContextToken: null,
   };
 }
@@ -468,83 +481,397 @@ function normalizeProactiveIntents(raw) {
   for (const intent of raw.map(normalizeProactiveIntent).filter(Boolean)) {
     byId.set(intent.id, { ...byId.get(intent.id), ...intent });
   }
-  const merged = [];
-  for (const intent of [...byId.values()]
-    .sort((a, b) => Date.parse(a.createdAt || a.scheduledAt || 0) - Date.parse(b.createdAt || b.scheduledAt || 0))) {
-    const existing = intent.status === "pending"
-      ? merged.find(x => x.status === "pending" && isSimilarProactiveIntent(x, intent))
-      : null;
-    if (existing) {
-      mergeProactiveIntent(existing, intent);
-    } else {
-      merged.push(intent);
+  return [...byId.values()]
+    .sort((a, b) => Date.parse(a.createdAt || a.scheduledAt || 0) - Date.parse(b.createdAt || b.scheduledAt || 0))
+    .slice(-20);
+}
+
+function emptyToolUsage() {
+  return { webSearch: 0, webFetch: 0, tools: [] };
+}
+
+function normalizeToolUsage(raw = null) {
+  if (!raw || typeof raw !== "object") return null;
+  const tools = Array.isArray(raw.tools)
+    ? [...new Set(raw.tools.map(x => String(x || "").trim()).filter(Boolean))]
+    : [];
+  return {
+    webSearch: Math.max(0, Number(raw.webSearch || raw.web_search_requests || 0) || 0),
+    webFetch: Math.max(0, Number(raw.webFetch || raw.web_fetch_requests || 0) || 0),
+    tools,
+  };
+}
+
+function emptyWorldState() {
+  return {
+    location: "",
+    activity: "",
+    awakeState: "",
+    currentPlan: "",
+    openThreads: [],
+    lastWorldEventAt: null,
+    updatedAt: null,
+  };
+}
+
+function normalizeWorldState(raw = null) {
+  if (!raw || typeof raw !== "object") return null;
+  const openThreads = Array.isArray(raw.openThreads || raw.open_threads)
+    ? (raw.openThreads || raw.open_threads).map(x => String(x || "").trim()).filter(Boolean).slice(0, 8)
+    : [];
+  const state = {
+    location: raw.location ? String(raw.location).slice(0, 160) : "",
+    activity: raw.activity ? String(raw.activity).slice(0, 200) : "",
+    awakeState: raw.awakeState || raw.awake_state ? String(raw.awakeState || raw.awake_state).slice(0, 80) : "",
+    currentPlan: raw.currentPlan || raw.current_plan ? String(raw.currentPlan || raw.current_plan).slice(0, 300) : "",
+    openThreads,
+    lastWorldEventAt: raw.lastWorldEventAt || raw.last_world_event_at ? String(raw.lastWorldEventAt || raw.last_world_event_at) : null,
+    updatedAt: raw.updatedAt || raw.updated_at ? String(raw.updatedAt || raw.updated_at) : null,
+  };
+  return Object.values(state).some(Boolean) || openThreads.length ? state : null;
+}
+
+function applyWorldStatePatch(sess, rawPatch = null) {
+  if (!sess || !rawPatch || typeof rawPatch !== "object") return;
+  const current = normalizeWorldState(sess._worldState) || emptyWorldState();
+  const patch = normalizeWorldState(rawPatch);
+  if (!patch) return;
+  sess._worldState = normalizeWorldState({
+    ...current,
+    ...Object.fromEntries(Object.entries(patch).filter(([, v]) => {
+      if (Array.isArray(v)) return v.length;
+      return v !== null && v !== "";
+    })),
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function normalizeWorldSession(raw = null) {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    sid: raw.sid ? String(raw.sid) : null,
+    firstTurn: raw.firstTurn === true || raw._firstTurn === true,
+    model: raw.model ? String(raw.model) : SCENELET_MODEL,
+    startedAt: raw.startedAt ? String(raw.startedAt) : null,
+    lastUsedAt: raw.lastUsedAt ? String(raw.lastUsedAt) : null,
+    resetReason: raw.resetReason ? String(raw.resetReason).slice(0, 300) : "",
+    lastUsage: raw.lastUsage && typeof raw.lastUsage === "object" ? raw.lastUsage : null,
+  };
+}
+
+function normalizeWorldLastOutput(raw = null) {
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    timestamp: raw.timestamp ? String(raw.timestamp) : null,
+    innerScenelet: raw.innerScenelet ? String(raw.innerScenelet).slice(0, 4000) : "",
+    nextSceneState: raw.nextSceneState ? String(raw.nextSceneState).slice(0, getSceneConfig().sceneStateMaxChars) : "",
+    worldStatePatch: raw.worldStatePatch && typeof raw.worldStatePatch === "object" ? raw.worldStatePatch : null,
+    dailyShareCandidates: Array.isArray(raw.dailyShareCandidates) ? raw.dailyShareCandidates.slice(0, 5) : [],
+    scheduleCandidates: Array.isArray(raw.scheduleCandidates) ? raw.scheduleCandidates.slice(0, 5) : [],
+    timeReasoning: raw.timeReasoning && typeof raw.timeReasoning === "object" ? raw.timeReasoning : null,
+    continuityWarnings: Array.isArray(raw.continuityWarnings) ? raw.continuityWarnings.map(x => String(x).slice(0, 300)).slice(0, 8) : [],
+  };
+}
+
+function ensureWorldSession(sess) {
+  if (!sess._worldSession) {
+    const nowIso = new Date().toISOString();
+    sess._worldSession = {
+      sid: uuid(),
+      firstTurn: true,
+      model: SCENELET_MODEL,
+      startedAt: nowIso,
+      lastUsedAt: null,
+      resetReason: "",
+      lastUsage: null,
+    };
+  } else {
+    sess._worldSession = normalizeWorldSession(sess._worldSession) || null;
+    if (!sess._worldSession) return ensureWorldSession(sess);
+    if (!sess._worldSession.sid) {
+      sess._worldSession.sid = uuid();
+      sess._worldSession.firstTurn = true;
+    }
+    if (!sess._worldSession.model) sess._worldSession.model = SCENELET_MODEL;
+  }
+  return sess._worldSession;
+}
+
+function roleWorldKey(profile) {
+  return String(profile || "默认").trim() || "默认";
+}
+
+function normalizeRoleWorld(raw = {}, profile = "默认") {
+  const nowIso = new Date().toISOString();
+  return {
+    profile: roleWorldKey(raw.profile || profile),
+    _worldState: normalizeWorldState(raw._worldState || raw.worldState),
+    _worldSession: normalizeWorldSession(raw._worldSession || raw.worldSession) || {
+      sid: uuid(),
+      firstTurn: true,
+      model: SCENELET_MODEL,
+      startedAt: nowIso,
+      lastUsedAt: null,
+      resetReason: "",
+      lastUsage: null,
+    },
+    _worldLastOutput: normalizeWorldLastOutput(raw._worldLastOutput || raw.worldLastOutput),
+    _sceneState: normalizeSceneState(raw._sceneState || raw.sceneState),
+    _lifeArcs: normalizeLifeArcs(raw._lifeArcs || raw.lifeArcs, { includeClosed: true }),
+    _lastDailyShareSeedAt: raw._lastDailyShareSeedAt ? String(raw._lastDailyShareSeedAt) : null,
+    _lastScheduleCheckAt: raw._lastScheduleCheckAt ? String(raw._lastScheduleCheckAt) : null,
+    updatedAt: raw.updatedAt ? String(raw.updatedAt) : nowIso,
+  };
+}
+
+function getRoleWorld(profile) {
+  const key = roleWorldKey(profile);
+  if (!roleWorlds.has(key)) {
+    roleWorlds.set(key, normalizeRoleWorld({ profile: key }, key));
+  }
+  return roleWorlds.get(key);
+}
+
+function roleWorldSnapshot(world) {
+  return {
+    profile: roleWorldKey(world?.profile),
+    _worldState: normalizeWorldState(world?._worldState),
+    _worldSession: normalizeWorldSession(world?._worldSession),
+    _worldLastOutput: normalizeWorldLastOutput(world?._worldLastOutput),
+    _sceneState: normalizeSceneState(world?._sceneState),
+    _lifeArcs: normalizeLifeArcs(world?._lifeArcs, { includeClosed: true }),
+    _lastDailyShareSeedAt: world?._lastDailyShareSeedAt || null,
+    _lastScheduleCheckAt: world?._lastScheduleCheckAt || null,
+    updatedAt: world?.updatedAt || new Date().toISOString(),
+  };
+}
+
+function saveRoleWorlds() {
+  try {
+    ensureDir(DATA_DIR);
+    const data = { version: 1, roles: {} };
+    for (const [profile, world] of roleWorlds) {
+      data.roles[profile] = roleWorldSnapshot(world);
+    }
+    fs.writeFileSync(ROLE_WORLD_FILE, JSON.stringify(data, null, 2) + "\n", "utf-8");
+  } catch (e) {
+    log("⚠️", `保存 hidden worlds 失败: ${e.message}`);
+  }
+}
+
+function loadRoleWorlds() {
+  roleWorlds.clear();
+  try {
+    if (fs.existsSync(ROLE_WORLD_FILE)) {
+      const data = JSON.parse(fs.readFileSync(ROLE_WORLD_FILE, "utf-8"));
+      const roles = data?.roles && typeof data.roles === "object" ? data.roles : {};
+      for (const [profile, raw] of Object.entries(roles)) {
+        roleWorlds.set(roleWorldKey(profile), normalizeRoleWorld(raw, profile));
+      }
+    }
+  } catch (e) {
+    log("⚠️", `加载 hidden worlds 失败: ${e.message}`);
+  }
+  migrateRoleWorldsFromSessions();
+  for (const profile of Object.keys(profileTemplates || {})) getRoleWorld(profile);
+  saveRoleWorlds();
+}
+
+function migrateRoleWorldsFromSessions() {
+  for (const map of Object.values(sessions)) {
+    for (const [, u] of map) {
+      for (const sess of u.list || []) {
+        const profile = sessionProfile(sess);
+        if (!profile || !profileTemplates[profile]) continue;
+        const key = roleWorldKey(profile);
+        if (roleWorlds.has(key)) continue;
+        const hasWorldData = sess._worldSession || sess._worldState || sess._worldLastOutput || sess._lifeArcs?.length || sess._sceneState;
+        if (!hasWorldData) continue;
+        roleWorlds.set(key, normalizeRoleWorld({
+          profile: key,
+          _worldState: sess._worldState,
+          _worldSession: sess._worldSession,
+          _worldLastOutput: sess._worldLastOutput,
+          _sceneState: sess._sceneState,
+          _lifeArcs: sess._lifeArcs,
+          _lastDailyShareSeedAt: sess._lastDailyShareSeedAt,
+          _lastScheduleCheckAt: sess._lastScheduleCheckAt,
+        }, key));
+      }
     }
   }
-  return merged.slice(-20);
 }
 
-function compactIntentText(text) {
-  return String(text || "")
-    .toLowerCase()
-    .replace(/[\s"'`.,!?;:()[\]{}<>，。！？；：「」『』（）【】、…—\-_*~]+/gu, "");
+function syncRoleWorldToSession(sess, profile) {
+  if (!sess || !profile) return;
+  const world = getRoleWorld(profile);
+  sess._worldState = normalizeWorldState(world._worldState);
+  sess._worldSession = normalizeWorldSession(world._worldSession);
+  sess._worldLastOutput = normalizeWorldLastOutput(world._worldLastOutput);
+  sess._lifeArcs = normalizeLifeArcs(world._lifeArcs, { includeClosed: true });
+  if (world._sceneState) sess._sceneState = normalizeSceneState(world._sceneState);
+  sess._lastDailyShareSeedAt = world._lastDailyShareSeedAt || sess._lastDailyShareSeedAt || null;
+  sess._lastScheduleCheckAt = world._lastScheduleCheckAt || sess._lastScheduleCheckAt || null;
 }
 
-function proactiveIntentTerms(intent) {
-  const text = [
-    intent?.messageIntent,
-    intent?.basis,
-    intent?.sourceUserText,
-  ].filter(Boolean).join("\n").toLowerCase();
-  const terms = new Set();
-  for (const match of text.matchAll(/[\p{Script=Han}]+|[a-z0-9_]{3,}/gu)) {
-    const token = match[0];
-    if (/^[a-z0-9_]+$/u.test(token)) {
-      terms.add(token);
+function mergeToolUsage(...items) {
+  const merged = emptyToolUsage();
+  for (const item of items.map(normalizeToolUsage).filter(Boolean)) {
+    merged.webSearch += item.webSearch;
+    merged.webFetch += item.webFetch;
+    for (const tool of item.tools) {
+      if (!merged.tools.includes(tool)) merged.tools.push(tool);
+    }
+  }
+  return merged;
+}
+
+function markToolUsage(usage, name, count = 1) {
+  if (!usage || !name) return;
+  const tool = String(name);
+  const lower = tool.toLowerCase();
+  if (!usage.tools.includes(tool)) usage.tools.push(tool);
+  if (/web[_-]?search|websearch/i.test(lower)) usage.webSearch += count;
+  if (/web[_-]?fetch|webfetch/i.test(lower)) usage.webFetch += count;
+}
+
+function toolUsageFromUsage(raw = null) {
+  const usage = raw?.usage || raw;
+  if (!usage || typeof usage !== "object") return emptyToolUsage();
+  const server = usage.server_tool_use || {};
+  const result = emptyToolUsage();
+  result.webSearch += Number(server.web_search_requests || usage.web_search_requests || usage.webSearchRequests || 0) || 0;
+  result.webFetch += Number(server.web_fetch_requests || usage.web_fetch_requests || usage.webFetchRequests || 0) || 0;
+  if (result.webSearch > 0) result.tools.push("WebSearch");
+  if (result.webFetch > 0) result.tools.push("WebFetch");
+  return result;
+}
+
+function usageSummary(raw = null, modelUsage = null) {
+  const usage = raw?.usage || raw || {};
+  const models = modelUsage && typeof modelUsage === "object" ? modelUsage : raw?.modelUsage;
+  const costFromModels = models && typeof models === "object"
+    ? Object.values(models).reduce((sum, item) => sum + (Number(item?.costUSD || 0) || 0), 0)
+    : 0;
+  return {
+    input_tokens: Number(usage.input_tokens || 0) || 0,
+    cache_read_input_tokens: Number(usage.cache_read_input_tokens || 0) || 0,
+    cache_creation_input_tokens: Number(usage.cache_creation_input_tokens || 0) || 0,
+    output_tokens: Number(usage.output_tokens || 0) || 0,
+    cost_usd: Number(raw?.total_cost_usd || costFromModels || 0) || 0,
+    modelUsage: models || null,
+  };
+}
+
+function writeHiddenUsageEvent(event) {
+  try {
+    ensureDir(LOGS_DIR);
+    fs.appendFileSync(path.join(LOGS_DIR, "hidden-usage.jsonl"), JSON.stringify(event) + "\n", "utf-8");
+  } catch {}
+}
+
+async function checkIntentDuplicateFlash(candidate, existingPending) {
+  if (!existingPending.length) return false;
+  const prompt = [
+    "你判断一条新生成的主动消息意图，是否与已有意图本质上是重复的。",
+    "重复 = 讲的是同一件事、目的相同，只是措辞不同。",
+    "不重复 = 不同话题，或相同话题但目的明显不同（如追问结果 vs 分享经验）。",
+    "",
+    "新意图：",
+    JSON.stringify({ kind: candidate.kind, intent: candidate.messageIntent }, null, 2),
+    "",
+    "已有意图（编号从1开始）：",
+    existingPending.map((e, i) => `${i + 1}. [${e.kind}] ${e.messageIntent}`).join("\n"),
+    "",
+    "只输出 JSON，不要解释：",
+    JSON.stringify({ duplicate: false }, null, 2),
+  ].join("\n");
+  const result = await runHiddenJson(prompt, {
+    label: "intent_dedup",
+    bare: true,
+    model: CLAUDE_FAST_MODEL,
+    timeoutMs: 30_000,
+  });
+  return Boolean(result?.duplicate);
+}
+
+function lifeArcPromptItems(sess) {
+  return normalizeLifeArcs(sess?._lifeArcs).map(arc => ({
+    id: arc.id,
+    title: arc.title,
+    summary: arc.summary,
+    current_state: arc.currentState,
+    next_useful_moment: arc.nextUsefulMoment,
+    kind: arc.kind || null,
+    time_start: arc.timeStart || null,
+    time_end: arc.timeEnd || null,
+    updated_at: arc.updatedAt,
+    expires_at: arc.expiresAt,
+  }));
+}
+
+function applyLifeArcOps(sess, rawOps = []) {
+  if (!sess || !Array.isArray(rawOps) || !rawOps.length) return;
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const defaultExpiresAt = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString();
+  const arcs = normalizeLifeArcs(sess._lifeArcs, { includeClosed: true });
+  const findArc = (raw) => {
+    const id = raw?.id ? String(raw.id) : "";
+    if (id) {
+      const byId = arcs.find(a => a.id === id);
+      if (byId) return byId;
+    }
+    const title = raw?.title ? String(raw.title).trim().toLowerCase() : "";
+    return title ? arcs.find(a => a.title.toLowerCase() === title) : null;
+  };
+
+  for (const raw of rawOps.slice(0, 5)) {
+    if (!raw || typeof raw !== "object") continue;
+    const op = String(raw.op || "").toLowerCase();
+    if (!["create", "update", "close"].includes(op)) continue;
+    const existing = findArc(raw);
+    if (op === "close") {
+      if (!existing) continue;
+      existing.status = "closed";
+      existing.updatedAt = nowIso;
+      existing.closedAt = nowIso;
+      existing.closeReason = raw.reason ? String(raw.reason).slice(0, 300) : existing.closeReason || "closed by scenelet";
+      existing.expiresAt = nowIso;
       continue;
     }
-    if (token.length <= 4) {
-      terms.add(token);
-    }
-    for (let i = 0; i < token.length - 1; i += 1) {
-      terms.add(token.slice(i, i + 2));
-    }
-  }
-  for (const weak of ["用户", "沃沃", "千圣", "自然", "顺便", "一句", "问问", "分享", "状态", "今天", "时候", "消息"]) {
-    terms.delete(weak);
-  }
-  return terms;
-}
 
-function isSimilarProactiveIntent(a, b) {
-  if (!a || !b || a.kind !== b.kind) return false;
-  const aMain = compactIntentText(a.messageIntent);
-  const bMain = compactIntentText(b.messageIntent);
-  if (aMain && bMain && aMain.length >= 10 && bMain.length >= 10 && (aMain.includes(bMain) || bMain.includes(aMain))) {
-    return true;
+    const expiresAt = raw.expires_at || raw.expiresAt ? String(raw.expires_at || raw.expiresAt) : (existing?.expiresAt || defaultExpiresAt);
+    const lifeArcKinds = ["travel", "work", "school", "personal", "special_date"];
+    const kind = lifeArcKinds.includes(raw.kind) ? raw.kind : (existing?.kind || null);
+    const patch = {
+      title: raw.title ? String(raw.title).trim().slice(0, 80) : existing?.title || "",
+      summary: raw.summary ? String(raw.summary).trim().slice(0, 500) : existing?.summary || "",
+      currentState: raw.current_state || raw.currentState ? String(raw.current_state || raw.currentState).trim().slice(0, 500) : existing?.currentState || "",
+      nextUsefulMoment: raw.next_useful_moment || raw.nextUsefulMoment ? String(raw.next_useful_moment || raw.nextUsefulMoment).trim().slice(0, 300) : existing?.nextUsefulMoment || "",
+      source: raw.reason ? String(raw.reason).trim().slice(0, 300) : existing?.source || "",
+      kind,
+      timeStart: raw.time_start || raw.timeStart ? String(raw.time_start || raw.timeStart) : (existing?.timeStart || null),
+      timeEnd: raw.time_end || raw.timeEnd ? String(raw.time_end || raw.timeEnd) : (existing?.timeEnd || null),
+      expiresAt,
+    };
+    if (!patch.title && !patch.summary && !patch.currentState) continue;
+    if (existing) {
+      Object.assign(existing, patch, { status: "active", updatedAt: nowIso });
+    } else if (op === "create") {
+      arcs.push({
+        id: crypto.randomUUID(),
+        status: "active",
+        ...patch,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        closedAt: null,
+        closeReason: "",
+      });
+    }
   }
-  const aTerms = proactiveIntentTerms(a);
-  const bTerms = proactiveIntentTerms(b);
-  if (!aTerms.size || !bTerms.size) return false;
-  let common = 0;
-  for (const term of aTerms) {
-    if (bTerms.has(term)) common += 1;
-  }
-  const coverage = common / Math.min(aTerms.size, bTerms.size);
-  return common >= 5 && coverage >= 0.35;
-}
 
-function mergeProactiveIntent(existing, incoming) {
-  if (!existing || !incoming) return existing;
-  existing.scheduledAt = incoming.scheduledAt || existing.scheduledAt;
-  existing.expiresAt = incoming.expiresAt || existing.expiresAt;
-  existing.sourceTurnAt = incoming.sourceTurnAt || existing.sourceTurnAt;
-  existing.sourceUserText = incoming.sourceUserText || existing.sourceUserText;
-  existing.basis = incoming.basis || existing.basis;
-  existing.cancelIf = incoming.cancelIf?.length ? incoming.cancelIf : existing.cancelIf;
-  existing.innerScenelet = incoming.innerScenelet || existing.innerScenelet;
-  existing.messageIntent = incoming.messageIntent || existing.messageIntent;
-  existing.lastCheckedAt = incoming.lastCheckedAt || existing.lastCheckedAt;
-  return existing;
+  sess._lifeArcs = normalizeLifeArcs(arcs, { includeClosed: true }).slice(-6);
 }
 
 function hydrateSession(ai, raw = {}) {
@@ -561,13 +888,18 @@ function hydrateSession(ai, raw = {}) {
     _kaomojiTurn: raw._kaomojiTurn || 0,
     _profile: raw._profile ?? null,
     _lastFailedTurn: normalizeFailedTurn(raw._lastFailedTurn),
+    _worldState: normalizeWorldState(raw._worldState),
+    _worldSession: normalizeWorldSession(raw._worldSession),
+    _worldLastOutput: normalizeWorldLastOutput(raw._worldLastOutput),
     _sceneState: normalizeSceneState(raw._sceneState),
+    _lifeArcs: normalizeLifeArcs(raw._lifeArcs, { includeClosed: true }),
     _visibleHistory: normalizeVisibleHistory(raw._visibleHistory),
     _proactiveIntents: normalizeProactiveIntents(raw._proactiveIntents),
     _lastUserAt: raw._lastUserAt ? String(raw._lastUserAt) : null,
     _lastAssistantAt: raw._lastAssistantAt ? String(raw._lastAssistantAt) : null,
     _lastProactiveAt: raw._lastProactiveAt ? String(raw._lastProactiveAt) : null,
     _lastDailyShareSeedAt: raw._lastDailyShareSeedAt ? String(raw._lastDailyShareSeedAt) : null,
+    _lastScheduleCheckAt: raw._lastScheduleCheckAt ? String(raw._lastScheduleCheckAt) : null,
     _lastContextToken: raw._lastContextToken ? String(raw._lastContextToken) : null,
   };
 }
@@ -590,13 +922,18 @@ function saveSessions() {
           _kaomojiTurn: s._kaomojiTurn || 0,
           _profile: s._profile ?? null,
           _lastFailedTurn: normalizeFailedTurn(s._lastFailedTurn),
+          _worldState: normalizeWorldState(s._worldState),
+          _worldSession: normalizeWorldSession(s._worldSession),
+          _worldLastOutput: normalizeWorldLastOutput(s._worldLastOutput),
           _sceneState: normalizeSceneState(s._sceneState),
+          _lifeArcs: normalizeLifeArcs(s._lifeArcs, { includeClosed: true }),
           _visibleHistory: normalizeVisibleHistory(s._visibleHistory),
           _proactiveIntents: normalizeProactiveIntents(s._proactiveIntents),
           _lastUserAt: s._lastUserAt || null,
           _lastAssistantAt: s._lastAssistantAt || null,
           _lastProactiveAt: s._lastProactiveAt || null,
           _lastDailyShareSeedAt: s._lastDailyShareSeedAt || null,
+          _lastScheduleCheckAt: s._lastScheduleCheckAt || null,
           _lastContextToken: s._lastContextToken || null,
         })),
       };
@@ -604,6 +941,7 @@ function saveSessions() {
     data[ai] = aiData;
   }
   fs.writeFileSync(SESSION_FILE, JSON.stringify(data, null, 2));
+  saveRoleWorlds();
 
   // Human-readable resume reference file
   const lines = [];
@@ -842,6 +1180,58 @@ function saveInboundBuffer(buf, { kind, mime, originalFilename }) {
   const filePath = path.join(INBOUND_MEDIA_DIR, `${stamp}-${crypto.randomUUID().slice(0, 8)}-${base}${ext}`);
   fs.writeFileSync(filePath, buf);
   return filePath;
+}
+
+function normalizeLifeArc(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const id = raw.id ? String(raw.id) : "";
+  const title = raw.title ? String(raw.title).trim().slice(0, 80) : "";
+  const summary = raw.summary ? String(raw.summary).trim().slice(0, 500) : "";
+  const currentState = raw.currentState || raw.current_state ? String(raw.currentState || raw.current_state).trim().slice(0, 500) : "";
+  if (!id || (!title && !summary && !currentState)) return null;
+  const nowIso = new Date().toISOString();
+  const status = ["active", "closed"].includes(raw.status) ? raw.status : "active";
+  const createdAt = raw.createdAt || raw.created_at ? String(raw.createdAt || raw.created_at) : nowIso;
+  const updatedAt = raw.updatedAt || raw.updated_at ? String(raw.updatedAt || raw.updated_at) : createdAt;
+  const defaultExpiresAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+  const rawExpiresAt = raw.expiresAt || raw.expires_at ? String(raw.expiresAt || raw.expires_at) : defaultExpiresAt;
+  const expiresAt = Number.isFinite(Date.parse(rawExpiresAt)) ? rawExpiresAt : defaultExpiresAt;
+  const lifeArcKinds = ["travel", "work", "school", "personal", "special_date"];
+  const kind = lifeArcKinds.includes(raw.kind) ? raw.kind : null;
+  const timeStart = raw.timeStart || raw.time_start ? String(raw.timeStart || raw.time_start) : null;
+  const timeEnd = raw.timeEnd || raw.time_end ? String(raw.timeEnd || raw.time_end) : null;
+  return {
+    id,
+    status,
+    title,
+    summary,
+    currentState,
+    nextUsefulMoment: raw.nextUsefulMoment || raw.next_useful_moment ? String(raw.nextUsefulMoment || raw.next_useful_moment).trim().slice(0, 300) : "",
+    source: raw.source ? String(raw.source).trim().slice(0, 300) : "",
+    kind,
+    timeStart,
+    timeEnd,
+    createdAt,
+    updatedAt,
+    expiresAt,
+    closedAt: raw.closedAt || raw.closed_at ? String(raw.closedAt || raw.closed_at) : null,
+    closeReason: raw.closeReason || raw.close_reason ? String(raw.closeReason || raw.close_reason).trim().slice(0, 300) : "",
+  };
+}
+
+function normalizeLifeArcs(raw, { includeClosed = false } = {}) {
+  if (!Array.isArray(raw)) return [];
+  const nowMs = Date.now();
+  const byId = new Map();
+  for (const arc of raw.map(normalizeLifeArc).filter(Boolean)) {
+    const expiresMs = Date.parse(arc.expiresAt || "");
+    if (!includeClosed && arc.status === "active" && Number.isFinite(expiresMs) && expiresMs < nowMs) continue;
+    if (!includeClosed && arc.status !== "active") continue;
+    byId.set(arc.id, { ...byId.get(arc.id), ...arc });
+  }
+  return [...byId.values()]
+    .sort((a, b) => Date.parse(a.updatedAt || a.createdAt || 0) - Date.parse(b.updatedAt || b.createdAt || 0))
+    .slice(-6);
 }
 
 function wavFromPcm16le(pcm, sampleRate) {
@@ -1410,7 +1800,7 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
   if (profile && profileTemplates[profile]) systemPromptParts.push(profileTemplates[profile]);
   const pinnedProfileRules = loadPinnedProfileRules(profile);
   if (pinnedProfileRules) systemPromptParts.push(pinnedProfileRules);
-  if (memoryPrompt && options.includeMemoryInSystem !== false) systemPromptParts.push(memoryPrompt);
+  if (memoryPrompt && options.includeMemoryInSystem === true) systemPromptParts.push(memoryPrompt);
   if (stylePrompt && options.includeStyleInSystem !== false) systemPromptParts.push(stylePrompt);
   const systemPromptFile = systemPromptParts.length
     ? path.join(RUNTIME_DIR, `.claude_system_${crypto.randomUUID()}.txt`)
@@ -1503,7 +1893,6 @@ function buildCodexPrompt(ai, userBody, ragContext, stylePrompt, memoryPrompt = 
   }
   const pinnedProfileRules = loadPinnedProfileRules(profile);
   if (pinnedProfileRules) systemParts.push(pinnedProfileRules);
-  if (memoryPrompt) systemParts.push(memoryPrompt);
   if (stylePrompt) systemParts.push(stylePrompt);
   let prompt = systemParts.length ? `${systemParts.join("\n\n---\n\n")}\n\n---\n\n${userBody}` : userBody;
   if (ragContext) {
@@ -1604,9 +1993,12 @@ function buildRagContextBlock(ragContext) {
   ].filter(Boolean).join("\n");
 }
 
-function buildTurnBody(userBody, ragContext = "", sceneContext = "") {
+function buildTurnBody(userBody, ragContext = "", sceneContext = "", memoryPrompt = "") {
   const sections = [];
   const now = new Date();
+  if (memoryPrompt) {
+    sections.push(memoryPrompt);
+  }
   if (sceneContext) {
     sections.push(sceneContext);
   }
@@ -1616,15 +2008,189 @@ function buildTurnBody(userBody, ragContext = "", sceneContext = "") {
   sections.push(CURRENT_SITE_AND_SEARCH_GUARD);
   sections.push(getChatStyle());
   sections.push(formatLocalChatReality(now));
-  const weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-  const datePart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-  const timeTag = `${datePart} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")} ${weekdays[now.getDay()]}${localTimePeriod(now)}`;
+  const beijing = formatZonedTimeParts(now, "Asia/Shanghai");
+  const tokyo = formatZonedTimeParts(now, "Asia/Tokyo");
+  const timeTag = `${beijing.stamp} ${beijing.shortWeekday}${beijing.period}（北京时间；角色侧东京时间 ${tokyo.stamp} ${tokyo.shortWeekday}${tokyo.period}）`;
   sections.push([`【用户消息】- ${timeTag}`, userBody].join("\n"));
   return sections.join("\n\n---\n\n");
 }
 
-function localWeekday(date = new Date()) {
-  return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()];
+function currentTimeContext(date = new Date()) {
+  const beijing = formatZonedTimeParts(date, "Asia/Shanghai");
+  const tokyo = formatZonedTimeParts(date, "Asia/Tokyo");
+  return {
+    iso: date.toISOString(),
+    beijing: {
+      local: beijing.stamp,
+      weekday: beijing.shortWeekday,
+      period: beijing.period,
+      timezone: "Asia/Shanghai",
+      note: "用户侧时间，北京时间",
+    },
+    tokyo: {
+      local: tokyo.stamp,
+      weekday: tokyo.shortWeekday,
+      period: tokyo.period,
+      timezone: "Asia/Tokyo",
+      note: "角色侧时间；千圣所处时间以东京时间为准",
+    },
+  };
+}
+
+function nthMonday(year, month, n) {
+  const first = new Date(year, month - 1, 1);
+  const dayOfWeek = first.getDay();
+  const firstMonday = 1 + ((8 - dayOfWeek) % 7);
+  return new Date(year, month - 1, firstMonday + (n - 1) * 7);
+}
+
+function vernalEquinoxDay(year) {
+  if (year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)) return 20;
+  return (year >= 2025 && year <= 2028) ? 20 : 20;
+}
+
+function autumnalEquinoxDay(year) {
+  return (year >= 2024 && year <= 2028) ? 22 : 23;
+}
+
+function japaneseHolidaysInRange(year, month, day, rangeDays = 14) {
+  const ref = new Date(year, month - 1, day);
+  const refTs = ref.getTime();
+  const dayMs = 24 * 60 * 60 * 1000;
+
+  const fixed = [
+    [1, 1, "元日"], [2, 11, "建国記念の日"], [2, 23, "天皇誕生日"],
+    [4, 29, "昭和の日"], [5, 3, "憲法記念日"], [5, 4, "みどりの日"],
+    [5, 5, "こどもの日"], [8, 11, "山の日"],
+    [11, 3, "文化の日"], [11, 23, "勤労感謝の日"],
+  ];
+
+  const floating = [
+    [1, 2, 1, "成人の日"],
+    [7, 3, 1, "海の日"],
+    [9, 3, 1, "敬老の日"],
+    [10, 2, 1, "スポーツの日"],
+  ];
+
+  const results = [];
+
+  for (const [m, d, name] of fixed) {
+    const dt = new Date(year, m - 1, d);
+    if (Math.abs(dt.getTime() - refTs) <= rangeDays * dayMs) {
+      results.push({ date: `${m}月${d}日`, name, ts: dt.getTime() });
+    }
+  }
+
+  for (const [m, weekOfMonth, dayOfWeek, name] of floating) {
+    const dt = nthMonday(year, m, weekOfMonth);
+    if (Math.abs(dt.getTime() - refTs) <= rangeDays * dayMs) {
+      results.push({ date: `${m}月${dt.getDate()}日`, name, ts: dt.getTime() });
+    }
+  }
+
+  const veDay = vernalEquinoxDay(year);
+  const veDate = new Date(year, 2, veDay);
+  if (Math.abs(veDate.getTime() - refTs) <= rangeDays * dayMs) {
+    results.push({ date: `3月${veDay}日`, name: "春分の日", ts: veDate.getTime() });
+  }
+
+  const aeDay = autumnalEquinoxDay(year);
+  const aeDate = new Date(year, 8, aeDay);
+  if (Math.abs(aeDate.getTime() - refTs) <= rangeDays * dayMs) {
+    results.push({ date: `9月${aeDay}日`, name: "秋分の日", ts: aeDate.getTime() });
+  }
+
+  results.sort((a, b) => a.ts - b.ts);
+  return results;
+}
+
+const SEASONAL_MONTHLY_NOTES = {
+  1: ["新年氛围，初詣、年贺状、お年玉", "成人の日（1月第2月曜），各地成人式", "寒冷严冬，北部有雪，东京偶有积雪"],
+  2: ["节分（2/3前后），豆まき、恵方巻", "バレンタインデー（2/14），日本女生送义理/本命チョコ", "受験シーズン，大学入学共通テスト后期", "札幌雪まつり（2月上旬）"],
+  3: ["雛祭り（3/3），桃の節句，女孩节日", "ホワイトデー（3/14），情人节回礼", "春分の日/お彼岸，扫墓祭祖", "毕业式季节（3月中下旬），樱花初绽预告", "春假开始（3月下旬～4月初）"],
+  4: ["樱花季（3月下旬～4月中旬），花见名所热闹", "入学式/入社式（4月初），新学期开始，社会人入职", "灌仏会/花まつり（4/8）", "新年度，生活节奏变化期"],
+  5: ["黄金周（4/29～5/5前后），大型连休，旅游出行高峰", "こどもの日/端午の節句（5/5），挂鲤鱼旗", "新绿季节，气候宜人，户外活动增多", "神田祭（5月中旬，隔年大祭），三社祭（5月第3周末）"],
+  6: ["梅雨入り（6月上旬～中旬），闷热多雨，出行不便", "夏越の大祓（6/30），茅の輪くぐり，半年晦日", "紫阳花（あじさい）盛开，镰仓/箱根赏花人流多"],
+  7: ["梅雨明け（7月中旬前后），正式入夏", "七夕（7/7），各地七夕祭り，短冊に願い事", "京都祇園祭（7月整月，山鉾巡行17日），日本三大祭", "天神祭（7/24-25），大阪天満宮，船渡御と奉納花火", "暑假开始（7月下旬～8月末），学生出游增多", "花火大会季开始，各地周末均有"],
+  8: ["盛夏酷暑，台风季高峰期", "お盆（8/13-15），帰省ラッシュ，先祖供養，盆踊り", "青森ねぶた祭（8/2-7），秋田竿燈（8/3-6），仙台七夕（8/6-8）", "阿波踊り（8/12-15），よさこい祭り（8/9-12）", "花火大会各地持续，夏休みUターンラッシュ"],
+  9: ["残暑持续，台风季尾声", "シルバーウィーク（敬老の日+秋分の日连休，约5连休）", "中秋の名月/十五夜（9月中旬～10月上旬），月見団子", "运动会季节（9～10月），体育の日改称スポーツの日"],
+  10: ["秋季红叶季开始，行楽の秋", "スポーツの日（10月第2月曜），三连休", "ハロウィン（10/31），渋谷等地仮装イベント", "大学学園祭季节（10～11月），各大学文化祭/学園祭集中"],
+  11: ["红叶季高峰，紅葉狩り", "文化の日（11/3）", "七五三（11/15），3岁5岁7岁儿童参拜神社", "勤労感謝の日（11/23），三连休", "酉の市（11月酉の日），熊手等缘起物"],
+  12: ["忘年会季节（12月），飲み会增多", "クリスマス（12/24-25），日本定番KFC+ケーキ", "年末大掃除/煤払い", "大晦日（12/31），年越しそば，除夜の鐘（108回）", "冬季休業/寒假（12月下旬～1月中旬），帰省/旅行"],
+};
+
+function buildScheduleStaticContext(date = new Date()) {
+  const year = date.getFullYear();
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  const cfg = loadPrompts();
+
+  // Semester
+  const md = month * 100 + day;
+  let semester;
+  if (md >= 401 && md < 721) semester = "前期（4月～7月下旬），通常授课中";
+  else if (md >= 721 && md < 921) semester = "夏季休業中（暑假，7月下旬～9月下旬）";
+  else if (md >= 921 && md < 1221) semester = "後期（9月下旬～12月下旬），通常授课中";
+  else if (md >= 1221 || md < 115) semester = "冬季休業中（寒假，12月下旬～1月中旬）";
+  else if (md >= 115 && md < 215) semester = "後期試験期間（1月中旬～2月中旬）";
+  else semester = "春休み（2月中旬～3月下旬），学年末假期，即将进入新学年";
+
+  // Exam periods
+  let examNote = "";
+  if (md >= 115 && md < 215) examNote = "大学後期試験期间，学生多在备考或考试中。";
+  else if (md >= 701 && md < 721) examNote = "大学前期試験临近，学生开始准备期末考。";
+  else if (md >= 1201 && md < 1221) examNote = "大学後期試験临近（1月），レポート課題增多。";
+
+  // Season
+  let season;
+  if (month === 3 || month === 4) season = "春季，樱花季，天气转暖，新年度开始";
+  else if (month === 5) season = "晚春/新绿，气候宜人，户外活动增多";
+  else if (month === 6 || (month === 7 && day <= 15)) season = "梅雨季（梅雨），闷热多雨，出行不便，紫阳花盛开";
+  else if (month === 7 || month === 8) season = "盛夏，酷暑，台风季，花火大会/祭典/お盆季";
+  else if (month === 9) season = "初秋/残暑，台风季尾声，运动会/月见季节";
+  else if (month === 10 || month === 11) season = "秋季，红叶季高峰，气候凉爽宜人，行楽の秋/学園祭季节";
+  else season = "冬季，寒冷，忘年会/クリスマス/年末年始季";
+
+  // Golden Week / Silver Week
+  let longHolidayNote = "";
+  if (md >= 427 && md <= 506) longHolidayNote = "黄金周期间（4/29～5/5前后），大型连休，旅游出行高峰。";
+  const silverStart = new Date(year, 8, 18);
+  const silverEnd = new Date(year, 8, 24);
+  if (date >= silverStart && date <= silverEnd) longHolidayNote = "シルバーウィーク（敬老の日+秋分の日），约5连休，旅游出行高峰。";
+
+  // Holidays in range
+  const holidays = japaneseHolidaysInRange(year, month, day, 14);
+  const holidayText = holidays.length
+    ? "近期节日：\n" + holidays.map(h => `  - ${h.date} ${h.name}`).join("\n")
+    : "近期无日本国民祝日。";
+
+  // Monthly notes
+  const monthly = SEASONAL_MONTHLY_NOTES[month] || [];
+  const prevMonth = month === 1 ? 12 : month - 1;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  const seasonalNotes = [
+    ...(SEASONAL_MONTHLY_NOTES[prevMonth]?.slice(-1) || []).map(s => `[${prevMonth}月尾] ${s}`),
+    ...monthly.map(s => `[${month}月] ${s}`),
+    ...(SEASONAL_MONTHLY_NOTES[nextMonth]?.slice(0, 1) || []).map(s => `[${nextMonth}月初] ${s}`),
+  ];
+
+  // Special dates from prompts
+  const specialDatesText = (cfg.scheduleSpecialDates || "").trim();
+
+  return [
+    "【当前时间与季节上下文】",
+    `当前日期：${year}年${month}月${day}日`,
+    `学期状态：${semester}`,
+    examNote ? `考试相关：${examNote}` : "",
+    `季节特征：${season}`,
+    longHolidayNote ? `连休提醒：${longHolidayNote}` : "",
+    holidayText,
+    "",
+    "【近期行事与季节事件】",
+    ...seasonalNotes,
+    "",
+    specialDatesText ? `【角色相关特殊日期】\n${specialDatesText}` : "",
+  ].filter(Boolean).join("\n");
 }
 
 function sceneStateText(sess) {
@@ -1666,17 +2232,34 @@ function parseHiddenJson(raw) {
   throw new Error("hidden call returned no JSON object");
 }
 
-async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, bare = true } = {}) {
+async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, bare = true, model = null, sessionName = "", sessionId = "", firstTurn = false, persist = false, systemPrompt = "" } = {}) {
   if (!commandExists(CLAUDE)) return null;
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
+  const selectedModel = model || SCENELET_MODEL;
+  const systemPromptFile = systemPrompt
+    ? path.join(RUNTIME_DIR, `.hidden_system_${label}_${crypto.randomUUID()}.txt`)
+    : null;
   const args = [
     "-p",
     "--output-format", "json",
-    "--no-session-persistence",
     "--permission-mode", "bypassPermissions",
     "--tools", "WebSearch,WebFetch",
-    "--model", SCENELET_MODEL,
+    "--model", selectedModel,
   ];
+  if (sessionName) args.push("--name", sessionName);
+  if (persist) {
+    if (firstTurn && sessionId) args.push("--session-id", sessionId);
+    else if (sessionId) args.push("--resume", sessionId);
+  } else {
+    args.push("--no-session-persistence");
+  }
   if (bare) args.splice(1, 0, "--bare");
+  if (systemPromptFile) {
+    ensureDir(RUNTIME_DIR);
+    fs.writeFileSync(systemPromptFile, systemPrompt, "utf-8");
+    args.push("--append-system-prompt-file", systemPromptFile);
+  }
   const proc = spawnCli(CLAUDE, args, {
     cwd: AI_WORK_DIR,
     timeout: timeoutMs,
@@ -1693,22 +2276,61 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
     proc.stderr.on("data", d => { stderr += d; if (stderr.length > 3000) stderr = stderr.slice(-3000); });
     proc.on("close", resolve);
     proc.on("error", () => resolve(-1));
+  }).finally(() => {
+    if (systemPromptFile) { try { fs.rmSync(systemPromptFile, { force: true }); } catch {} }
   });
+  const baseUsageEvent = {
+    type: "hidden_call_usage",
+    label,
+    model: selectedModel,
+    session_id: sessionId || null,
+    started_at: startedAt,
+    duration_ms: Date.now() - startedMs,
+    context_chars: String(prompt || "").length,
+    system_chars: String(systemPrompt || "").length,
+  };
   if (code !== 0 && !stdout.trim()) {
-    log("⚠️", `${label} failed: exit ${code}${stderr ? `; ${stderr.slice(-200)}` : ""}`);
+    log("warn", label + " failed: exit " + code + (stderr ? "; " + stderr.slice(-200) : ""));
+    writeHiddenUsageEvent({
+      ...baseUsageEvent,
+      duration_ms: Date.now() - startedMs,
+      success: false,
+      error: "exit " + code + (stderr ? "; " + stderr.slice(-300) : ""),
+    });
     return null;
   }
   try {
     const outer = parseHiddenJson(stdout);
     const content = outer.result || outer.message || outer.text || stdout;
-    return typeof content === "string" ? parseHiddenJson(content) : outer;
+    const parsed = typeof content === "string" ? parseHiddenJson(content) : outer;
+    if (parsed && typeof parsed === "object") {
+      parsed._toolUsage = toolUsageFromUsage(outer);
+      parsed._hiddenUsage = usageSummary(outer, outer.modelUsage);
+      parsed._hiddenCall = {
+        ...baseUsageEvent,
+        session_id: outer.session_id || sessionId || null,
+        duration_ms: Date.now() - startedMs,
+        success: true,
+        output_chars: String(content || "").length,
+        ...parsed._hiddenUsage,
+      };
+      writeHiddenUsageEvent(parsed._hiddenCall);
+    }
+    return parsed;
   } catch (e) {
-    log("⚠️", `${label} parse failed: ${e.message}`);
+    log("warn", label + " parse failed: " + e.message);
+    writeHiddenUsageEvent({
+      ...baseUsageEvent,
+      duration_ms: Date.now() - startedMs,
+      success: false,
+      error: e.message,
+      output_chars: stdout.length,
+    });
     return null;
   }
 }
 
-function buildSceneletPrompt({ userId, sessionName, profile, userBody, carriedSceneState, visibleContext, memoryPrompt }) {
+function buildSceneletPrompt({ userId, sessionName, profile, userBody, carriedSceneState, lifeArcs = [], visibleContext, memoryPrompt }) {
   const now = new Date();
   const cfg = loadPrompts();
   const instructions = cfg.sceneletInstructions || [
@@ -1719,6 +2341,8 @@ function buildSceneletPrompt({ userId, sessionName, profile, userBody, carriedSc
   return [
     instructions,
     "",
+    cfg.lifeArcInstructions || "",
+    "",
     CURRENT_SITE_AND_SEARCH_GUARD,
     "",
     "角色 prompt：",
@@ -1728,12 +2352,7 @@ function buildSceneletPrompt({ userId, sessionName, profile, userBody, carriedSc
     memoryPrompt ? `长期记忆：\n${memoryPrompt}` : "",
     "",
     "当前时间：",
-    JSON.stringify({
-      iso: now.toISOString(),
-      local: now.toLocaleString("zh-CN", { hour12: false }),
-      weekday: localWeekday(now),
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
-    }, null, 2),
+    JSON.stringify(currentTimeContext(now), null, 2),
     "",
     "输入：",
     JSON.stringify({
@@ -1742,6 +2361,7 @@ function buildSceneletPrompt({ userId, sessionName, profile, userBody, carriedSc
       profile,
       visible_context_instruction: cfg.chatHistoryIntro,
       carried_scene_state: carriedSceneState || null,
+      active_life_arcs: lifeArcs,
       recent_visible_context: visibleContext,
       user_message: userBody,
     }, null, 2),
@@ -1750,6 +2370,16 @@ function buildSceneletPrompt({ userId, sessionName, profile, userBody, carriedSc
     JSON.stringify({
       inner_scenelet: "string",
       next_scene_state: "string|null",
+      life_arc_ops: [{
+        op: "create|update|close",
+        id: "existing id when updating/closing, omit for create",
+        title: "short private life line title",
+        summary: "what is continuing for 1-3 days",
+        current_state: "where it stands now",
+        next_useful_moment: "when it may naturally matter again",
+        expires_at: "ISO string within a few days",
+        reason: "why this op is useful"
+      }],
       proactive_candidates: [{
         kind: "follow_up|daily_share",
         scheduled_at: "ISO string",
@@ -1763,36 +2393,249 @@ function buildSceneletPrompt({ userId, sessionName, profile, userBody, carriedSc
   ].filter(Boolean).join("\n");
 }
 
+function buildHiddenWorldSystemPrompt(profile) {
+  const cfg = loadPrompts();
+  const sceneletBase = cfg.sceneletInstructions || "";
+  return [
+    "你在维护一个微信角色私聊的隐藏世界 session。用户看不到你的输出；你的输出只用于帮助主回复和本地状态更新。",
+    "",
+    "核心任务：",
+    "1. 必须生成本轮 inner_scenelet。它的职责和旧 scenelet 完全一致：帮助主回复理解角色此刻状态、身体感、情绪落点和接话方式。",
+    "2. 生成 next_scene_state，保持短、轻、可过期。",
+    "3. 更新 world_state_patch。只写结构化的当前生活状态，不要写长期设定。",
+    "4. 生成 life_arc_ops，用于 1-3 天内的短期生活线。",
+    "5. 生成 proactive_candidates，用于一次性 follow_up 或 daily_share 候选。",
+    "6. 生成 daily_share_candidates，标出来源类型；它们只是候选，不等于会发送。",
+    "7. 生成 schedule_candidates，提出可能的短期日程候选；不要直接当作已确认日程。",
+    "8. 写出 time_reasoning 和 continuity_warnings，供程序和人类审计。",
+    "",
+    "时间连续性硬规则：",
+    "- 先根据 current_time、recent_visible_context 和 last_world_event_at 判断时间差。",
+    "- 几分钟到十几分钟内的连续对话，一般属于同一次醒来/同一段聊天，不要重复写成第二次、第三次被叫醒。",
+    "- 睡眠、起床、通勤、排练等时间必须能算得通；不能凭空把还剩数小时写成只剩两三小时。",
+    "- 用户纠正时间逻辑时，优先修正 hidden world，而不是沿用旧 scene_state 或 life_arc。",
+    "",
+    "daily_share 来源类型：",
+    "- life_arc_related: 来自当前日程或生活线。",
+    "- ambient_observation: 路上、手机、店铺、书、音乐、社交网络等偶然见闻。",
+    "- memory_resurfacing: 从过去聊天自然想起。",
+    "- pure_mood: 没有具体事件，只是熟人间突然想说一句。",
+    "不要让 daily_share 全部围绕当前日程转。",
+    "",
+    sceneletBase,
+    "",
+    cfg.lifeArcInstructions || "",
+    "",
+    CURRENT_SITE_AND_SEARCH_GUARD,
+    "",
+    "角色 prompt：",
+    profile && profileTemplates[profile] ? profileTemplates[profile] : "",
+    loadPinnedProfileRules(profile),
+    "",
+    "聊天写法参考（用于降低 scenelet 的 AI 味；最终微信回复仍由主回复模型负责）：",
+    getChatStyle(),
+  ].filter(Boolean).join("\n");
+}
+
+function buildHiddenWorldPrompt({ userId, sessionName, profile, userBody, carriedSceneState, lifeArcs = [], visibleContext, memoryPrompt, worldState = null, proactiveIntents = [], worldSession = null }) {
+  const now = new Date();
+  const cfg = loadPrompts();
+  return [
+    "你将收到本轮动态上下文。请按 hidden-world system prompt 的规则输出 JSON。",
+    "",
+    memoryPrompt ? `长期记忆：\n${memoryPrompt}` : "",
+    "",
+    "当前时间：",
+    JSON.stringify(currentTimeContext(now), null, 2),
+    "",
+    "输入：",
+    JSON.stringify({
+      userId,
+      sessionName,
+      profile,
+      hidden_world_session: worldSession ? {
+        sid: worldSession.sid,
+        firstTurn: worldSession.firstTurn,
+        startedAt: worldSession.startedAt,
+        lastUsedAt: worldSession.lastUsedAt,
+      } : null,
+      world_state: worldState,
+      visible_context_instruction: cfg.chatHistoryIntro,
+      carried_scene_state: carriedSceneState || null,
+      active_life_arcs: lifeArcs,
+      pending_proactive_intents: proactiveIntents,
+      recent_visible_context: visibleContext,
+      user_message: userBody,
+    }, null, 2),
+    "",
+    "只输出 JSON，不要解释。格式：",
+    JSON.stringify({
+      inner_scenelet: "string",
+      next_scene_state: "string|null",
+      world_state_patch: {
+        location: "short current place",
+        activity: "short current activity",
+        awake_state: "awake|sleeping|light_sleep|just_woke|unknown",
+        current_plan: "next few hours only",
+        open_threads: ["short unresolved visible or hidden threads"],
+        last_world_event_at: "ISO string"
+      },
+      life_arc_ops: [{
+        op: "create|update|close",
+        id: "existing id when updating/closing, omit for create",
+        title: "short private life line title",
+        summary: "what is continuing for 1-3 days",
+        current_state: "where it stands now",
+        next_useful_moment: "when it may naturally matter again",
+        kind: "travel|work|school|personal|special_date|null",
+        time_start: "ISO string|null",
+        time_end: "ISO string|null",
+        expires_at: "ISO string within a few days",
+        reason: "why this op is useful"
+      }],
+      proactive_candidates: [{
+        kind: "follow_up|daily_share",
+        scheduled_at: "ISO string",
+        expires_at: "ISO string",
+        message_intent: "string",
+        basis: "string",
+        cancel_if: ["string"],
+        inner_scenelet: "string"
+      }],
+      daily_share_candidates: [{
+        source_type: "life_arc_related|ambient_observation|memory_resurfacing|pure_mood",
+        message_intent: "string",
+        basis: "string",
+        scheduled_at: "ISO string|null",
+        expires_at: "ISO string|null",
+        inner_scenelet: "string"
+      }],
+      schedule_candidates: [{
+        title: "short title",
+        summary: "short summary",
+        kind: "travel|work|school|personal|special_date",
+        time_start: "ISO string|null",
+        time_end: "ISO string|null",
+        confidence: "low|medium|high",
+        basis: "string"
+      }],
+      time_reasoning: {
+        current_role_time: "string",
+        elapsed_since_last_visible_turn: "string",
+        event_continuity: "string",
+        sleep_reasoning: "string"
+      },
+      continuity_warnings: ["string"]
+    }, null, 2),
+  ].filter(Boolean).join("\n");
+}
+
 function normalizeSceneletResult(raw) {
   if (!raw || typeof raw !== "object") return null;
   return {
     innerScenelet: raw.inner_scenelet ? String(raw.inner_scenelet).trim() : "",
     nextSceneState: raw.next_scene_state ? String(raw.next_scene_state).trim().slice(0, getSceneConfig().sceneStateMaxChars) : "",
+    lifeArcOps: Array.isArray(raw.life_arc_ops) ? raw.life_arc_ops : [],
     proactiveCandidates: Array.isArray(raw.proactive_candidates) ? raw.proactive_candidates : [],
+    worldStatePatch: raw.world_state_patch && typeof raw.world_state_patch === "object" ? raw.world_state_patch : null,
+    dailyShareCandidates: Array.isArray(raw.daily_share_candidates) ? raw.daily_share_candidates : [],
+    scheduleCandidates: Array.isArray(raw.schedule_candidates) ? raw.schedule_candidates : [],
+    timeReasoning: raw.time_reasoning && typeof raw.time_reasoning === "object" ? raw.time_reasoning : null,
+    continuityWarnings: Array.isArray(raw.continuity_warnings) ? raw.continuity_warnings.map(x => String(x).slice(0, 300)).slice(0, 8) : [],
+    toolUsage: normalizeToolUsage(raw._toolUsage) || emptyToolUsage(),
+    hiddenCall: raw._hiddenCall || null,
   };
 }
 
 async function generateSceneletForTurn({ userId, sess, profile, userBody, memoryPrompt }) {
   if (!profile || !profileTemplates[profile]) return null;
-  const prompt = buildSceneletPrompt({
+  const roleWorld = getRoleWorld(profile);
+  const world = ensureWorldSession(roleWorld);
+  const prompt = buildHiddenWorldPrompt({
     userId,
     sessionName: sess.name,
     profile,
     userBody,
-    carriedSceneState: sceneStateText(sess),
+    carriedSceneState: "",
+    lifeArcs: lifeArcPromptItems(roleWorld),
     visibleContext: recentVisibleContext(sess),
     memoryPrompt,
+    worldState: normalizeWorldState(roleWorld._worldState),
+    proactiveIntents: normalizeProactiveIntents(sess._proactiveIntents).filter(i => i.status === "pending").slice(-8),
+    worldSession: world,
   });
-  const raw = await runHiddenJson(prompt, { label: SCENELET_BARE ? "scenelet" : "scenelet_searchable", bare: SCENELET_BARE });
+  let raw = await runHiddenJson(prompt, {
+    label: "hidden_world",
+    bare: SCENELET_BARE,
+    persist: true,
+    sessionName: `hidden-world-${roleWorldKey(profile)}`,
+    sessionId: world.sid,
+    firstTurn: world.firstTurn,
+    model: world.model || SCENELET_MODEL,
+    systemPrompt: buildHiddenWorldSystemPrompt(profile),
+  });
+  if (!raw && !world.firstTurn) {
+    world.sid = uuid();
+    world.firstTurn = true;
+    world.startedAt = new Date().toISOString();
+    world.resetReason = "hidden world retry after failed resume";
+    raw = await runHiddenJson(prompt, {
+      label: "hidden_world_retry",
+      bare: SCENELET_BARE,
+      persist: true,
+      sessionName: `hidden-world-${roleWorldKey(profile)}`,
+      sessionId: world.sid,
+      firstTurn: true,
+      model: world.model || SCENELET_MODEL,
+      systemPrompt: buildHiddenWorldSystemPrompt(profile),
+    });
+  }
   const result = normalizeSceneletResult(raw);
   if (!result?.innerScenelet) return null;
+  if (raw?._hiddenCall?.session_id) world.sid = raw._hiddenCall.session_id;
+  world.firstTurn = false;
+  world.lastUsedAt = new Date().toISOString();
+  world.lastUsage = result.hiddenCall || null;
+  applyWorldStatePatch(roleWorld, result.worldStatePatch);
+  roleWorld._sceneState = normalizeSceneState({
+    text: result.nextSceneState,
+    updatedAt: world.lastUsedAt,
+    expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+  });
+  roleWorld._worldLastOutput = {
+    timestamp: world.lastUsedAt,
+    innerScenelet: result.innerScenelet,
+    nextSceneState: result.nextSceneState,
+    worldStatePatch: result.worldStatePatch,
+    dailyShareCandidates: result.dailyShareCandidates,
+    scheduleCandidates: result.scheduleCandidates,
+    timeReasoning: result.timeReasoning,
+    continuityWarnings: result.continuityWarnings,
+  };
+  roleWorld.updatedAt = world.lastUsedAt;
+  syncRoleWorldToSession(sess, profile);
+  saveRoleWorlds();
   return result;
 }
 
 function buildSceneContextBlock(sess, sceneletResult, carriedState) {
   const cfg = loadPrompts();
+  const profile = sessionProfile(sess);
+  const lifeArcSummary = profile ? lifeArcPromptItems(getRoleWorld(profile)).map(arc => ({
+    title: arc.title,
+    current_state: arc.current_state,
+    next_useful_moment: arc.next_useful_moment,
+    kind: arc.kind,
+    time_start: arc.time_start,
+    time_end: arc.time_end,
+  })).slice(-3) : [];
   const parts = [
-    carriedState ? ["【轻量 scene_state】", cfg.sceneStateIntro, carriedState].filter(Boolean).join("\n") : "",
+    sceneletResult?.nextSceneState ? ["【轻量 scene_state】", cfg.sceneStateIntro, sceneletResult.nextSceneState].filter(Boolean).join("\n") : "",
+    lifeArcSummary.length ? [
+      "【短期 life_arc 简述】",
+      "以下是 hidden-world 已确认的短期生活线摘要，只作为时间框架和自然接话参考，不要主动复述 JSON。",
+      JSON.stringify(lifeArcSummary, null, 2),
+    ].join("\n") : "",
     sceneletResult?.innerScenelet ? [
       "【隐藏中间层：inner_scenelet】",
       cfg.innerSceneletIntro,
@@ -1806,17 +2649,23 @@ function buildSceneContextBlock(sess, sceneletResult, carriedState) {
   return parts.join("\n\n");
 }
 
-function addProactiveCandidates(sess, sceneletResult, userBody) {
+async function addProactiveCandidates(sess, sceneletResult, userBody) {
   if (!sess || !sceneletResult?.proactiveCandidates?.length) return;
   const nowIso = new Date().toISOString();
   const existing = normalizeProactiveIntents(sess._proactiveIntents);
   for (const raw of sceneletResult.proactiveCandidates.slice(0, 3)) {
-    const intent = normalizeRawProactiveCandidate(raw, {
+    const candidate = normalizeRawProactiveCandidate(raw, {
       nowIso,
       sourceUserText: userBody,
       defaultKind: "follow_up",
     });
-    if (intent) existing.push(intent);
+    if (!candidate) continue;
+    const sameKind = existing.filter(x => x.status === "pending" && x.kind === candidate.kind);
+    if (sameKind.length) {
+      const dup = await checkIntentDuplicateFlash(candidate, sameKind);
+      if (dup) continue;
+    }
+    existing.push(candidate);
   }
   sess._proactiveIntents = normalizeProactiveIntents(existing);
 }
@@ -1841,6 +2690,26 @@ function normalizeRawProactiveCandidate(raw, { nowIso = new Date().toISOString()
   });
 }
 
+function normalizeScheduleCandidates(raw = []) {
+  if (!Array.isArray(raw)) return [];
+  const kinds = ["travel", "work", "school", "personal", "special_date"];
+  return raw.map(item => {
+    if (!item || typeof item !== "object") return null;
+    const title = String(item.title || "").trim().slice(0, 80);
+    const kind = kinds.includes(item.kind) ? item.kind : "";
+    if (!title || !kind) return null;
+    return {
+      title,
+      summary: String(item.summary || "").trim().slice(0, 500),
+      kind,
+      time_start: item.time_start || item.timeStart || null,
+      time_end: item.time_end || item.timeEnd || null,
+      confidence: ["low", "medium", "high"].includes(item.confidence) ? item.confidence : "medium",
+      basis: String(item.basis || "").trim().slice(0, 300),
+    };
+  }).filter(Boolean).slice(0, 5);
+}
+
 function setSceneStateFromText(sess, text, ttlMs = 2 * 60 * 60 * 1000) {
   const normalized = normalizeSceneState({
     text,
@@ -1850,7 +2719,7 @@ function setSceneStateFromText(sess, text, ttlMs = 2 * 60 * 60 * 1000) {
   sess._sceneState = normalized;
 }
 
-function recordChatHistory({ ai, userId, sess, role, kind = "chat", text, scenelet = "", sceneState = "", proactiveIntentId = "", timestamp = new Date().toISOString() }) {
+function recordChatHistory({ ai, userId, sess, role, kind = "chat", text, scenelet = "", sceneState = "", sceneletStatus = "", sceneletError = "", proactiveIntentId = "", toolUsage = null, ragUsage = null, timestamp = new Date().toISOString() }) {
   if (!sess || (!text?.trim() && !scenelet?.trim())) return;
   appendChatEvent({
     timestamp,
@@ -1864,8 +2733,110 @@ function recordChatHistory({ ai, userId, sess, role, kind = "chat", text, scenel
     text,
     scenelet,
     sceneState,
+    sceneletStatus,
+    sceneletError,
     proactiveIntentId,
+    toolUsage: normalizeToolUsage(toolUsage),
+    ragUsage: ragUsage && typeof ragUsage === "object" ? {
+      used: Boolean(ragUsage.used),
+      chars: Number(ragUsage.chars || 0) || 0,
+      eligible: Boolean(ragUsage.eligible),
+    } : null,
   });
+}
+
+function buildMemoryCandidatePrompt(userBody, userId, profile) {
+  return [
+    "你是长期记忆候选抽取器，只判断用户这条消息中是否有值得长期保存的信息。",
+    "不要查看或推断角色设定；不要记录当天闲聊、一次性情绪、饭点、天气、临时计划、角色扮演内容。",
+    "只抽取长期稳定、跨对话有用、由用户明确表达的信息。",
+    "类别只能是 trait、preference、fact。敏感或私密内容如健康、政治、宗教、性取向、财务、精确住址、亲密关系，确需记录时 sensitive=true。",
+    "如果没有候选，输出空数组。",
+    "",
+    "输入：",
+    JSON.stringify({ userId, profile, user_message: userBody }, null, 2),
+    "",
+    "只输出 JSON，不要解释。格式：",
+    JSON.stringify({
+      candidates: [{
+        category: "trait|preference|fact",
+        text: "简洁中文长期记忆候选",
+        sensitive: false,
+        reason: "为什么长期有用"
+      }]
+    }, null, 2),
+  ].join("\n");
+}
+
+function normalizeMemoryCandidates(raw = []) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(item => {
+    const category = normalizeMemoryCategory(item?.category);
+    const text = String(item?.text || "").trim().slice(0, 180);
+    if (!category || !text) return null;
+    return {
+      category,
+      text,
+      sensitive: Boolean(item?.sensitive),
+      reason: item?.reason ? String(item.reason).slice(0, 220) : "",
+    };
+  }).filter(Boolean).slice(0, 6);
+}
+
+function buildMemoryMergePrompt({ userBody, userId, profile, candidates, existingItems }) {
+  const cfg = loadPrompts();
+  const policy = cfg.memoryWriterInstructions || "";
+  return [
+    "你是长期记忆合并规划器。你会拿到候选记忆和当前正式 memory items。",
+    "目标：避免重复，能合并就 update，用户否定旧信息就 update 覆盖，只有确实没有相近旧条目时才 add。",
+    "不要机械新增；不要把同一事实拆成多条；不要根据角色聊天内容写用户长期记忆。",
+    "op 只能是 add、update、noop。update 必须带现有 id；noop 不需要 category/text。",
+    "text 必须是可长期复用的简洁中文，最多 180 字。",
+    "",
+    policy ? `补充写入规则：\n${policy.slice(0, 2200)}` : "",
+    "",
+    "输入：",
+    JSON.stringify({
+      userId,
+      profile,
+      user_message: userBody,
+      candidates,
+      existing_memory_items: existingItems,
+    }, null, 2),
+    "",
+    "只输出 JSON，不要解释。格式：",
+    JSON.stringify({
+      ops: [{
+        op: "add|update|noop",
+        id: "existing id when update",
+        category: "trait|preference|fact",
+        text: "简洁中文长期记忆",
+        sensitive: false,
+        reason: "简短说明"
+      }]
+    }, null, 2),
+  ].filter(Boolean).join("\n");
+}
+
+function normalizeMemoryOps(raw = []) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(item => {
+    const op = String(item?.op || "noop").trim().toLowerCase();
+    if (op === "noop") return { op: "noop" };
+    if (!["add", "update"].includes(op)) return null;
+    const category = normalizeMemoryCategory(item?.category);
+    const text = String(item?.text || "").trim().slice(0, 180);
+    const id = item?.id ? String(item.id).trim() : "";
+    if (!category || !text) return null;
+    if (op === "update" && !id) return null;
+    return {
+      op,
+      id,
+      category,
+      text,
+      sensitive: Boolean(item?.sensitive),
+    };
+  }).filter(Boolean).slice(0, 6);
 }
 
 function sanitizeVisibleReplyText(text) {
@@ -1940,12 +2911,7 @@ function buildProactivePrompt({ userId, sessionName, profile, intent, memoryProm
     "- 用户（沃沃）是女性，指代用户时始终使用「她」。",
     "",
     "当前时间：",
-    JSON.stringify({
-      iso: now.toISOString(),
-      local: now.toLocaleString("zh-CN", { hour12: false }),
-      weekday: localWeekday(now),
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
-    }, null, 2),
+    JSON.stringify(currentTimeContext(now), null, 2),
     "",
     "输入：",
     JSON.stringify({
@@ -1963,6 +2929,7 @@ function buildProactivePrompt({ userId, sessionName, profile, intent, memoryProm
       },
       visible_context_instruction: cfg.chatHistoryIntro,
       carried_scene_state: carriedSceneState || null,
+      active_life_arcs: lifeArcPromptItems(sess),
       recent_visible_context: visibleContext,
       candidate_intent: intent,
     }, null, 2),
@@ -1986,6 +2953,7 @@ function normalizeProactiveDecision(raw) {
     innerScenelet: raw.inner_scenelet ? String(raw.inner_scenelet).trim() : "",
     visibleReply: raw.visible_reply ? sanitizeVisibleReplyText(raw.visible_reply) : "",
     nextSceneState: raw.next_scene_state ? String(raw.next_scene_state).trim().slice(0, getSceneConfig().sceneStateMaxChars) : "",
+    toolUsage: normalizeToolUsage(raw._toolUsage) || emptyToolUsage(),
   };
 }
 
@@ -2075,12 +3043,7 @@ function buildDailyShareSeedPrompt({ userId, sessionName, profile, memoryPrompt,
     memoryPrompt ? `长期记忆：\n${memoryPrompt}` : "",
     "",
     "当前时间：",
-    JSON.stringify({
-      iso: now.toISOString(),
-      local: now.toLocaleString("zh-CN", { hour12: false }),
-      weekday: localWeekday(now),
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
-    }, null, 2),
+    JSON.stringify(currentTimeContext(now), null, 2),
     "",
     "输入：",
     JSON.stringify({
@@ -2100,6 +3063,7 @@ function buildDailyShareSeedPrompt({ userId, sessionName, profile, memoryPrompt,
       },
       visible_context_instruction: cfg.chatHistoryIntro,
       carried_scene_state: carriedSceneState || null,
+      active_life_arcs: lifeArcPromptItems(sess),
       recent_visible_context: visibleContext,
     }, null, 2),
     "",
@@ -2122,39 +3086,144 @@ function buildDailyShareSeedPrompt({ userId, sessionName, profile, memoryPrompt,
 
 async function maybeSeedDailyShareIntent({ ai, userId, sess, profile, pending }) {
   const cfg = getSceneConfig();
+  const roleWorld = getRoleWorld(profile);
   if (pending.length) return { changed: false, intent: null };
   if (proactiveSentToday(sess) >= cfg.proactiveDailyMax) return { changed: false, intent: null };
 
   const nowMs = Date.now();
-  const lastSeedMs = Date.parse(sess._lastDailyShareSeedAt || "");
+  const lastSeedMs = Date.parse(roleWorld._lastDailyShareSeedAt || sess._lastDailyShareSeedAt || "");
   if (Number.isFinite(lastSeedMs) && nowMs - lastSeedMs < cfg.dailyShareSeedIntervalMs) return { changed: false, intent: null };
 
   const lastActivityMs = lastConversationActivityMs(sess);
   if (!lastActivityMs || nowMs - lastActivityMs < cfg.dailyShareMinIdleMs) return { changed: false, intent: null };
 
   const nowIso = new Date(nowMs).toISOString();
+  const worldOutputAt = Date.parse(roleWorld._worldLastOutput?.timestamp || "");
+  const candidates = Array.isArray(roleWorld._worldLastOutput?.dailyShareCandidates) ? roleWorld._worldLastOutput.dailyShareCandidates : [];
+  roleWorld._lastDailyShareSeedAt = nowIso;
   sess._lastDailyShareSeedAt = nowIso;
+  saveRoleWorlds();
+  if (!Number.isFinite(worldOutputAt) || (Number.isFinite(lastSeedMs) && worldOutputAt <= lastSeedMs) || !candidates.length) {
+    return { changed: true, intent: null };
+  }
 
-  const memoryPrompt = renderMemoryPrompt(userId, { profile });
-  const prompt = buildDailyShareSeedPrompt({
-    userId,
-    sessionName: sess.name,
-    profile,
-    memoryPrompt,
-    carriedSceneState: sceneStateText(sess),
-    visibleContext: recentVisibleContext(sess),
-    sess,
-  });
-  const raw = await runHiddenJson(prompt, { label: "daily_share_seed" });
-  if (raw?.should_create !== true) return { changed: true, intent: null };
-
-  const candidate = raw.proactive_candidate && typeof raw.proactive_candidate === "object" ? raw.proactive_candidate : raw;
-  const intent = normalizeRawProactiveCandidate({ ...candidate, kind: "daily_share" }, {
+  const candidate = candidates.find(x => x && typeof x === "object" && x.message_intent);
+  if (!candidate) return { changed: true, intent: null };
+  const rawScheduledAt = candidate.scheduled_at || new Date(nowMs + 5 * 60 * 1000).toISOString();
+  const parsedScheduledAt = Date.parse(rawScheduledAt || "");
+  const scheduledAt = Number.isFinite(parsedScheduledAt) ? rawScheduledAt : new Date(nowMs + 5 * 60 * 1000).toISOString();
+  const parsedFinalScheduledAt = Date.parse(scheduledAt);
+  const rawExpiresAt = candidate.expires_at || "";
+  const parsedExpiresAt = Date.parse(rawExpiresAt);
+  const expiresAt = Number.isFinite(parsedExpiresAt)
+    ? rawExpiresAt
+    : new Date(parsedFinalScheduledAt + 30 * 60 * 1000).toISOString();
+  const intent = normalizeRawProactiveCandidate({
+    kind: "daily_share",
+    scheduled_at: scheduledAt,
+    expires_at: expiresAt,
+    message_intent: candidate.message_intent,
+    basis: [candidate.source_type, candidate.basis].filter(Boolean).join(": "),
+    cancel_if: candidate.cancel_if || ["用户已经开启新话题", "用户正在忙或没有回应上一条主动消息"],
+    inner_scenelet: candidate.inner_scenelet || "",
+  }, {
     nowIso,
     sourceUserText: "",
     defaultKind: "daily_share",
   });
   return { changed: true, intent };
+}
+
+async function maybeCreateScheduleEntry({ sess, profile }) {
+  const cfg = getSceneConfig();
+  const roleWorld = getRoleWorld(profile);
+  const activeSchedules = normalizeLifeArcs(roleWorld._lifeArcs).filter(a => a.kind);
+  if (activeSchedules.length >= cfg.scheduleMaxActive) return false;
+  const candidates = normalizeScheduleCandidates(roleWorld._worldLastOutput?.scheduleCandidates || []);
+  if (!candidates.length) return false;
+
+  const nowMs = Date.now();
+  const lastCheckMs = Date.parse(roleWorld._lastScheduleCheckAt || sess._lastScheduleCheckAt || "");
+  if (Number.isFinite(lastCheckMs) && nowMs - lastCheckMs < cfg.scheduleCheckIntervalMs) return false;
+
+  const nowIso = new Date(nowMs).toISOString();
+  roleWorld._lastScheduleCheckAt = nowIso;
+  sess._lastScheduleCheckAt = nowIso;
+  saveRoleWorlds();
+
+  const recentKinds = normalizeLifeArcs(roleWorld._lifeArcs, { includeClosed: true })
+    .filter(a => a.kind)
+    .slice(-5)
+    .map(a => a.kind);
+
+  const now = new Date(nowMs);
+  const staticCtx = buildScheduleStaticContext(now);
+  // Truncate to keep the prompt manageable for flash model
+  const staticCtxShort = staticCtx.length > 2000 ? staticCtx.slice(0, 2000) + "\n...(truncated)" : staticCtx;
+
+  const prompt = [
+    cfg.scheduleCreatorInstructions,
+    "",
+    staticCtxShort,
+    "",
+    "角色 prompt（截取关键身份信息）：",
+    profile && profileTemplates[profile] ? profileTemplates[profile].slice(0, 800) : "",
+    "",
+    "Hidden-world 提出的 schedule candidates：",
+    JSON.stringify(candidates, null, 2),
+    "",
+    "当前活跃日程：",
+    activeSchedules.length
+      ? activeSchedules.map(a => `- [${a.kind}] ${a.title} (${a.timeStart || "?"} ~ ${a.timeEnd || "?"})`).join("\n")
+      : "(无)",
+    "",
+    recentKinds.length ? `最近曾创建过的日程类型：${[...new Set(recentKinds)].join("、")}。请避免短期内重复同类安排。` : "",
+    "",
+    "只输出 JSON，不要解释：",
+    JSON.stringify({
+      selected_index: -1,
+      basis: "简短说明",
+      life_arc: {
+        title: "string",
+        summary: "string",
+        kind: "travel|work|school|personal|special_date",
+        time_start: "ISO string|null",
+        time_end: "ISO string|null"
+      }
+    }, null, 2),
+  ].filter(Boolean).join("\n");
+
+  const result = await runHiddenJson(prompt, {
+    label: "schedule_finalization",
+    bare: false,
+    model: CLAUDE_FAST_MODEL,
+    timeoutMs: 60_000,
+  });
+
+  if (!result || result.selected === "none" || Number(result.selected_index ?? -1) < 0 || !result.life_arc) return true;
+  const arc = result.life_arc;
+  if (!arc.title || !arc.kind) return true;
+  const timeEnd = arc.time_end || arc.timeEnd || null;
+  const parsedEnd = Date.parse(timeEnd || "");
+  const expiresAt = Number.isFinite(parsedEnd)
+    ? new Date(parsedEnd + 12 * 60 * 60 * 1000).toISOString()
+    : new Date(nowMs + 3 * 24 * 60 * 60 * 1000).toISOString();
+
+  applyLifeArcOps(roleWorld, [{
+    op: "create",
+    title: String(arc.title).slice(0, 80),
+    summary: String(arc.summary || "").slice(0, 500),
+    kind: arc.kind,
+    time_start: arc.time_start || arc.timeStart || null,
+    time_end: timeEnd,
+    expires_at: expiresAt,
+    reason: result.basis ? String(result.basis).slice(0, 300) : "schedule creator",
+  }]);
+  roleWorld.updatedAt = new Date().toISOString();
+  syncRoleWorldToSession(sess, profile);
+  saveRoleWorlds();
+  log("\u{1F4C5}", `[${sess.name}] schedule created: [${arc.kind}] ${arc.title}`);
+  return true;
 }
 
 async function checkProactiveIntents() {
@@ -2168,6 +3237,14 @@ async function checkProactiveIntents() {
     let pending = allIntents.filter(x => x.status === "pending");
 
     let changed = false;
+
+    // Schedule creator — independent of intent queue
+    const scheduleChanged = await maybeCreateScheduleEntry({ sess, profile }).catch(e => {
+      log("⚠️", `schedule creator skipped: ${e.message}`);
+      return false;
+    });
+    if (scheduleChanged) changed = true;
+
     if (!pending.length) {
       const seeded = await maybeSeedDailyShareIntent({ ai, userId, sess, profile, pending });
       if (seeded.changed) changed = true;
@@ -2233,6 +3310,7 @@ async function checkProactiveIntents() {
         scenelet: decision.innerScenelet || intent.innerScenelet,
         sceneState: decision.nextSceneState,
         proactiveIntentId: intent.id,
+        toolUsage: decision.toolUsage,
         timestamp: sentAt,
       });
       changed = true;
@@ -2248,62 +3326,24 @@ async function checkProactiveIntents() {
 async function updateUserMemoryFromTurn(userId, userBody, profile) {
   if (!isMemoryEnabled(userId)) return [];
   if (!shouldRunMemoryWriter(userBody)) return [];
-  if (!commandExists(CLAUDE)) return [];
-  const systemPromptFile = path.join(RUNTIME_DIR, `.memory_writer_system_${crypto.randomUUID()}.txt`);
-  ensureDir(RUNTIME_DIR);
-  fs.writeFileSync(systemPromptFile, buildMemoryWriterSystemPrompt(userId, profile), "utf-8");
-  const args = [
-    "--bare",
-    "-p",
-    "--output-format", "stream-json",
-    "--verbose",
-    "--permission-mode", "bypassPermissions",
-    "--model", CLAUDE_FAST_MODEL,
-    "--effort", "low",
-    "--system-prompt-file", systemPromptFile,
-  ];
-  const proc = spawnCli(CLAUDE, args, {
-    cwd: AI_WORK_DIR,
-    timeout: 60_000,
-    windowsHide: true,
-    stdio: ["pipe", "pipe", "pipe"],
-    env: envWithProxy(CLAUDE_HTTPS_PROXY),
+  const candidatesRaw = await runHiddenJson(buildMemoryCandidatePrompt(userBody, userId, profile), {
+    label: "memory_candidate_extractor",
+    bare: true,
+    model: CLAUDE_FAST_MODEL,
+    timeoutMs: 45_000,
   });
-  proc.stdin.on("error", () => {});
-  proc.stdin.end(userBody, "utf8");
+  const candidates = normalizeMemoryCandidates(candidatesRaw?.candidates || candidatesRaw?.memory_candidates || []);
+  if (!candidates.length) return [];
 
-  let stdout = "";
-  let stderr = "";
-  const code = await new Promise(resolve => {
-    proc.stdout.on("data", d => { stdout += d; });
-    proc.stderr.on("data", d => { stderr += d; if (stderr.length > 2000) stderr = stderr.slice(-2000); });
-    proc.on("close", resolve);
-    proc.on("error", () => resolve(-1));
-  }).finally(() => {
-    try { fs.unlinkSync(systemPromptFile); } catch {}
+  const existingItems = listMemoryItems(userId, { profile });
+  const planRaw = await runHiddenJson(buildMemoryMergePrompt({ userBody, userId, profile, candidates, existingItems }), {
+    label: "memory_merge_planner",
+    bare: true,
+    model: CLAUDE_MAIN_MODEL,
+    timeoutMs: 90_000,
   });
-  if (code !== 0) {
-    log("⚠️", `memory writer failed: exit ${code}${stderr ? `; ${stderr.slice(-300)}` : ""}`);
-    return [];
-  }
-
-  let text = "";
-  for (const line of stdout.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const evt = JSON.parse(trimmed);
-      if (evt.type === "assistant" && evt.message?.content) {
-        for (const block of evt.message.content) {
-          if (block.type === "text" && block.text) text += block.text;
-        }
-      } else if (evt.type === "result" && evt.result) {
-        text += String(evt.result);
-      }
-    } catch {}
-  }
-  const ops = parseMemoryWriterOutput(text);
-  if (!ops.length) log("⚠️", `memory writer returned no JSON ops${text ? `: ${text.slice(0, 120)}` : ""}`);
+  const ops = normalizeMemoryOps(planRaw?.ops || []);
+  if (!ops.length) log("⚠️", `memory planner returned no ops for ${candidates.length} candidates`);
   const applied = applyMemoryOps(userId, profile, ops, "auto");
   if (applied.length) log("\u{1F9E0}", `memory updated: ${applied.map(x => x.op).join(",")}`);
   return applied;
@@ -2356,19 +3396,46 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   const isProfileChat = Boolean(turnProfile && profileTemplates[turnProfile]);
   const carriedSceneState = sceneStateText(styleState);
   let sceneletResult = null;
+  let sceneletError = "";
   if (isProfileChat) {
     try {
       sceneletResult = await generateSceneletForTurn({ userId, sess: styleState, profile: turnProfile, userBody: body, memoryPrompt });
       if (sceneletResult) {
         writeLog(JSON.stringify({
+          type: "hidden_world",
+          world_state_patch: sceneletResult.worldStatePatch,
+          daily_share_candidates: sceneletResult.dailyShareCandidates,
+          schedule_candidates: sceneletResult.scheduleCandidates,
+          time_reasoning: sceneletResult.timeReasoning,
+          continuity_warnings: sceneletResult.continuityWarnings,
+          usage: sceneletResult.hiddenCall,
+          timestamp: new Date().toISOString(),
+        }));
+        writeLog(JSON.stringify({
           type: "inner_scenelet",
           inner_scenelet: sceneletResult.innerScenelet,
           next_scene_state: sceneletResult.nextSceneState,
+          life_arc_ops: sceneletResult.lifeArcOps,
           proactive_candidates: sceneletResult.proactiveCandidates,
+          tool_usage: sceneletResult.toolUsage,
+          hidden_usage: sceneletResult.hiddenCall,
+          timestamp: new Date().toISOString(),
+        }));
+      } else {
+        sceneletError = "hidden scenelet returned no usable inner_scenelet";
+        writeLog(JSON.stringify({
+          type: "inner_scenelet_missing",
+          reason: sceneletError,
           timestamp: new Date().toISOString(),
         }));
       }
     } catch (e) {
+      sceneletError = e.message || "scenelet failed";
+      writeLog(JSON.stringify({
+        type: "inner_scenelet_missing",
+        reason: sceneletError,
+        timestamp: new Date().toISOString(),
+      }));
       log("⚠️", `scenelet skipped: ${e.message}`);
     }
   }
@@ -2408,6 +3475,8 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   let turnSucceeded = false;
   let explicitFailure = false;
   let failureMessage = "";
+  const turnToolUsage = emptyToolUsage();
+  let turnRagUsage = null;
 
   try {
   if (ai === "codex") {
@@ -2428,6 +3497,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
         const itype = evt.item.type;
         if (itype === "command_execution" || itype === "function_call") {
           const name = evt.item.name || itype;
+          markToolUsage(turnToolUsage, name);
           const input = evt.item.args ? JSON.stringify(evt.item.args).slice(0, 200) : "";
           log("\u{1F527}", `[${sessionName}] ${name} ${input}`);
           writeFmt(`\n--- Tool: ${name} ---`);
@@ -2458,6 +3528,12 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       }
       if (evt.type === "turn.completed") {
         turnCompleted = true;
+        const finalToolUsage = toolUsageFromUsage(evt.usage);
+        turnToolUsage.webSearch = Math.max(turnToolUsage.webSearch, finalToolUsage.webSearch);
+        turnToolUsage.webFetch = Math.max(turnToolUsage.webFetch, finalToolUsage.webFetch);
+        for (const tool of finalToolUsage.tools) {
+          if (!turnToolUsage.tools.includes(tool)) turnToolUsage.tools.push(tool);
+        }
         if (evt.usage) {
           writeFmt(`\n[usage] input=${evt.usage.input_tokens} output=${evt.usage.output_tokens}`);
         }
@@ -2477,8 +3553,9 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     const pinnedProfileRules = loadPinnedProfileRules(profile);
     const useRagCdx = RAG_ENABLED && !hasInboundAttachment(body) && profile && profile !== "默认" && profileTemplates[profile] && shouldUseRagForTurn(body, profile);
     const ragContext = useRagCdx ? queryRag(body, profile) : null;
+    turnRagUsage = { eligible: Boolean(useRagCdx), used: Boolean(ragContext), chars: ragContext?.length || 0 };
     const sceneContext = isProfileChat ? buildSceneContextBlock(styleState, sceneletResult, carriedSceneState) : "";
-    const turnBody = buildTurnBody(body, null, sceneContext);
+    const turnBody = buildTurnBody(body, null, sceneContext, memoryPrompt);
     writeLog(JSON.stringify({
       type: "turn_context",
       backend: "codex",
@@ -2486,7 +3563,8 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       profileRuleChars: pinnedProfileRules.length,
       ragChars: ragContext?.length || 0,
       transientBodyChars: turnBody.length,
-      stableSystemChars: stylePrompt.length + memoryPrompt.length + pinnedProfileRules.length + (profile && profileTemplates[profile] ? profileTemplates[profile].length : 0),
+      dynamicMemoryChars: memoryPrompt.length,
+      stableSystemChars: stylePrompt.length + pinnedProfileRules.length + (profile && profileTemplates[profile] ? profileTemplates[profile].length : 0),
       timestamp: new Date().toISOString(),
     }));
     const task = runCodexStream(ai, sid, sessionName, turnBody, firstTurn, handleCodexEvent, ragContext, stylePrompt, memoryPrompt, profile, {
@@ -2544,6 +3622,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
           if (block.type === "tool_use") {
             hasTool = true;
             const name = block.name || "unknown";
+            markToolUsage(turnToolUsage, name);
             const input = block.input ? JSON.stringify(block.input).slice(0, 200) : "";
             log("\u{1F527}", `[${sessionName}] ${name} ${input}`);
             writeFmt(`\n--- Tool: ${name} ---`);
@@ -2562,10 +3641,17 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
         writeFmt(`Result: ${JSON.stringify(evt).slice(0, 2000)}`);
       }
       if (evt.type === "result") {
-        if (evt.subtype === "success") turnCompleted = true;
-        else {
+        if (evt.subtype === "success") {
+          turnCompleted = true;
+        } else {
           explicitFailure = true;
           failureMessage = `${evt.subtype || "failed"}${evt.result ? `: ${evt.result}` : ""}`;
+        }
+        const finalToolUsage = toolUsageFromUsage(evt.usage);
+        turnToolUsage.webSearch = Math.max(turnToolUsage.webSearch, finalToolUsage.webSearch);
+        turnToolUsage.webFetch = Math.max(turnToolUsage.webFetch, finalToolUsage.webFetch);
+        for (const tool of finalToolUsage.tools) {
+          if (!turnToolUsage.tools.includes(tool)) turnToolUsage.tools.push(tool);
         }
         writeFmt(`\n=== ${evt.subtype || "completed"} ===`);
         if (evt.result) writeFmt(`Result: ${JSON.stringify(evt.result).slice(0, 1000)}`);
@@ -2576,8 +3662,9 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     const pinnedProfileRules = loadPinnedProfileRules(profile);
     const useRag = RAG_ENABLED && !hasInboundAttachment(body) && profile && profile !== "默认" && profileTemplates[profile] && shouldUseRagForTurn(body, profile);
     const ragContext = useRag ? queryRag(body, profile) : null;
+    turnRagUsage = { eligible: Boolean(useRag), used: Boolean(ragContext), chars: ragContext?.length || 0 };
     const sceneContext = isProfileChat ? buildSceneContextBlock(styleState, sceneletResult, carriedSceneState) : "";
-    const claudeBody = buildTurnBody(body, ragContext, sceneContext);
+    const claudeBody = buildTurnBody(body, ragContext, sceneContext, memoryPrompt);
     writeLog(JSON.stringify({
       type: "turn_context",
       backend: "claude_stream",
@@ -2585,12 +3672,12 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       profileRuleChars: pinnedProfileRules.length,
       ragChars: ragContext?.length || 0,
       transientBodyChars: claudeBody.length,
-      stableSystemChars: stylePrompt.length + memoryPrompt.length + pinnedProfileRules.length + (profile && profileTemplates[profile] ? profileTemplates[profile].length : 0),
+      dynamicMemoryChars: memoryPrompt.length,
+      stableSystemChars: stylePrompt.length + pinnedProfileRules.length + (profile && profileTemplates[profile] ? profileTemplates[profile].length : 0),
       timestamp: new Date().toISOString(),
     }));
     const task = runClaudeStream(ai, sid, sessionName, claudeBody, firstTurn, handleClaudeEvent, stylePrompt, memoryPrompt, profile, {
       routingBody: body,
-      noSessionPersistence: isProfileChat,
     });
     if (onProc) onProc(task.proc);
 
@@ -2604,7 +3691,6 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       writeFmt(`\n--- Retry ${retry + 1} ---`);
       const retryTask = runClaudeStream(ai, newSid || sid, sessionName, claudeBody, firstTurn, handleClaudeEvent, stylePrompt, memoryPrompt, profile, {
         routingBody: body,
-        noSessionPersistence: isProfileChat,
       });
       if (onProc) onProc(retryTask.proc);
       ({ code, stderr, killed } = await retryTask);
@@ -2638,8 +3724,20 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     styleState._lastContextToken = contextToken || styleState._lastContextToken || null;
     appendVisibleHistory(styleState, "user", body, "chat", userAt);
     appendVisibleHistory(styleState, "assistant", assistantFullText.trim(), "chat", assistantAt);
-    if (sceneletResult?.nextSceneState) setSceneStateFromText(styleState, sceneletResult.nextSceneState);
-    addProactiveCandidates(styleState, sceneletResult, body);
+    const roleWorld = isProfileChat ? getRoleWorld(turnProfile) : null;
+    if (sceneletResult?.nextSceneState) {
+      setSceneStateFromText(styleState, sceneletResult.nextSceneState);
+      if (roleWorld) roleWorld._sceneState = normalizeSceneState(styleState._sceneState);
+    }
+    if (roleWorld) {
+      applyLifeArcOps(roleWorld, sceneletResult?.lifeArcOps);
+      roleWorld.updatedAt = assistantAt;
+      syncRoleWorldToSession(styleState, turnProfile);
+      saveRoleWorlds();
+    } else {
+      applyLifeArcOps(styleState, sceneletResult?.lifeArcOps);
+    }
+    await addProactiveCandidates(styleState, sceneletResult, body);
     recordChatHistory({ ai, userId, sess: styleState, role: "user", kind: "chat", text: body, timestamp: userAt });
     recordChatHistory({
       ai,
@@ -2650,6 +3748,10 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       text: assistantFullText.trim(),
       scenelet: sceneletResult?.innerScenelet || "",
       sceneState: sceneletResult?.nextSceneState || "",
+      sceneletStatus: isProfileChat ? (sceneletResult?.innerScenelet ? "ok" : "missing") : "not_applicable",
+      sceneletError,
+      toolUsage: mergeToolUsage(sceneletResult?.toolUsage, turnToolUsage),
+      ragUsage: turnRagUsage,
       timestamp: assistantAt,
     });
   }
@@ -3317,6 +4419,7 @@ async function main() {
   loadModelNames();
   loadProfiles();
   loadSessions();
+  loadRoleWorlds();
 
   // ─── Start GUI server first ──────────────────────────────────
   registerStatusRoutes();
@@ -3327,6 +4430,7 @@ async function main() {
   registerProactiveRoutes();
   registerMemoryRoutes();
   registerPromptsRoutes();
+  registerWorldRoutes();
   startServer();
 
   // ─── WeChat login ────────────────────────────────────────────

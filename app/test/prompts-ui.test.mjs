@@ -13,20 +13,16 @@ describe("Prompts runtime pipeline UI", () => {
       "入站附件 / Vision Caption",
       "失败轮次保护",
       "Profile Template",
-      "长期记忆注入",
       "稳定表达能力",
-      "可见上下文窗口",
-      "延续 scene_state",
-      "隐藏 inner_scenelet 调用",
+      "长期记忆注入",
+      "Hidden-world 输出注入",
       "RAG Eligibility Gate",
       "聊天写法 / 聊天现实 + 用户消息",
       "后端 Prompt 组装",
       "流式输出、切分、发送",
       "成功后状态写回",
       "Memory Writer",
-      "Proactive Candidate Queue",
-      "Daily Share Seed",
-      "Proactive Evaluation",
+      "Hidden-world 后续工序",
     ];
 
     let last = -1;
@@ -37,33 +33,34 @@ describe("Prompts runtime pipeline UI", () => {
     }
   });
 
+  it("shows memory as a dynamic turn body prefix, not as stable system context", () => {
+    const systemIdx = appJs.indexOf("阶段 1 — 稳定 System Context");
+    const bodyPrefixIdx = appJs.indexOf("阶段 2 — 主回复动态 Turn Body");
+    const memoryIdx = appJs.indexOf("长期记忆注入");
+    const modelIdx = appJs.indexOf("阶段 3 — 主模型轮次");
+
+    assert.ok(systemIdx >= 0, "stable system phase should be present");
+    assert.ok(bodyPrefixIdx > systemIdx, "dynamic body prefix phase should appear after stable system phase");
+    assert.ok(memoryIdx > bodyPrefixIdx, "memory should be rendered inside the dynamic body prefix phase");
+    assert.ok(memoryIdx < modelIdx, "memory should appear before main model assembly");
+    assert.match(appJs, /稳定 system context 到这里结束；接下来组装主回复动态 turn body/);
+    assert.match(appJs, /memory snapshot 放在 turn body 最前面；不再进入稳定 system prompt/);
+    assert.match(appJs, /主回复不读取可见上下文窗口/);
+  });
+
   it("exposes editable controls used by the runtime prompt pipeline", () => {
     const textFields = [
       "chatStyle",
       "expressionCapability",
       "chatRealityInstructions",
-      "sceneletInstructions",
-      "dailyShareSeedInstructions",
       "memoryWriterInstructions",
-      "proactiveInstructions",
       "visionCaptionPrompt",
       "ragContextInstruction",
-      "chatHistoryIntro",
-      "sceneStateIntro",
-      "innerSceneletIntro",
-      "sceneletReplyBridgeInstruction",
       "memoryContextInstruction",
     ];
     const numFields = [
-      "visibleContextTurns",
-      "sceneStateMaxChars",
       "memorySoftItemLimit",
       "memorySoftPromptChars",
-      "proactiveCheckIntervalMs",
-      "proactiveCooldownMs",
-      "proactiveDailyMax",
-      "dailyShareSeedIntervalMs",
-      "dailyShareMinIdleMs",
       "ragTopK",
       "ragMinScore",
       "ragResultMaxChars",
@@ -77,6 +74,7 @@ describe("Prompts runtime pipeline UI", () => {
       assert.match(appJs, new RegExp(`renderNumberControl\\("${key}"`), `${key} should be editable`);
     }
     assert.doesNotMatch(appJs, /renderNumberControl\("memoryDefaultLimit"/, "memoryDefaultLimit is not used by the current stable memory snapshot path");
+    assert.doesNotMatch(appJs, /title: "可见上下文窗口"/);
   });
 
   it("keeps RAG keyword controls limited to lore and names", () => {

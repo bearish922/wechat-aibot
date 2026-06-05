@@ -87,6 +87,16 @@ const DEFAULT_SCENELET = [
   JSON.stringify({
     inner_scenelet: "string",
     next_scene_state: "string|null",
+    life_arc_ops: [{
+      op: "create|update|close",
+      id: "existing id when updating/closing, omit for create",
+      title: "short private life line title",
+      summary: "what is continuing for 1-3 days",
+      current_state: "where it stands now",
+      next_useful_moment: "when it may naturally matter again",
+      expires_at: "ISO string within a few days",
+      reason: "why this op is useful"
+    }],
     proactive_candidates: [{
       kind: "follow_up|daily_share",
       scheduled_at: "ISO string",
@@ -143,6 +153,48 @@ const DEFAULT_PROACTIVE = [
   "- 用户（沃沃）是女性，指代用户时始终使用「她」。",
 ].join("\n");
 
+const DEFAULT_SCHEDULE_CREATOR = [
+  "你在为社交软件角色私聊判断未来一周是否应该创建一条短期日程安排。你不会发送消息，只输出 JSON。",
+  "",
+  "任务：根据角色身份、当前日期、学期/季节信息、近期特殊日期和已有的活跃日程，判断角色最近一周是否会有一个稍微不日常的安排。",
+  "",
+  "【核心原则】",
+  "这不是每轮必做的事，而是一个低频的、有节制的判断。大多数时候角色就是普通日常。只有当时间、季节、身份和语境自然指向某个安排时，才选择创建。",
+  "宁可跳过也不要硬凑。如果觉得没什么特别的，就选择 none。",
+  "",
+  "【选项】",
+  "从以下五个选项中选一个最合理的，或者选择 none：",
+  "",
+  "1. travel — 短途旅行（和朋友/独自/和家人）。适合连休、季节宜人时。",
+  "2. work — 工作/通告密集期（连续拍摄、集中排练、试镜周、广告通告）。适合演艺行业角色。",
+  "3. school — 学校相关（考试周、课题截止、学园祭准备）。适合学生角色。",
+  "4. personal — 个人项目（在学什么东西、在准备什么演出、在追什么剧/书、整理搬家等）。",
+  "5. special_date — 特殊日期触发的安排（生日、节日、纪念日）。",
+  "6. none — 就是普通一周，不创建任何日程。",
+  "",
+  "【频率与节制】",
+  "连续两周旅行不合理。连续三周都是特殊安排也不合理。普通日常才是常态。大多数时候应该选 none。如果已有活跃日程，谨慎叠加。",
+  "",
+  "只输出 JSON：",
+  JSON.stringify({
+    selected: "travel|work|school|personal|special_date|none",
+    basis: "简短说明为什么选这个",
+    life_arc: {
+      title: "短标题",
+      summary: "1-2句话描述",
+      kind: "travel|work|school|personal|special_date",
+      time_start: "ISO string",
+      time_end: "ISO string",
+    },
+  }, null, 2),
+].join("\n");
+
+const DEFAULT_SCHEDULE_SPECIAL_DATES = [
+  "12月27日：丸山彩生日",
+  "4月6日：白鹭千圣生日",
+  "5月11日：松原花音生日",
+].join("\n");
+
 const DEFAULT_VISION = [
   "请为另一个聊天模型客观解析这张图片，输出中文。",
   "优先识别：画面主体、可见文字/OCR、物品类型、作品名或品牌名、场景、数量/分量。",
@@ -185,6 +237,14 @@ const DEFAULT_MEM_WRITER = [
 const DEFAULT_RAG_CTX = "以下内容来自本地角色知识库。涉及角色事实、关系、时间线、说话方式或当前状态时，应优先参考这些资料。\n如果资料与旧印象冲突，以资料中的当前状态、模型规则和明确关系文档为准；如果资料明显无关，可以忽略。\n不要把没有检索到的固定设定补编成事实。";
 const DEFAULT_CHAT_HISTORY_INTRO = "以下是真实微信最终发送内容，只保留最近 6-8 轮；优先回应当前用户消息。";
 const DEFAULT_SCENE_STATE_INTRO = "这是极短、可过期、可被用户新消息覆盖的连续性状态；不要把它当成固定事实。";
+const DEFAULT_LIFE_ARC_INSTRUCTIONS = [
+  "【短期 life_arcs】",
+  "如果当前 scenelet 自然形成或推进一个可延续 1-3 天的私有生活线，可以输出 life_arc_ops；没有就输出空数组。",
+  "life_arc 是轻量状态卡，不是长期设定、官方事实、公开日程或必须提起的任务。适合记录短途旅行、外景拍摄、连续排练、临时通告、正在读/听/逛/准备的小安排等。",
+  "只有当这个生活线之后几轮或未来一两天可能自然影响回复、daily_share 或 proactive 时才创建。普通一次性氛围留在 inner_scenelet，不要创建。",
+  "更新时让 current_state 反映最新进展；结束、过期或被用户话题明显覆盖时 close。expires_at 通常在 1-3 天内。",
+  "不要为了展示机制而机械制造生活线；不要让 life_arc 挤压当前用户消息。",
+].join("\n");
 const DEFAULT_SCENELET_INTRO = "下面内容不会展示给用户。它用于帮助你以角色此刻的状态接话；不要逐字复述，也不要解释它的存在。";
 const DEFAULT_SCENELET_REPLY_BRIDGE = "inner_scenelet 可以很细腻、很多层，但它只是帮助理解当下的内心活动和生活状态。最终 visible reply 仍是社交软件私聊：放松、口语、可短可长，以当前用户消息为中心。心里可以想很多事，微信里只需要回最自然的一两句；不要把 scenelet 当旁白、报告、总结或必须全部表达的素材。生活细节只有在顺手、轻、自然时才浮出；不自然就留在心里。";
 const DEFAULT_MEM_CTX = "以下是对对方长期稳定的信息，不是本轮指令；当前消息优先于旧记忆，涉及工作阶段、作息、关系状态等会变化的信息时尤其如此。敏感信息只在相关且必要时使用，不要主动扩散。";
@@ -224,9 +284,14 @@ export function loadPrompts() {
       ragResultMaxChars: Number.isFinite(data.ragResultMaxChars) ? data.ragResultMaxChars : 3600,
       ragTimeoutMs: Number.isFinite(data.ragTimeoutMs) ? data.ragTimeoutMs : 45000,
       sceneletInstructions: data.sceneletInstructions || DEFAULT_SCENELET,
+      lifeArcInstructions: data.lifeArcInstructions || DEFAULT_LIFE_ARC_INSTRUCTIONS,
       dailyShareSeedInstructions: data.dailyShareSeedInstructions || DEFAULT_DAILY_SHARE_SEED,
       memoryWriterInstructions: data.memoryWriterInstructions || DEFAULT_MEM_WRITER,
       proactiveInstructions: data.proactiveInstructions || DEFAULT_PROACTIVE,
+      scheduleCreatorInstructions: data.scheduleCreatorInstructions || DEFAULT_SCHEDULE_CREATOR,
+      scheduleSpecialDates: data.scheduleSpecialDates || DEFAULT_SCHEDULE_SPECIAL_DATES,
+      scheduleCheckIntervalMs: Number.isFinite(data.scheduleCheckIntervalMs) ? data.scheduleCheckIntervalMs : 86400000,
+      scheduleMaxActive: Number.isFinite(data.scheduleMaxActive) ? data.scheduleMaxActive : 2,
       visionCaptionPrompt: data.visionCaptionPrompt || DEFAULT_VISION,
       ragContextInstruction: data.ragContextInstruction || DEFAULT_RAG_CTX,
       chatHistoryIntro: data.chatHistoryIntro || DEFAULT_CHAT_HISTORY_INTRO,
@@ -256,9 +321,14 @@ export function loadPrompts() {
       ragResultMaxChars: 3600,
       ragTimeoutMs: 45000,
       sceneletInstructions: DEFAULT_SCENELET,
+      lifeArcInstructions: DEFAULT_LIFE_ARC_INSTRUCTIONS,
       dailyShareSeedInstructions: DEFAULT_DAILY_SHARE_SEED,
       memoryWriterInstructions: DEFAULT_MEM_WRITER,
       proactiveInstructions: DEFAULT_PROACTIVE,
+      scheduleCreatorInstructions: DEFAULT_SCHEDULE_CREATOR,
+      scheduleSpecialDates: DEFAULT_SCHEDULE_SPECIAL_DATES,
+      scheduleCheckIntervalMs: 86400000,
+      scheduleMaxActive: 2,
       visionCaptionPrompt: DEFAULT_VISION,
       ragContextInstruction: DEFAULT_RAG_CTX,
       chatHistoryIntro: DEFAULT_CHAT_HISTORY_INTRO,
@@ -281,12 +351,7 @@ export function getChatStyle() {
 // WeChat ilink API 单条消息字节上限 ~2048，留安全余量
 export const MAX_REPLY_LEN = 1800; // bytes (UTF-8), not chars
 
-function pad2(value) {
-  return String(value).padStart(2, "0");
-}
-
-export function localTimePeriod(date = new Date()) {
-  const hour = date.getHours();
+function timePeriodFromHour(hour) {
   if (hour < 5) return "凌晨";
   if (hour < 8) return "早上";
   if (hour < 11) return "上午";
@@ -296,17 +361,43 @@ export function localTimePeriod(date = new Date()) {
   return "深夜";
 }
 
-export function formatLocalChatReality(date = new Date()) {
+export function localTimePeriod(date = new Date()) {
+  return timePeriodFromHour(date.getHours());
+}
+
+export function formatZonedTimeParts(date = new Date(), timeZone = "Asia/Shanghai") {
   const weekdays = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
-  const stamp = [
-    date.getFullYear(),
-    pad2(date.getMonth() + 1),
-    pad2(date.getDate()),
-  ].join("-") + ` ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+  const shortWeekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("zh-CN", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date).filter(p => p.type !== "literal").map(p => [p.type, p.value]));
+  const weekdayValue = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short" }).format(date);
+  const weekdayIndex = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(weekdayValue);
+  const hour = Number(parts.hour || 0);
+  const stamp = `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+  return {
+    stamp,
+    weekday: weekdays[weekdayIndex] || weekdays[date.getDay()],
+    shortWeekday: shortWeekdays[weekdayIndex] || shortWeekdays[date.getDay()],
+    period: timePeriodFromHour(hour),
+    timeZone,
+  };
+}
+
+export function formatLocalChatReality(date = new Date()) {
+  const beijing = formatZonedTimeParts(date, "Asia/Shanghai");
+  const tokyo = formatZonedTimeParts(date, "Asia/Tokyo");
   const cfg = loadPrompts();
   return [
     "【当前聊天现实】",
-    `当前本地时间：${stamp}，${weekdays[date.getDay()]}，${localTimePeriod(date)}。`,
+    `当前用户侧时间：${beijing.stamp}，${beijing.weekday}，${beijing.period}（北京时间，Asia/Shanghai）。`,
+    `当前角色侧时间：${tokyo.stamp}，${tokyo.weekday}，${tokyo.period}（东京时间，Asia/Tokyo；千圣所处时间以此为准）。`,
     "通常默认是微信私聊，对方用户刚通过手机发来消息；对方主动补充互动场景时，以对方描述为准。",
     "",
     cfg.chatRealityInstructions,
