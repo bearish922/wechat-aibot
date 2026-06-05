@@ -2,16 +2,19 @@
 """BangDream Knowledge RAG using local embeddings and a Qdrant vector store.
 
 build: parse markdown knowledge files, embed chunks, and persist them in Qdrant.
-query: embed the user message, search the local vector store, and return context.
+query: embed the user message, search the local vector store, rerank with
+metadata, and return context.
 """
 
 import argparse
+import fnmatch
 import json
 import os
 import re
 import shutil
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from qdrant_client import QdrantClient
@@ -63,6 +66,15 @@ def cfg_float(key: str, default: float) -> float:
         return default
 
 
+def cfg_list(key: str, default=None) -> list[str]:
+    raw = cfg(key, default or [])
+    if isinstance(raw, list):
+        return [str(v).strip().replace("\\", "/").strip("/") for v in raw if str(v).strip()]
+    if isinstance(raw, str):
+        return [p.strip().replace("\\", "/").strip("/") for p in re.split(r"[,;]", raw) if p.strip()]
+    return []
+
+
 def cfg_path(key: str, default) -> Path:
     raw = os.environ.get(f"WEIXIN_{key.upper().replace('.', '_')}") or cfg(key, str(default))
     p = Path(raw)
@@ -84,6 +96,56 @@ CHUNK_MIN_CHARS = 80
 CHUNK_MAX_CHARS = cfg_int("rag.chunkMaxChars", 1600)
 RESULT_MAX_CHARS = cfg_int("rag.resultMaxChars", 1200)
 BATCH_SIZE = cfg_int("rag.batchSize", 32)
+RERANK_LIMIT = cfg_int("rag.rerankLimit", max(256, TOP_K * 24))
+INCLUDE_DIRS = cfg_list("rag.includeDirs")
+EXCLUDE_DIRS = cfg_list("rag.excludeDirs")
+EXCLUDE_FILES = cfg_list("rag.excludeFiles")
+
+CHARACTER_ALIASES = {
+    "白鹭千圣": "白鹭千圣",
+    "千圣": "白鹭千圣",
+    "小千圣": "白鹭千圣",
+    "丸山彩": "丸山彩",
+    "小彩": "丸山彩",
+    "彩": "丸山彩",
+    "松原花音": "松原花音",
+    "花音": "松原花音",
+    "濑田薰": "濑田薰",
+    "小薰": "濑田薰",
+    "薰": "濑田薰",
+    "冰川日菜": "冰川日菜",
+    "日菜": "冰川日菜",
+    "冰川纱夜": "冰川纱夜",
+    "纱夜": "冰川纱夜",
+    "大和麻弥": "大和麻弥",
+    "麻弥": "大和麻弥",
+    "小麻弥": "大和麻弥",
+    "若宫伊芙": "若宫伊芙",
+    "伊芙": "若宫伊芙",
+    "小伊芙": "若宫伊芙",
+    "千早爱音": "千早爱音",
+    "爱音": "千早爱音",
+    "长崎素世": "长崎素世",
+    "素世": "长崎素世",
+}
+
+PROFILE_CHARACTERS = {
+    "白鹭千圣": "白鹭千圣",
+    "丸山彩": "丸山彩",
+    "千早爱音": "千早爱音",
+    "长崎素世": "长崎素世",
+}
+
+QUERY_TYPE_PATTERNS = [
+    ("relationship", r"关系|朋友|队友|同伴|相处|互动|称呼|小彩|花音|小薰|薰|日菜|爱音|素世|祥子"),
+    ("speech_style", r"说话|语气|口吻|台词|表达|怎么说|说法|聊天|回复"),
+    ("personality", r"性格|为什么|想法|态度|价值观|内心|温柔|现实|努力|真心"),
+    ("habit_preference", r"喜欢|讨厌|偏好|习惯|红茶|咖啡|食物|Leo|香薰"),
+    ("weakness", r"弱点|害怕|不擅长|怕|路痴|电车|虫|画"),
+    ("skill", r"能力|擅长|演技|表演|贝斯|练习|工作|专业"),
+    ("event_history", r"过去|以前|曾经|剧情|事件|假唱|退团|发传单|早期"),
+    ("daily_life", r"日常|生活|大学|家|合租|居家|上课|片场|排练|睡眠|睡觉|睡着|睡了|睡吗|睡|起床|早起|电费|灯|地铁|通勤"),
+]
 
 CASUAL_PATTERNS = [
     r"^(早上好|早安|早呀|早啊|早|上午好)[哦呀啊啦嘛~～!！。,.，\s]*$",
@@ -110,6 +172,87 @@ def normalize_text(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def ensure_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    return ensure_list(parsed)
+            except Exception:
+                pass
+            text = text[1:-1]
+        return [p.strip().strip('"').strip("'") for p in text.split(",") if p.strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def parse_scalar(value: str):
+    value = value.strip()
+    if not value:
+        return ""
+    if value.startswith("[") and value.endswith("]"):
+        try:
+            return json.loads(value)
+        except Exception:
+            return ensure_list(value)
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        return value[1:-1]
+    if value.lower() in {"true", "false"}:
+        return value.lower() == "true"
+    return value
+
+
+def parse_frontmatter(text: str) -> tuple[dict, str]:
+    if not text.startswith("---"):
+        return {}, text
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n?", text, flags=re.S)
+    if not match:
+        return {}, text
+    raw = match.group(1)
+    body = text[match.end():]
+    meta = {}
+    current_key = None
+    for line in raw.splitlines():
+        m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+        if m:
+            current_key = m.group(1)
+            value = m.group(2).strip()
+            meta[current_key] = [] if value == "" else parse_scalar(value)
+            continue
+        item = re.match(r"^\s*-\s*(.+)$", line)
+        if item and current_key:
+            if not isinstance(meta.get(current_key), list):
+                meta[current_key] = ensure_list(meta.get(current_key))
+            meta[current_key].append(parse_scalar(item.group(1)))
+    return meta, body
+
+
+def normalize_metadata(meta: dict) -> dict:
+    out = dict(meta or {})
+    for key in ("subjects", "characters", "relation_pairs", "categories", "tags"):
+        out[key] = ensure_list(out.get(key))
+    if out.get("relation_pair") and not out.get("relation_pairs"):
+        out["relation_pairs"] = [str(out["relation_pair"])]
+    if "category" in out and out["category"] and not out.get("categories"):
+        out["categories"] = [str(out["category"])]
+    if "type" in out and "doc_type" not in out:
+        out["doc_type"] = str(out["type"])
+    for key in ("timeline_order", "line_index"):
+        if key in out and out[key] not in (None, ""):
+            try:
+                out[key] = int(out[key])
+            except Exception:
+                pass
+    return out
 
 
 def should_skip_query(query: str) -> bool:
@@ -149,10 +292,11 @@ def chunk_text(text: str, limit: int = CHUNK_MAX_CHARS) -> list[str]:
     return parts
 
 
-def chunk_markdown(text: str, source: str) -> list[dict]:
+def chunk_markdown(text: str, source: str, metadata=None) -> list[dict]:
     chunks = []
     sections = re.split(r"\n(?=#{1,3}\s+)", normalize_text(text))
     fallback_title = os.path.splitext(source)[0]
+    metadata = normalize_metadata(metadata or {})
 
     for sec in sections:
         sec = sec.strip()
@@ -162,8 +306,141 @@ def chunk_markdown(text: str, source: str) -> list[dict]:
         title = title_m.group(1).strip() if title_m else fallback_title
         for i, part in enumerate(chunk_text(sec)):
             chunk_title = title if i == 0 else f"{title} ({i + 1})"
-            chunks.append({"source": source, "title": chunk_title, "text": part})
+            chunks.append({
+                "source": source,
+                "title": chunk_title,
+                "text": part,
+                **metadata,
+            })
     return chunks
+
+
+def load_jsonl_knowledge(jsonl_path: Path, rel: str) -> list[dict]:
+    chunks = []
+    with jsonl_path.open("r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except Exception as e:
+                print(f"  [skip] {rel}:{line_no}: {e}", file=sys.stderr)
+                continue
+            text = normalize_text(str(item.get("text") or item.get("content") or ""))
+            if len(text) < CHUNK_MIN_CHARS:
+                continue
+            title = str(item.get("title") or item.get("id") or f"{rel}:{line_no}")
+            source = str(item.get("source") or item.get("source_file") or rel)
+            meta = normalize_metadata({
+                k: v
+                for k, v in item.items()
+                if k not in {"text", "content"}
+            })
+            for i, part in enumerate(chunk_text(text)):
+                chunk_title = title if i == 0 else f"{title} ({i + 1})"
+                chunks.append({
+                    "source": source,
+                    "title": chunk_title,
+                    "text": part,
+                    **meta,
+                    "jsonl_source": rel,
+                    "jsonl_line": line_no,
+                })
+    return chunks
+
+
+def path_allowed(rel: str) -> bool:
+    rel = rel.replace("\\", "/").strip("/")
+    if INCLUDE_DIRS and not any(rel == d or rel.startswith(f"{d}/") for d in INCLUDE_DIRS):
+        return False
+    if EXCLUDE_DIRS and any(rel == d or rel.startswith(f"{d}/") for d in EXCLUDE_DIRS):
+        return False
+    if EXCLUDE_FILES:
+        fname = rel.split("/")[-1]
+        if any(fnmatch.fnmatch(fname, pat) for pat in EXCLUDE_FILES):
+            return False
+    return True
+
+
+def split_relation_from_filename(rel: str) -> tuple[list[str], list[str]]:
+    name = Path(rel).stem
+    if "-" not in name:
+        return [], []
+    parts = [CHARACTER_ALIASES.get(p.strip(), p.strip()) for p in name.split("-", 1)]
+    if len(parts) != 2 or not all(parts):
+        return [], []
+    return parts, infer_relation_pairs(parts)
+
+
+def infer_path_metadata(rel: str) -> dict:
+    rel = rel.replace("\\", "/").strip("/")
+    meta = {}
+    if rel.startswith("05_模型规则/"):
+        meta.update({
+            "doc_type": "boundary",
+            "subjects": ["白鹭千圣"] if "千圣" in rel else [],
+            "characters": ["白鹭千圣"] if "千圣" in rel else [],
+            "categories": ["model_rule", "boundary", "speech_style", "daily_life", "relationship"],
+            "current_validity": "current",
+        })
+    elif rel.startswith("01_角色/"):
+        parts = rel.split("/")
+        char = parts[1] if len(parts) > 2 else ""
+        name = Path(rel).stem
+        doc_type = "profile_dossier"
+        categories = ["personality", "speech_style", "daily_life"]
+        if "局部事实" in name:
+            doc_type = "fact"
+            categories = ["identity", "habit_preference", "weakness", "skill", "daily_life"]
+        elif "角色弧光" in name:
+            doc_type = "timeline"
+            categories = ["event_history", "personality"]
+        elif "核心语录" in name:
+            doc_type = "speech_style"
+            categories = ["speech_style"]
+        meta.update({
+            "doc_type": doc_type,
+            "subjects": [char] if char and char != "角色索引" else [],
+            "characters": [char] if char and char != "角色索引" else [],
+            "categories": categories,
+            "current_validity": "current",
+        })
+    elif rel.startswith("02_关系/"):
+        chars, pairs = split_relation_from_filename(rel)
+        meta.update({
+            "doc_type": "relationship",
+            "subjects": chars,
+            "characters": chars,
+            "relation_pairs": pairs,
+            "categories": ["relationship"],
+            "current_validity": "current",
+        })
+    elif rel.startswith("00_全局/"):
+        name = Path(rel).stem
+        doc_type = "world"
+        categories = ["world"]
+        if "时间线" in name:
+            doc_type = "timeline"
+            categories = ["event_history", "timeline"]
+        elif "乐队" in name:
+            doc_type = "team"
+            categories = ["team", "relationship"]
+        meta.update({"doc_type": doc_type, "categories": categories, "current_validity": "current"})
+    elif rel.startswith("03_团队/"):
+        meta.update({
+            "doc_type": "team",
+            "subjects": [Path(rel).stem],
+            "categories": ["team", "relationship"],
+            "current_validity": "current",
+        })
+    elif rel.startswith("04_事件/"):
+        meta.update({
+            "doc_type": "event_history",
+            "categories": ["event_history", "timeline"],
+            "current_validity": "current",
+        })
+    return meta
 
 
 def load_knowledge() -> list[dict]:
@@ -173,17 +450,41 @@ def load_knowledge() -> list[dict]:
 
     for md_path in sorted(KB_DIR.rglob("*.md")):
         rel = str(md_path.relative_to(KB_DIR)).replace("\\", "/")
+        if not path_allowed(rel):
+            continue
         try:
-            text = md_path.read_text(encoding="utf-8")
+            raw = md_path.read_text(encoding="utf-8")
         except Exception as e:
             print(f"  [skip] {rel}: {e}", file=sys.stderr)
             continue
-        all_chunks.extend(chunk_markdown(text, rel))
+        metadata, text = parse_frontmatter(raw)
+        metadata = normalize_metadata({**infer_path_metadata(rel), **metadata})
+        all_chunks.extend(chunk_markdown(text, rel, metadata))
+    for jsonl_path in sorted(KB_DIR.rglob("*.jsonl")):
+        rel = str(jsonl_path.relative_to(KB_DIR)).replace("\\", "/")
+        if not path_allowed(rel):
+            continue
+        try:
+            all_chunks.extend(load_jsonl_knowledge(jsonl_path, rel))
+        except Exception as e:
+            print(f"  [skip] {rel}: {e}", file=sys.stderr)
     return all_chunks
 
 
+def embedding_text(chunk: dict) -> str:
+    meta_bits = []
+    for key in ("doc_type", "categories", "subjects", "characters", "relation_pairs", "current_validity", "story_type"):
+        value = chunk.get(key)
+        if isinstance(value, list):
+            value = " ".join(str(v) for v in value)
+        if value:
+            meta_bits.append(f"{key}: {value}")
+    prefix = "\n".join(meta_bits)
+    return f"{chunk['title']}\n{prefix}\n{chunk['text']}".strip()
+
+
 def embed_passages(model, chunks: list[dict]) -> list[np.ndarray]:
-    texts = [f"{c['title']}\n{c['text']}" for c in chunks]
+    texts = [embedding_text(c) for c in chunks]
     vectors = []
     for start in range(0, len(texts), BATCH_SIZE):
         batch = texts[start:start + BATCH_SIZE]
@@ -222,15 +523,22 @@ def cmd_build():
 
         points = []
         for idx, (chunk, vector) in enumerate(zip(chunks, vectors)):
+            payload = {
+                "source": chunk.get("source", "unknown"),
+                "title": chunk.get("title", "unknown"),
+                "text": chunk.get("text", ""),
+            }
+            for key, value in chunk.items():
+                if key in payload or key == "text":
+                    continue
+                if value is None:
+                    continue
+                payload[key] = value
             points.append(
                 PointStruct(
                     id=idx,
                     vector=vector.tolist(),
-                    payload={
-                        "source": chunk["source"],
-                        "title": chunk["title"],
-                        "text": chunk["text"],
-                    },
+                    payload=payload,
                 )
             )
             if len(points) >= BATCH_SIZE:
@@ -249,6 +557,8 @@ def cmd_build():
                     "top_k": TOP_K,
                     "min_score": MIN_SCORE,
                     "score_margin": SCORE_MARGIN,
+                    "rerank_limit": RERANK_LIMIT,
+                    "metadata_aware": True,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -261,17 +571,323 @@ def cmd_build():
     print(f"Vector store saved: {STORE_DIR} ({len(chunks)} chunks)")
 
 
-def format_result(hit) -> str:
+def infer_characters(text: str, profile: str = "") -> list[str]:
+    chars = []
+    if profile in PROFILE_CHARACTERS:
+        chars.append(PROFILE_CHARACTERS[profile])
+    hay = f"{profile} {text}"
+    for alias, canonical in CHARACTER_ALIASES.items():
+        if alias and alias in hay and canonical not in chars:
+            chars.append(canonical)
+    return chars
+
+
+def load_coverage() -> dict:
+    coverage_path = KB_DIR / "coverage.json"
+    if not coverage_path.exists():
+        return {}
+    try:
+        return json.loads(coverage_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def relation_pair(a: str, b: str) -> str:
+    return "-".join(sorted([a, b], key=lambda x: x.encode("utf-8")))
+
+
+def infer_relation_pairs(chars: list[str]) -> list[str]:
+    if len(chars) < 2:
+        return []
+    pairs = []
+    for i in range(len(chars)):
+        for j in range(i + 1, len(chars)):
+            pair = relation_pair(chars[i], chars[j])
+            # Keep existing BangDream relation naming stable for known pairs.
+            if set([chars[i], chars[j]]) == set(["白鹭千圣", "丸山彩"]):
+                pair = "白鹭千圣-丸山彩"
+            elif set([chars[i], chars[j]]) == set(["白鹭千圣", "松原花音"]):
+                pair = "白鹭千圣-松原花音"
+            elif set([chars[i], chars[j]]) == set(["白鹭千圣", "濑田薰"]):
+                pair = "白鹭千圣-濑田薰"
+            elif set([chars[i], chars[j]]) == set(["白鹭千圣", "冰川日菜"]):
+                pair = "白鹭千圣-冰川日菜"
+            pairs.append(pair)
+    return pairs
+
+
+def infer_query_type(text: str, explicit: str = "auto") -> str:
+    if explicit and explicit != "auto":
+        return explicit
+    for name, pattern in QUERY_TYPE_PATTERNS:
+        if re.search(pattern, text, flags=re.I):
+            return name
+    return "general"
+
+
+def infer_time_policy(text: str, explicit: str = "auto") -> str:
+    if explicit and explicit != "auto":
+        return explicit
+    if re.search(r"过去|以前|曾经|早期|一开始|最初|当时|回忆|小时候|童年", text):
+        return "past_allowed"
+    return "current"
+
+
+def query_metadata(query_text: str, profile: str = "", query_type: str = "auto", time_policy: str = "auto") -> dict:
+    explicit_chars = infer_characters(query_text, "")
+    chars = list(explicit_chars)
+    profile_char = PROFILE_CHARACTERS.get(profile)
+    if profile_char and profile_char not in chars:
+        chars.insert(0, profile_char)
+    relation_chars = explicit_chars if len(explicit_chars) >= 2 else chars
+    return {
+        "profile": profile or "",
+        "characters": chars,
+        "explicit_characters": explicit_chars,
+        "relation_pairs": infer_relation_pairs(relation_chars),
+        "explicit_relation_pairs": infer_relation_pairs(explicit_chars),
+        "query_type": infer_query_type(query_text, query_type),
+        "time_policy": infer_time_policy(query_text, time_policy),
+    }
+
+
+def coverage_allows(qmeta: dict) -> bool:
+    coverage = load_coverage()
+    if not coverage:
+        return True
+    covered_chars = set(ensure_list(coverage.get("characters")))
+    covered_pairs = set(ensure_list(coverage.get("relation_pairs")))
+    profile_char = PROFILE_CHARACTERS.get(qmeta.get("profile"))
+    explicit_chars = set(qmeta.get("explicit_characters") or [])
+    non_profile_chars = {c for c in explicit_chars if c != profile_char}
+
+    if non_profile_chars and not non_profile_chars.issubset(covered_chars):
+        return False
+
+    explicit_pairs = set(qmeta.get("explicit_relation_pairs") or [])
+    if explicit_pairs:
+        # A query about a relation outside this KB should not be answered from weakly related material.
+        if not explicit_pairs & covered_pairs:
+            # Allow profile-character questions such as 千圣和小彩 when the covered pair exists
+            # under the canonical relation naming.
+            return False
+    return True
+
+
+def metadata_query_text(query_text: str, qmeta: dict) -> str:
+    parts = [
+        query_text,
+        f"profile: {qmeta.get('profile', '')}",
+        f"query_type: {qmeta.get('query_type', '')}",
+        f"characters: {' '.join(qmeta.get('characters', []))}",
+        f"relation_pairs: {' '.join(qmeta.get('relation_pairs', []))}",
+        f"time_policy: {qmeta.get('time_policy', '')}",
+    ]
+    return "\n".join(p for p in parts if p.strip())
+
+
+def overlap_count(a, b) -> int:
+    return len(set(ensure_list(a)) & set(ensure_list(b)))
+
+
+def metadata_boost(payload: dict, qmeta: dict) -> float:
+    boost = 0.0
+    source = str(payload.get("source") or "")
+    doc_type = str(payload.get("doc_type") or payload.get("type") or "")
+    categories = ensure_list(payload.get("categories"))
+    tags = ensure_list(payload.get("tags"))
+    subjects = ensure_list(payload.get("subjects")) + ensure_list(payload.get("characters"))
+    relation_pairs = ensure_list(payload.get("relation_pairs"))
+    current_validity = str(payload.get("current_validity") or payload.get("current_validity_guess") or "")
+    query_type = qmeta.get("query_type") or "general"
+    time_policy = qmeta.get("time_policy") or "current"
+
+    char_hits = overlap_count(subjects, qmeta.get("characters", []))
+    boost += min(0.18, char_hits * 0.07)
+
+    pair_hits = overlap_count(relation_pairs, qmeta.get("relation_pairs", []))
+    boost += min(0.24, pair_hits * 0.18)
+
+    if query_type != "general":
+        if query_type in categories or query_type == doc_type:
+            boost += 0.14
+        if any(f"cat/{query_type}" in tag for tag in tags):
+            boost += 0.08
+        if query_type == "relationship" and doc_type == "relationship":
+            boost += 0.08
+        if query_type == "daily_life" and doc_type in {"fact", "profile_dossier"}:
+            boost += 0.12
+
+    if doc_type in {"fact", "relationship", "boundary", "timeline", "profile_dossier"}:
+        boost += 0.12
+    elif doc_type == "raw_chunk":
+        boost -= 0.02
+    if doc_type == "boundary" and query_type in {"relationship", "daily_life", "speech_style", "general"}:
+        boost += 0.08
+    if doc_type == query_type:
+        boost += 0.10
+
+    if source.startswith("02_关系/core/"):
+        boost += 0.14
+    elif source.startswith("02_关系/pair/"):
+        boost += 0.10
+    elif source.startswith("02_关系/00_"):
+        boost -= 0.08
+    elif source.startswith("02_关系/long_tail/00_"):
+        boost -= 0.14
+    elif source.startswith("02_关系/long_tail/") and qmeta.get("explicit_relation_pairs") and not relation_pairs:
+        boost -= 0.10
+    if qmeta.get("explicit_relation_pairs") and doc_type == "relationship" and not relation_pairs:
+        boost -= 0.10
+    if query_type != "relationship" and doc_type == "relationship" and not qmeta.get("explicit_relation_pairs"):
+        boost -= 0.12
+
+    if time_policy == "current":
+        if current_validity in {"current", "current_or_future"}:
+            boost += 0.08
+        elif current_validity == "past_context":
+            boost -= 0.10
+    elif time_policy == "past_allowed":
+        if current_validity == "past_context":
+            boost += 0.07
+        elif current_validity in {"current", "current_or_future"}:
+            boost += 0.03
+
+    return boost
+
+
+def lexical_overlap_score(query_text: str, text: str) -> float:
+    terms = set(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", query_text))
+    if not terms:
+        return 0.0
+    hay = text.lower()
+    hits = sum(1 for term in terms if term.lower() in hay)
+    return min(0.08, hits * 0.02)
+
+
+def metadata_matches_card(payload: dict, qmeta: dict, text: str = "") -> bool:
+    doc_type = str(payload.get("doc_type") or payload.get("type") or "")
+    if doc_type not in {"fact", "relationship", "boundary", "timeline", "profile_dossier", "speech_style", "team", "event_history"}:
+        return False
+
+    subjects = ensure_list(payload.get("subjects")) + ensure_list(payload.get("characters"))
+    relations = ensure_list(payload.get("relation_pairs"))
+    categories = ensure_list(payload.get("categories"))
+    tags = ensure_list(payload.get("tags"))
+    query_type = qmeta.get("query_type") or "general"
+
+    char_hit = overlap_count(subjects, qmeta.get("characters", [])) > 0
+    relation_hit = overlap_count(relations, qmeta.get("relation_pairs", [])) > 0
+    if not relation_hit and qmeta.get("relation_pairs"):
+        qchars = set(qmeta.get("characters", []))
+        relation_hit = len(qchars) >= 2 and qchars.issubset(set(subjects))
+    if not relation_hit and "白鹭千圣-松原花音" in qmeta.get("relation_pairs", []):
+        relation_hit = "pair/chisato-kanon" in tags
+    if not relation_hit and "白鹭千圣-丸山彩" in qmeta.get("relation_pairs", []):
+        relation_hit = "pair/chisato-aya" in tags
+    if not relation_hit and "白鹭千圣-濑田薰" in qmeta.get("relation_pairs", []):
+        relation_hit = "pair/chisato-kaoru" in tags
+    type_hit = query_type == "general" or query_type == doc_type or query_type in categories
+    tag_hit = any(f"cat/{query_type}" in tag for tag in tags)
+    boundary_hit = doc_type == "boundary" and query_type in {"relationship", "daily_life", "general"}
+    if doc_type == "boundary" and query_type == "speech_style":
+        boundary_hit = re.search(r"说话|台词|口吻|心理独白|长篇|克制|精准", text) is not None
+
+    if qmeta.get("relation_pairs"):
+        return relation_hit and (type_hit or tag_hit or boundary_hit)
+    return char_hit and (type_hit or tag_hit or boundary_hit)
+
+
+def metadata_card_candidates(qmeta: dict, query_text: str) -> list:
+    candidates = []
+    if not KB_DIR.exists():
+        return candidates
+    for md_path in sorted(KB_DIR.rglob("*.md")):
+        rel = str(md_path.relative_to(KB_DIR)).replace("\\", "/")
+        if not path_allowed(rel):
+            continue
+        if rel.lower() == "readme.md":
+            continue
+        try:
+            raw = md_path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        metadata, body = parse_frontmatter(raw)
+        metadata = normalize_metadata({**infer_path_metadata(rel), **metadata})
+        if not metadata_matches_card(metadata, qmeta, body):
+            continue
+        title_m = re.search(r"^#\s+(.+)$", body, flags=re.M)
+        title = title_m.group(1).strip() if title_m else os.path.splitext(rel)[0]
+        text = normalize_text(body)
+        if len(text) > RESULT_MAX_CHARS:
+            text = text[:RESULT_MAX_CHARS] + "\n\n[...]"
+        payload = {
+            "source": rel,
+            "title": title,
+            "text": text,
+            **metadata,
+        }
+        base = 0.74 + lexical_overlap_score(query_text, f"{title}\n{text}")
+        candidates.append(SimpleNamespace(payload=payload, score=base))
+    return candidates
+
+
+def format_metadata(payload: dict) -> str:
+    parts = []
+    for label, key in [
+        ("type", "doc_type"),
+        ("subjects", "subjects"),
+        ("relations", "relation_pairs"),
+        ("categories", "categories"),
+        ("validity", "current_validity"),
+        ("story_type", "story_type"),
+    ]:
+        value = payload.get(key)
+        if not value and key == "doc_type":
+            value = payload.get("type")
+        if isinstance(value, list):
+            value = ", ".join(str(v) for v in value)
+        if value:
+            parts.append(f"{label}={value}")
+    return "; ".join(parts)
+
+
+def result_allowed_for_query(payload: dict, qmeta: dict) -> bool:
+    explicit_pairs = set(qmeta.get("explicit_relation_pairs") or [])
+    if not explicit_pairs:
+        return True
+    doc_type = str(payload.get("doc_type") or payload.get("type") or "")
+    relation_pairs = set(ensure_list(payload.get("relation_pairs")))
+    if relation_pairs and relation_pairs.isdisjoint(explicit_pairs):
+        return False
+    if doc_type in {"relationship", "boundary", "timeline"} and relation_pairs and relation_pairs.isdisjoint(explicit_pairs):
+        return False
+    return True
+
+
+def format_result(hit, rerank_score=None) -> str:
     payload = hit.payload or {}
     doc = normalize_text(payload.get("text", ""))
     if len(doc) > RESULT_MAX_CHARS:
         doc = doc[:RESULT_MAX_CHARS] + "\n\n[...]"
     title = payload.get("title", "unknown")
     source = payload.get("source", "unknown")
-    return f"【{title}】(来源: {source}, score={hit.score:.3f})\n{doc}"
+    score = hit.score if rerank_score is None else rerank_score
+    meta = format_metadata(payload)
+    meta_line = f"\nmetadata: {meta}" if meta else ""
+    return f"【{title}】(来源: {source}, score={score:.3f}){meta_line}\n{doc}"
 
 
-def cmd_query(query_text: str, top_k: int, min_score: float, debug: bool, no_skip: bool) -> str:
+def cmd_query(
+    query_text: str,
+    top_k: int,
+    min_score: float,
+    debug: bool,
+    no_skip: bool,
+    profile: str = "",
+    query_type: str = "auto",
+    time_policy: str = "auto",
+) -> str:
     query_text = query_text.strip()
     if not no_skip and should_skip_query(query_text):
         if debug:
@@ -283,32 +899,65 @@ def cmd_query(query_text: str, top_k: int, min_score: float, debug: bool, no_ski
         return ""
 
     model = require_embedding()
-    query_vector = np.asarray(next(model.query_embed(query_text)), dtype=np.float32).tolist()
+    qmeta = query_metadata(query_text, profile=profile, query_type=query_type, time_policy=time_policy)
+    if not coverage_allows(qmeta):
+        if debug:
+            print(f"[rag] rejected by coverage: {json.dumps(qmeta, ensure_ascii=False)}", file=sys.stderr)
+        return ""
+    query_vector = np.asarray(next(model.query_embed(metadata_query_text(query_text, qmeta))), dtype=np.float32).tolist()
 
     client = open_client()
     try:
-        hits = client.search(COLLECTION_NAME, query_vector=query_vector, limit=top_k)
+        hits = client.search(COLLECTION_NAME, query_vector=query_vector, limit=max(top_k, RERANK_LIMIT))
     finally:
         client.close()
 
-    best_score = hits[0].score if hits else 0.0
-    selected = [
-        h for h in hits
-        if h.score >= min_score and h.score >= best_score - SCORE_MARGIN
-    ]
+    ranked = []
+    seen_keys = set()
+    for h in [*hits, *metadata_card_candidates(qmeta, query_text)]:
+        payload = h.payload or {}
+        key = (payload.get("source"), payload.get("title"), payload.get("text"))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        boost = metadata_boost(h.payload or {}, qmeta)
+        ranked.append({
+            "hit": h,
+            "boost": boost,
+            "score": float(h.score) + boost,
+        })
+    ranked.sort(key=lambda item: item["score"], reverse=True)
+
+    selected = []
+    selected_sources = set()
+    for item in ranked:
+        if item["score"] < min_score:
+            continue
+        if not result_allowed_for_query(item["hit"].payload or {}, qmeta):
+            continue
+        source = (item["hit"].payload or {}).get("source")
+        if source in selected_sources:
+            continue
+        selected_sources.add(source)
+        selected.append(item)
+        if len(selected) >= top_k:
+            break
     if debug:
-        for h in hits:
+        print(f"[rag] query_meta={json.dumps(qmeta, ensure_ascii=False)}", file=sys.stderr)
+        for item in ranked[:max(top_k, 8)]:
+            h = item["hit"]
             payload = h.payload or {}
             print(
-                f"[rag] score={h.score:.3f} source={payload.get('source')} title={payload.get('title')}",
+                f"[rag] base={h.score:.3f} boost={item['boost']:.3f} final={item['score']:.3f} source={payload.get('source')} title={payload.get('title')}",
                 file=sys.stderr,
             )
     if not selected:
         return ""
-    return "\n\n---\n\n".join(format_result(h) for h in selected)
+    return "\n\n---\n\n".join(format_result(item["hit"], item["score"]) for item in selected)
 
 
 def main():
+    global RESULT_MAX_CHARS
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("build")
@@ -318,6 +967,10 @@ def main():
     qp.add_argument("--file", default=None, help="Read query from file instead of command line")
     qp.add_argument("--top-k", type=int, default=TOP_K)
     qp.add_argument("--min-score", type=float, default=MIN_SCORE)
+    qp.add_argument("--result-max-chars", type=int, default=RESULT_MAX_CHARS)
+    qp.add_argument("--profile", default="", help="Active role/profile name, e.g. 白鹭千圣")
+    qp.add_argument("--query-type", default="auto", help="auto, relationship, speech_style, personality, ...")
+    qp.add_argument("--time-policy", default="auto", help="auto, current, past_allowed")
     qp.add_argument("--debug", action="store_true")
     qp.add_argument("--no-skip", action="store_true")
 
@@ -330,7 +983,17 @@ def main():
         query_str = Path(args.file).read_text(encoding="utf-8").strip()
     else:
         query_str = " ".join(args.text)
-    result = cmd_query(query_str, args.top_k, args.min_score, args.debug, args.no_skip)
+    RESULT_MAX_CHARS = max(100, int(args.result_max_chars or RESULT_MAX_CHARS))
+    result = cmd_query(
+        query_str,
+        args.top_k,
+        args.min_score,
+        args.debug,
+        args.no_skip,
+        profile=args.profile,
+        query_type=args.query_type,
+        time_policy=args.time_policy,
+    )
     if result:
         print(result)
 

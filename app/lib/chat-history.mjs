@@ -72,6 +72,8 @@ export function listChatEvents(options = {}) {
     ].some(v => String(v || "").toLowerCase().includes(q)));
   }
 
+  events.reverse();
+
   const total = events.length;
   const page = events.slice(offset, offset + limit);
   return { events: page, total };

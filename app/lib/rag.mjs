@@ -9,18 +9,3 @@ export function shouldSkipRag(userMessage) {
   const q = userMessage.trim().toLowerCase();
   return !q || (q.length <= 24 && RAG_SKIP_PATTERNS.some(pattern => pattern.test(q)));
 }
-
-export function buildRagBody(userMessage, ragContext) {
-  if (!ragContext) return userMessage;
-  return [
-    "【可能相关的背景资料】",
-    "以下资料由向量检索自动召回，可能相关，也可能无关。",
-    "不要假设用户正在阅读、分享或讨论这些资料；只有当它确实能帮助回答时才使用。",
-    "",
-    ragContext,
-    "",
-    "---",
-    "",
-    userMessage,
-  ].join("\n");
-}
