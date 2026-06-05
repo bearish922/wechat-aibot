@@ -1,13 +1,20 @@
 import json, random, re
+from pathlib import Path
 
-with open(r'D:\Desktop\cc_workspace\weixin-aibot\data\runtime\proactive-eval\cst-history.json', 'r', encoding='utf-8') as f:
+ROOT = Path(__file__).resolve().parents[1]
+history_path = ROOT / 'data' / 'runtime' / 'proactive-eval' / 'cst-history.json'
+r2_path = ROOT / 'data' / 'runtime' / 'rag-pilot-eval' / 'chisato-rag-pilot-results.json'
+output_path = ROOT / 'data' / 'runtime' / 'rag-pilot-eval' / 'new15_cases.json'
+output_path.parent.mkdir(parents=True, exist_ok=True)
+
+with history_path.open('r', encoding='utf-8') as f:
     history = json.load(f)
 
 # Turns used in Round 1 (from the original report - 45 cases)
 r1_turns = {1,2,3,4,5,6,7,10,12,13,14,15,16,19,20,21,22,25,26,28,31,33,34,37,40,41,42,43,44,45,46,47,48,49,51,54,55,64,82,84,85,87,88,109,110}
 
 # Read Round 2 results to get the full list of used turns
-with open(r'D:\Desktop\cc_workspace\weixin-aibot\data\runtime\rag-pilot-eval\chisato-rag-pilot-results.json', 'r', encoding='utf-8') as f:
+with r2_path.open('r', encoding='utf-8') as f:
     r2 = json.load(f)
 
 r2_turns = set()
@@ -63,6 +70,6 @@ for s in selected:
 
 # Save for the test script
 out = [{'turn_index': s['turn'], 'user': s['msg_full'], 'time': s['ts'], 'id': s['id'], 'idx': s['idx']} for s in selected]
-with open(r'D:\Desktop\cc_workspace\weixin-aibot\data\runtime\rag-pilot-eval\new15_cases.json', 'w', encoding='utf-8') as f:
+with output_path.open('w', encoding='utf-8') as f:
     json.dump(out, f, ensure_ascii=False, indent=2)
 print('Saved to new15_cases.json')

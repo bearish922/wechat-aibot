@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.5.0 — Searchable Scenelet, Prompt Pipeline & Voice ASR (2026-06-05)
+- Switch production scenelet generation to the **non-bare searchable scenelet** architecture by default: `inner_scenelet` hidden calls can use `WebSearch/WebFetch` for public facts, while proactive and daily-share hidden checks remain lightweight bare JSON calls.
+- Add `scene.sceneletBare` config switch so users can revert scenelet calls to bare mode without changing code.
+- Version the GUI prompt defaults in `data/prompts.json`, making the roleplay/prompt pipeline shareable as an open prompt-writing example instead of purely local runtime config.
+- Expand and tune the prompt pipeline: richer character life scenes, public-fact boundaries, scenelet-to-WeChat bridge guidance, daily-share proactive prompts, and stronger safeguards against native WeChat bracket emoji placeholders.
+- Add **daily_share** proactive candidates for low-pressure everyday topic starts, and improve proactive intent deduplication so repeated turns about the same pending topic merge instead of stacking duplicate scheduled messages.
+- Count proactive daily limits by actually sent messages, not merely generated candidate intents.
+- Remove the artificial six-message social reply split cap; replies still respect the WeChat byte limit but no longer merge natural message beats just to stay under six parts.
+- Add WhisperX voice transcription pipeline: WeChat `.silk` voice files are decoded with `silk-wasm`, converted to WAV, then transcribed through a configurable WhisperX Python environment, with WeChat's built-in transcript kept as fallback.
+- Add `voice.*` config fields and startup checks for optional WhisperX support.
+- Improve GUI Proactive and Prompts surfaces, including clearer runtime pipeline text and less noisy proactive display.
+- Add offline evaluation scripts for roleplay smoke tests, search architecture comparison, tool-use probing, reply length/bridge checks, and readable experiment reports.
+- Update README and release packaging so versioned prompt defaults are included in GitHub release archives.
+
 ## v2.4.0 — Scenelet, Proactive Reply & Character Overhaul (2026-06-02)
 - Add **inner_scenelet** hidden middle layer: every character chat turn first runs an independent model call to generate a vivid, in-character inner scenelet (current life moment, physical state, emotional tone, why this reply feels natural) that guides the main reply but is never shown to the user
 - Add **scene_state** lightweight cross-turn continuity: only a very short 40-80 character state (time, place, body state, topic aftertaste) carries between turns with a 2-hour expiry, replacing unlimited Claude session history
