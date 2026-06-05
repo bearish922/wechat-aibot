@@ -36,6 +36,17 @@
     "detail": "high",
     "timeoutMs": 180000
   },
+  "voice": {
+    "enabled": true,
+    "whisperxPython": "optional path to the Python executable in a WhisperX virtual environment",
+    "model": "large-v3",
+    "language": "auto",
+    "computeType": "default",
+    "batchSize": 8,
+    "sampleRate": 24000,
+    "noAlign": true,
+    "timeoutMs": 180000
+  },
   "rag": {
     "enabled": true,
     "knowledgeDir": "data/knowledge",

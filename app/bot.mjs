@@ -3,6 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn, spawnSync, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { decode as decodeSilk, getDuration as getSilkDuration, isSilk as isSilkAudio } from "silk-wasm";
 
 // ─── CONFIG ───────────────────────────────────────────────────
 import { configValue, envOrConfig, configBool, configNumber } from "./lib/config.mjs";
@@ -158,6 +159,15 @@ const VISION_API_KEY = usableConfigString(process.env.WECHAT_VISION_API_KEY ?? p
 const VISION_MODEL = usableConfigString(envOrConfig("WECHAT_VISION_MODEL", "vision.model", DEFAULT_VISION_MODEL), DEFAULT_VISION_MODEL);
 const VISION_DETAIL = envOrConfig("WECHAT_VISION_DETAIL", "vision.detail", "high");
 const VISION_TIMEOUT_MS = configNumber("vision.timeoutMs", 180_000);
+const VOICE_ASR_ENABLED = configBool("voice.enabled", true);
+const VOICE_WHISPERX_PYTHON = usableConfigString(envOrConfig("WECHAT_VOICE_WHISPERX_PYTHON", "voice.whisperxPython", envOrConfig("WECHAT_VOICE_PYTHON", "voice.pythonPath", "python")), "python");
+const VOICE_MODEL = usableConfigString(envOrConfig("WECHAT_VOICE_MODEL", "voice.model", "large-v3"), "large-v3");
+const VOICE_LANGUAGE = String(envOrConfig("WECHAT_VOICE_LANGUAGE", "voice.language", "auto") || "auto").trim();
+const VOICE_COMPUTE_TYPE = usableConfigString(envOrConfig("WECHAT_VOICE_COMPUTE_TYPE", "voice.computeType", "default"), "default");
+const VOICE_BATCH_SIZE = configNumber("voice.batchSize", 8);
+const VOICE_SAMPLE_RATE = configNumber("voice.sampleRate", 24000);
+const VOICE_NO_ALIGN = configBool("voice.noAlign", true);
+const VOICE_TIMEOUT_MS = configNumber("voice.timeoutMs", 180_000);
 import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, rememberRecentKaomoji, getChatStyle, localTimePeriod, formatLocalChatReality, expressionCapabilityPrompt, loadPrompts } from "./lib/reply.mjs";
 import { shouldSkipRag } from "./lib/rag.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
@@ -833,6 +843,114 @@ function saveInboundBuffer(buf, { kind, mime, originalFilename }) {
   return filePath;
 }
 
+function wavFromPcm16le(pcm, sampleRate) {
+  const data = Buffer.from(pcm);
+  const header = Buffer.alloc(44);
+  const byteRate = sampleRate * 2;
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + data.length, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(data.length, 40);
+  return Buffer.concat([header, data]);
+}
+
+function runProcessText(command, args, { cwd = process.cwd(), timeoutMs = 60_000, env = process.env } = {}) {
+  return new Promise((resolve) => {
+    const proc = spawnCli(command, args, {
+      cwd,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env,
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        proc.kill();
+      }
+    }, timeoutMs);
+    proc.stdout.on("data", d => { stdout += d; if (stdout.length > 8000) stdout = stdout.slice(-8000); });
+    proc.stderr.on("data", d => { stderr += d; if (stderr.length > 8000) stderr = stderr.slice(-8000); });
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      settled = true;
+      resolve({ code, stdout, stderr, timedOut: proc.killed });
+    });
+    proc.on("error", (e) => {
+      clearTimeout(timer);
+      settled = true;
+      resolve({ code: -1, stdout, stderr: `${stderr}\n${e.message}`.trim(), timedOut: false });
+    });
+  });
+}
+
+async function transcribeVoiceWithWhisperX(filePath) {
+  if (!VOICE_ASR_ENABLED) return null;
+  if (!filePath || !fs.existsSync(filePath)) return { error: "voice file missing" };
+  if (!commandExists(VOICE_WHISPERX_PYTHON)) return { error: `voice WhisperX python not found: ${VOICE_WHISPERX_PYTHON}` };
+
+  const input = fs.readFileSync(filePath);
+  const runtimeDir = path.join(RUNTIME_DIR, "voice_asr");
+  ensureDir(runtimeDir);
+  const stem = `${path.basename(filePath, path.extname(filePath))}-${crypto.randomUUID().slice(0, 8)}`;
+  const wavPath = path.join(runtimeDir, `${stem}.wav`);
+  const outDir = path.join(runtimeDir, `${stem}-out`);
+  ensureDir(outDir);
+
+  let durationMs = null;
+  if (isSilkAudio(input)) {
+    durationMs = getSilkDuration(input);
+    const decoded = await decodeSilk(input, VOICE_SAMPLE_RATE);
+    fs.writeFileSync(wavPath, wavFromPcm16le(decoded.data, VOICE_SAMPLE_RATE));
+  } else {
+    fs.copyFileSync(filePath, wavPath);
+  }
+
+  const args = [
+    "-m", "whisperx",
+    wavPath,
+    "--model", VOICE_MODEL,
+    "--output_dir", outDir,
+    "--output_format", "txt",
+    "--batch_size", String(VOICE_BATCH_SIZE),
+    "--compute_type", VOICE_COMPUTE_TYPE,
+    "--verbose", "False",
+  ];
+  if (VOICE_LANGUAGE && VOICE_LANGUAGE.toLowerCase() !== "auto") {
+    args.push("--language", VOICE_LANGUAGE);
+  }
+  if (VOICE_NO_ALIGN) args.push("--no_align");
+
+  const result = await runProcessText(VOICE_WHISPERX_PYTHON, args, {
+    cwd: appPath(),
+    timeoutMs: VOICE_TIMEOUT_MS,
+  });
+  const txtPath = path.join(outDir, `${path.basename(wavPath, path.extname(wavPath))}.txt`);
+  const transcript = fs.existsSync(txtPath) ? fs.readFileSync(txtPath, "utf-8").trim() : "";
+  if (result.code !== 0 && !transcript) {
+    const detail = (result.stderr || result.stdout || "").trim().split(/\r?\n/).slice(-3).join(" | ");
+    return { error: `WhisperX exited ${result.code}${result.timedOut ? " (timeout)" : ""}${detail ? `: ${detail}` : ""}`, wavPath, durationMs };
+  }
+  return {
+    transcript,
+    wavPath,
+    durationMs,
+    language: VOICE_LANGUAGE || "auto",
+    model: VOICE_MODEL,
+    error: transcript ? "" : "WhisperX produced empty transcript",
+  };
+}
+
 function runPythonExtractor(filePath, mode) {
   const code = String.raw`
 import json, re, sys, zipfile, xml.etree.ElementTree as ET
@@ -1049,7 +1167,20 @@ async function downloadInboundMedia(item, label) {
     if (!voice.media?.aes_key) return { kind: "voice", transcript: voice.text || "", error: "missing voice aes_key" };
     const buf = await downloadCdnMedia(voice.media, voice.media.aes_key, label);
     const filePath = saveInboundBuffer(buf, { kind: "voice", mime: "audio/silk", originalFilename: "voice.silk" });
-    return { kind: "voice", path: filePath, mime: "audio/silk", transcript: voice.text || "", playtime: voice.playtime };
+    const asr = await transcribeVoiceWithWhisperX(filePath);
+    if (asr?.error) log("⚠️", `voice WhisperX failed: ${asr.error}`);
+    return {
+      kind: "voice",
+      path: filePath,
+      mime: "audio/silk",
+      transcript: voice.text || "",
+      whisperxTranscript: asr?.transcript || "",
+      whisperxError: asr?.error || "",
+      whisperxWavPath: asr?.wavPath || "",
+      whisperxLanguage: asr?.language || "",
+      whisperxDurationMs: asr?.durationMs || null,
+      playtime: voice.playtime,
+    };
   }
   if (item.type === 4) {
     const f = item.file_item || {};
@@ -1094,8 +1225,14 @@ function mediaInfoToPrompt(info) {
     return `[图片]\n本地路径: ${info.path}\nMIME: ${info.mime}${dims}${caption}\n回复时不要仅凭用户补充文字脑补图片细节。若已有外部视觉描述，请优先依据它，但仍要保守处理不确定内容；不要自行读取本地图片文件。`;
   }
   if (info.kind === "voice") {
-    const transcript = info.transcript ? `\n语音转文字: ${info.transcript}` : "";
-    return `[语音]\n本地路径: ${info.path || "未保存"}\nMIME: ${info.mime || "unknown"}${transcript}`;
+    const wechatTranscript = info.transcript ? `\n微信自带语音转文字: ${info.transcript}` : "";
+    const whisperxTranscript = info.whisperxTranscript ? `\nWhisperX 语音转文字: ${info.whisperxTranscript}` : "";
+    const whisperxError = !info.whisperxTranscript && info.whisperxError ? `\nWhisperX 语音转文字: 未生成（${info.whisperxError}）` : "";
+    const duration = info.whisperxDurationMs ? `\n估计时长: ${Math.round(info.whisperxDurationMs / 100) / 10}s` : "";
+    const guidance = info.whisperxTranscript
+      ? "\n若微信自带转写与 WhisperX 冲突，优先参考 WhisperX；短语音仍可能有误，回复时不要编造语音里没有的内容。"
+      : "\n微信自带转写可能不准确，尤其是日语；若内容明显不通顺，回复时应保守确认。";
+    return `[语音]\n本地路径: ${info.path || "未保存"}\nMIME: ${info.mime || "unknown"}${duration}${wechatTranscript}${whisperxTranscript}${whisperxError}${guidance}`;
   }
   if (info.kind === "file") {
     const preview = info.textPreview ? `\n可提取文本预览:\n${info.textPreview}` : "\n未能直接提取文本；需要时可读取本地文件。";
@@ -3027,6 +3164,17 @@ function startupCheck() {
     pass("Python", (py.stdout || py.stderr || "").trim());
   } else {
     fail("Python", "python 命令不可用 (RAG / 文件提取将不可用)");
+  }
+
+  if (VOICE_ASR_ENABLED) {
+    const wx = spawnSync(VOICE_WHISPERX_PYTHON, ["-m", "whisperx", "--version"], { encoding: "utf8", timeout: 15_000, windowsHide: true });
+    if (wx.status === 0) {
+      pass("Voice WhisperX", (wx.stdout || wx.stderr || VOICE_WHISPERX_PYTHON).trim().split(/\r?\n/)[0]);
+    } else {
+      warn("Voice WhisperX", `${VOICE_WHISPERX_PYTHON} is not available; WeChat voice fallback transcript will still be used`);
+    }
+  } else {
+    warn("Voice WhisperX", "disabled");
   }
 
   // ffmpeg (optional)
