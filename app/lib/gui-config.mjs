@@ -20,6 +20,7 @@ const CONFIG_FIELDS = {
   "models.claudeFallback": "string",
   "models.scenelet": "string",
   "timeouts.aiMs": "number",
+  "scene.sceneletBare": "boolean",
   "vision.mode": "string",
   "vision.baseUrl": "string",
   "vision.apiKey": "string",

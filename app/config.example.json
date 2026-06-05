@@ -26,7 +26,8 @@
   "scene": {
     "mainVisibleContextTurns": 12,
     "sceneletVisibleContextTurns": 8,
-    "proactiveVisibleContextTurns": 8
+    "proactiveVisibleContextTurns": 8,
+    "sceneletBare": false
   },
   "vision": {
     "mode": "auto",

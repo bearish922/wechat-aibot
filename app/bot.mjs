@@ -104,6 +104,7 @@ const CLAUDE_MAIN_MODEL = envOrConfig("WECHAT_CLAUDE_MAIN_MODEL", "models.claude
 const CLAUDE_FAST_MODEL = envOrConfig("WECHAT_CLAUDE_FAST_MODEL", "models.claudeFast", "deepseek-v4-flash[1m]");
 const CLAUDE_FALLBACK_MODEL = envOrConfig("WECHAT_CLAUDE_FALLBACK_MODEL", "models.claudeFallback", "deepseek-v4-pro[1m]");
 const SCENELET_MODEL = envOrConfig("WECHAT_SCENELET_MODEL", "models.scenelet", "deepseek-v4-pro[1m]");
+const SCENELET_BARE = configBool("scene.sceneletBare", false);
 const CLAUDE_TIMEOUT_MS = configNumber("timeouts.aiMs", 600_000);
 const RAG_SCRIPT = resolveProjectPath(configValue("paths.ragScript", "app/rag.py"));
 const RAG_ENABLED = configBool("rag.enabled", true);
@@ -1665,17 +1666,17 @@ function parseHiddenJson(raw) {
   throw new Error("hidden call returned no JSON object");
 }
 
-async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000 } = {}) {
+async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, bare = true } = {}) {
   if (!commandExists(CLAUDE)) return null;
   const args = [
     "-p",
-    "--bare",
     "--output-format", "json",
     "--no-session-persistence",
     "--permission-mode", "bypassPermissions",
     "--tools", "WebSearch,WebFetch",
     "--model", SCENELET_MODEL,
   ];
+  if (bare) args.splice(1, 0, "--bare");
   const proc = spawnCli(CLAUDE, args, {
     cwd: AI_WORK_DIR,
     timeout: timeoutMs,
@@ -1782,7 +1783,7 @@ async function generateSceneletForTurn({ userId, sess, profile, userBody, memory
     visibleContext: recentVisibleContext(sess),
     memoryPrompt,
   });
-  const raw = await runHiddenJson(prompt, { label: "scenelet" });
+  const raw = await runHiddenJson(prompt, { label: SCENELET_BARE ? "scenelet" : "scenelet_searchable", bare: SCENELET_BARE });
   const result = normalizeSceneletResult(raw);
   if (!result?.innerScenelet) return null;
   return result;
