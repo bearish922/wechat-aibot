@@ -408,11 +408,11 @@ function renderPromptsPipeline(p, profileRows) {
         <div class="pipeline-phase-label phase-sys"><span>阶段 1 — 稳定 System Context</span><span class="pipeline-tag">system prompt file / Codex prompt prefix</span></div>
         ${renderPipelineStep({
           n: 5,
-          title: "Profile Template + Pinned Rules",
-          desc: "当当前会话不是默认 profile 时，角色模板会和 knowledge/05_模型规则 下的角色专属规则一起注入。",
-          source: "profileTemplates + 05_模型规则",
+          title: "Profile Template",
+          desc: "当当前会话不是默认 profile 时，角色模板会作为稳定角色底座注入；角色基本事实和核心关系应集中维护在 profile 中。",
+          source: "wechat-profiles.json",
           type: "sys",
-          body: renderPipelineMeta(["Profile 模板在上方表格编辑；pinned rule 由文件维护", "profileRuleMaxChars: 1400 chars", "默认 profile 会跳过角色聊天专属上下文层"]),
+          body: renderPipelineMeta(["Profile 模板在上方表格编辑", "固定规则文件已不再作为 GUI 流程层展示", "默认 profile 会跳过角色聊天专属上下文层"]),
         })}
         ${renderPipelineStep({
           n: 6,
@@ -427,13 +427,11 @@ function renderPromptsPipeline(p, profileRows) {
         })}
         ${renderPipelineStep({
           n: 7,
-          title: "稳定聊天风格",
-          desc: "buildStableStylePrompt() 会把聊天风格和表达能力规则加入稳定 system 层。",
+          title: "稳定表达能力",
+          desc: "buildStableStylePrompt() 只把表情和表达能力规则加入稳定 system 层；聊天写法会在主模型轮次里靠近用户消息注入。",
           source: "reply.mjs / prompts.json",
           type: "sys",
           body: `
-            <label class="pipeline-sub-label">聊天风格</label>
-            ${renderTextPreview("chatStyle", p.chatStyle)}
             <label class="pipeline-sub-label">表达能力</label>
             ${renderTextPreview("expressionCapability", p.expressionCapability)}
           `,
@@ -484,6 +482,8 @@ function renderPromptsPipeline(p, profileRows) {
             ${renderTextPreview("sceneletInstructions", p.sceneletInstructions)}
             <label class="pipeline-sub-label">inner_scenelet 注入说明</label>
             ${renderTextPreview("innerSceneletIntro", p.innerSceneletIntro)}
+            <label class="pipeline-sub-label">scenelet 到微信回复转换说明</label>
+            ${renderTextPreview("sceneletReplyBridgeInstruction", p.sceneletReplyBridgeInstruction)}
           `,
         })}
         ${renderPipelineStep({
@@ -508,18 +508,23 @@ function renderPromptsPipeline(p, profileRows) {
       </div>
     </div>
 
-    ${renderPipelineArrow("Turn Body 按真实顺序组装：聊天现实规则 → scene context → RAG context → 带时间戳的用户消息")}
+    ${renderPipelineArrow("Turn Body 按真实顺序组装：scene context → RAG context → 聊天写法/聊天现实规则 → 带时间戳的用户消息")}
 
     <div class="panel">
       <div class="pipeline-phase-box">
         <div class="pipeline-phase-label phase-model"><span>阶段 3 — 主模型轮次</span><span class="pipeline-tag">Claude stream-json / Codex json</span></div>
         ${renderPipelineStep({
           n: 12,
-          title: "聊天现实规则 + 用户消息",
-          desc: "buildTurnBody() 会先加入聊天现实规则，再把当前本地时间戳和用户原始消息放到最后。",
+          title: "聊天写法 / 聊天现实 + 用户消息",
+          desc: "buildTurnBody() 会在用户消息前加入聊天写法和当前聊天现实，再把当前本地时间戳和用户原始消息放到最后。",
           source: "buildTurnBody()",
           type: "model",
-          body: renderTextPreview("chatRealityInstructions", p.chatRealityInstructions),
+          body: `
+            <label class="pipeline-sub-label">聊天写法</label>
+            ${renderTextPreview("chatStyle", p.chatStyle)}
+            <label class="pipeline-sub-label">聊天现实规则</label>
+            ${renderTextPreview("chatRealityInstructions", p.chatRealityInstructions)}
+          `,
         })}
         ${renderPipelineStep({
           n: 13,
@@ -570,13 +575,27 @@ function renderPromptsPipeline(p, profileRows) {
         ${renderPipelineStep({
           n: 17,
           title: "Proactive Candidate Queue",
-          desc: "scenelet 产生的 candidates 会被规范化成一次性的 pending intents；之后可能过期、取消或发送。",
+          desc: "scenelet 或 daily share seed 产生的 candidates 会被规范化成一次性的 pending intents；之后可能过期、取消或发送。",
           source: "_proactiveIntents",
           type: "post",
-          body: renderPipelineMeta(["在 Proactive 页检查和管理", "每次 scenelet 结果最多接收 3 个 candidates", "候选时间窗使用 ISO scheduled_at / expires_at"]),
+          body: renderPipelineMeta(["在 Proactive 页检查和管理", "每次 scenelet 结果最多接收 3 个 candidates", "intent kind 可区分 follow_up / daily_share", "候选时间窗使用 ISO scheduled_at / expires_at"]),
         })}
         ${renderPipelineStep({
           n: 18,
+          title: "Daily Share Seed",
+          desc: "当没有 pending intent 且会话已有一段自然空档时，系统可以生成一条 daily_share 候选，之后仍交给 proactive evaluation 二次判断。",
+          source: "dailyShareSeedInstructions",
+          type: "post",
+          body: `
+            ${renderTextPreview("dailyShareSeedInstructions", p.dailyShareSeedInstructions)}
+            ${renderControlGrid([
+              renderNumberControl("dailyShareSeedIntervalMs", "Seed 间隔", toS(p.dailyShareSeedIntervalMs), 60, 86400, "s", { ms: true }),
+              renderNumberControl("dailyShareMinIdleMs", "自然空档", toS(p.dailyShareMinIdleMs), 60, 86400, "s", { ms: true }),
+            ])}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 19,
           title: "Proactive Evaluation",
           desc: "定期检查器会结合当前系统状态评估到期的 pending intents，并可能发送 proactive visible_reply。",
           source: "buildProactivePrompt()",
@@ -586,6 +605,7 @@ function renderPromptsPipeline(p, profileRows) {
             ${renderControlGrid([
               renderNumberControl("proactiveCheckIntervalMs", "检查间隔", toS(p.proactiveCheckIntervalMs), 5, 300, "s", { ms: true }),
               renderNumberControl("proactiveCooldownMs", "冷却时间", toS(p.proactiveCooldownMs), 60, 86400, "s", { ms: true }),
+              renderNumberControl("proactiveDailyMax", "每日上限", p.proactiveDailyMax || 8, 1, 24, "msgs"),
             ])}
           `,
         })}
@@ -655,7 +675,7 @@ function renderTextPreview(key, value) {
   const isOpen = promptsEditing[key];
   const draft = Object.prototype.hasOwnProperty.call(promptDrafts, key) ? promptDrafts[key] : value;
   if (isOpen) {
-    const h = key === 'sceneletInstructions' || key === 'proactiveInstructions' || key === 'memoryWriterInstructions' ? '220px' : '110px';
+    const h = key === 'sceneletInstructions' || key === 'dailyShareSeedInstructions' || key === 'proactiveInstructions' || key === 'memoryWriterInstructions' ? '220px' : '110px';
     return `<textarea id="prompt_${key}" class="prompts-editable prompts-textarea" data-key="${key}" style="min-height:${h}">${escHtml(draft || '')}</textarea>
       <div class="editor-actions" style="margin-top:4px">
         <button class="btn btn-primary" data-action="save-text" data-key="${key}">保存</button>
@@ -1157,7 +1177,7 @@ function renderProactiveIntent(intent, now, mergedCount = 0) {
       <span class="proactive-intent-dot ${intent.status}${isOverdue || isExpired ? ' cancelled' : ''}" title="${statusLabel(intent.status)}${isOverdue ? ' (overdue)' : ''}${isExpired ? ' (expired)' : ''}"></span>
       <div class="proactive-intent-body">
         <div class="proactive-intent-top">
-          <span class="proactive-intent-status ${intent.status}">${statusLabel(intent.status)}${isOverdue ? ' (overdue)' : ''}${isExpired ? ' (expired)' : ''}${mergedCount ? ' +' + mergedCount + ' merged' : ''}</span>
+          <span class="proactive-intent-status ${intent.status}">${statusLabel(intent.status)}${isOverdue ? ' (overdue)' : ''}${isExpired ? ' (expired)' : ''}${mergedCount ? ' +' + mergedCount + ' merged' : ''}${intent.kind ? ' · ' + escHtml(intent.kind) : ''}</span>
           <span style="font-size:12px;color:var(--muted)">${relLabel}</span>
         </div>
         <div class="proactive-intent-intent">${escHtml(intent.messageIntent || "(no intent text)")}</div>

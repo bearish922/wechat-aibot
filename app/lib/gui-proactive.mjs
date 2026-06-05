@@ -1,13 +1,22 @@
 import { addRoute } from "./server.mjs";
 import { sessions, activeAI } from "./state.mjs";
 
+function uniqueIntents(intents = []) {
+  const byId = new Map();
+  for (const intent of intents) {
+    if (!intent?.id) continue;
+    byId.set(intent.id, { ...byId.get(intent.id), ...intent });
+  }
+  return [...byId.values()];
+}
+
 export function registerProactiveRoutes() {
   addRoute("GET", "/api/proactive/intents", () => {
     const result = [];
     for (const [ai, map] of Object.entries(sessions)) {
       for (const [, u] of map) {
         for (const s of u.list) {
-          const intents = (s._proactiveIntents || []);
+          const intents = uniqueIntents(s._proactiveIntents || []);
           if (!intents.length) continue;
           result.push({
             sessionId: s.id,
@@ -28,6 +37,7 @@ export function registerProactiveRoutes() {
               cancelIf: i.cancelIf,
               innerScenelet: i.innerScenelet,
               messageIntent: i.messageIntent,
+              kind: i.kind,
               lastCheckedAt: i.lastCheckedAt,
               sentAt: i.sentAt,
               cancelledAt: i.cancelledAt,
