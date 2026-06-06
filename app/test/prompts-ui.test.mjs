@@ -52,6 +52,7 @@ describe("Prompts runtime pipeline UI", () => {
       "chatStyle",
       "expressionCapability",
       "chatRealityInstructions",
+      "memoryCandidateInstructions",
       "memoryWriterInstructions",
       "visionCaptionPrompt",
       "ragContextInstruction",

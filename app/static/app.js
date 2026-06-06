@@ -414,7 +414,7 @@ function renderPromptsPipeline(p, profileRows) {
         ${renderPipelineStep({
           n: 6,
           title: "稳定表达能力",
-          desc: "buildStableStylePrompt() 只把表情和表达能力规则加入稳定 system 层；聊天写法会在主模型轮次里靠近用户消息注入。",
+          desc: "expressionCapabilityPrompt() 只把表情和表达能力规则加入稳定 system 层；聊天写法会在主模型轮次里靠近用户消息注入。",
           body: `
             <label class="pipeline-sub-label">表达能力</label>
             ${renderTextPreview("expressionCapability", p.expressionCapability)}
@@ -523,7 +523,9 @@ function renderPromptsPipeline(p, profileRows) {
           title: "Memory Writer",
           desc: "成功轮次之后，updateUserMemoryFromTurn() 先抽取长期记忆候选，再用完整 memory items 做 add / update / noop 合并规划。",
           body: `
-            <label class="pipeline-sub-label">Memory Writer 指令</label>
+            <label class="pipeline-sub-label">候选抽取指令</label>
+            ${renderTextPreview("memoryCandidateInstructions", p.memoryCandidateInstructions)}
+            <label class="pipeline-sub-label" style="margin-top:12px">合并规划指令</label>
             ${renderTextPreview("memoryWriterInstructions", p.memoryWriterInstructions)}
             ${renderPipelineMeta(["候选抽取使用 fast model", "合并规划读取带 id 的正式 memory items", "两个重要环节都会写入 hidden usage 日志"])}
           `,
@@ -594,7 +596,7 @@ function renderTextPreview(key, value) {
   const isOpen = promptsEditing[key];
   const draft = Object.prototype.hasOwnProperty.call(promptDrafts, key) ? promptDrafts[key] : value;
   if (isOpen) {
-    const h = key === 'sceneletInstructions' || key === 'dailyShareSeedInstructions' || key === 'proactiveInstructions' || key === 'memoryWriterInstructions' || key === 'scheduleCreatorInstructions' ? '220px' : '110px';
+    const h = key === 'sceneletInstructions' || key === 'proactiveInstructions' || key === 'memoryCandidateInstructions' || key === 'memoryWriterInstructions' || key === 'scheduleCreatorInstructions' ? '220px' : '110px';
     return `<textarea id="prompt_${key}" class="prompts-editable prompts-textarea" data-key="${key}" style="min-height:${h}">${escHtml(draft || '')}</textarea>
       <div class="editor-actions" style="margin-top:4px">
         <button class="btn btn-primary" data-action="save-text" data-key="${key}">保存</button>
@@ -889,18 +891,14 @@ function renderWorldPipeline(role, p) {
         ${renderPipelineStep({
           n: 11,
           title: "Daily Share Seed（沉默期独立分享）",
-          desc: "独立于 scenelet 的 daily share 生成器。在用户沉默期由定时器触发——不从当前对话获取前因，只凭角色当前状态、时间、生活片段判断是否有自然的随手分享冲动。",
+          desc: "HW 产出 daily_share_candidates，在用户沉默期由定时器转换为 proactive intent，到期由 evaluateProactiveIntent 二次判断。",
           body: `
-            <label class="pipeline-sub-label">Daily Share Seed 生成指令</label>
-            ${renderTextPreview("dailyShareSeedInstructions", p.dailyShareSeedInstructions)}
             <label class="pipeline-sub-label" style="margin-top:8px">触发机制</label>
             ${renderPipelineMeta([
               "触发条件（两个条件同时满足）：",
               "  1. 距上次用户消息 ≥ dailyShareMinIdleMs（沉默期阈值）",
               "  2. 距上次 seed 检查 ≥ dailyShareSeedIntervalMs（检查间隔）",
-              "优先级：先尝试 scenelet 产出的 daily_share_candidates；无候选时才调用 seed 模型",
-              "Seed 上下文：profile + memory + currentTime（双时区）+ worldState（地点/活动/计划/openThreads）+ life_arcs + 最近聊天（仅作话题避免重复参考）",
-              "Seed 不接收 user_message —— 保证分享来自角色独立生活，不依赖对话前因",
+              "使用 HW 最近产出的 daily_share_candidates；无候选时跳过",
               "生成后排队为 proactive intent，到期由 evaluateProactiveIntent 二次判断",
             ])}
             <label class="pipeline-sub-label" style="margin-top:8px">调度参数</label>
@@ -1554,10 +1552,6 @@ function renderWorldReset(role) {
           const str = val ? JSON.stringify(val, null, 2) : "";
           return `<div class="form-group"><label>last hidden output (上次 hidden world 完整输出快照，仅供查看)</label><textarea id="snap_lastOutput" class="profile-prompt-editor" spellcheck="false" style="min-height:180px" readonly>${escHtml(str)}</textarea></div>`;
         })()}
-        ${(() => {
-          const warnings = Array.isArray(role.continuityWarnings) ? role.continuityWarnings : [];
-          return `<div class="form-group"><label>continuity_warnings</label><textarea id="snap_continuityWarnings" class="profile-prompt-editor" spellcheck="false" style="min-height:120px" placeholder="每行一条连续性警告">${escHtml(warnings.join("\n"))}</textarea></div>`;
-        })()}
         <div class="form-grid">
           <div class="form-group"><label>lastDailyShareSeedAt</label><input id="snap_lastDailyShareSeedAt" value="${escAttr(formatTime(role.lastDailyShareSeedAt))}"></div>
           <div class="form-group"><label>lastScheduleCheckAt</label><input id="snap_lastScheduleCheckAt" value="${escAttr(formatTime(role.lastScheduleCheckAt))}"></div>
@@ -1645,7 +1639,6 @@ async function saveWorldReset() {
     })(),
     threadIntents: JSON.parse(content.querySelector("#snap_threadIntents")?.value || "[]"),
     lastOutput: JSON.parse(content.querySelector("#snap_lastOutput")?.value || "null"),
-    continuityWarnings: (content.querySelector("#snap_continuityWarnings")?.value || "").split("\n").map(s => s.trim()).filter(Boolean),
     lastDailyShareSeedAt: content.querySelector("#snap_lastDailyShareSeedAt")?.value || null,
     lastScheduleCheckAt: content.querySelector("#snap_lastScheduleCheckAt")?.value || null,
   };
