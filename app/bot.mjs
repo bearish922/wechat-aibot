@@ -2,10 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync, execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 // ─── CONFIG ───────────────────────────────────────────────────
 import { configValue, envOrConfig, configBool, configNumber } from "./lib/config.mjs";
-import { RUNTIME_DIR, dataPath, ensureDir, resolveProjectPath } from "./lib/paths.mjs";
+import { RUNTIME_DIR, dataPath, ensureDir, resolveProjectPath, appPath } from "./lib/paths.mjs";
 
 const RAG_SCRIPT = resolveProjectPath(configValue("paths.ragScript", "app/rag.py"));
 const RAG_ENABLED = configBool("rag.enabled", true);
@@ -228,11 +229,9 @@ function nextSessionName(userId, ai = activeAI) {
 }
 function findSession(userId, key) {
   const u = ensureUser(userId);
-  const byName = u.list.find(s => s.name === key);
-  if (byName) return { sess: byName, setActive: true };
-  const idx = parseInt(key, 10);
-  if (Number.isFinite(idx) && idx >= 1 && idx <= u.list.length) return { sess: u.list[idx - 1], setActive: true };
-  return { sess: u.list.find(s => s.id === u.activeId) || u.list[0], setActive: false };
+  const n = parseInt(key);
+  if (n >= 1 && n <= u.list.length) return u.list[n - 1];
+  return u.list.find(s => s.name === key) || u.list.find(s => s.name.includes(key)) || null;
 }
 function sessionsListText(userId) {
   const u = ensureUser(userId);
@@ -471,146 +470,474 @@ function flushPendingInput(userId) {
 
 function clearPendingInput(userId) {
   const pending = pendingInputs.get(userId);
-  if (pending) { clearTimeout(pending.timer); pendingInputs.delete(userId); }
+  if (!pending) return false;
+  clearTimeout(pending.timer);
+  pendingInputs.delete(userId);
+  return true;
 }
 
 // ─── MESSAGE HANDLER ───────────────────────────────────────
 async function handleMessage(msg) {
-  const { body, shouldBatch, canAppendToBatch } = await extractInboundPayload(msg);
-  if (!body?.trim()) return;
   const userId = msg.from_user_id;
+  const ctx = msg.context_token;
   const contextToken = msg.context_token;
 
-  const cmdMatch = body.match(/^\s*\/(\S+)(?:\s+(.*))?$/s);
-  if (cmdMatch) {
-    const cmd = cmdMatch[1].toLowerCase();
-    const arg = (cmdMatch[2] || "").trim();
-    if (cmd === "cc" || cmd === "codex") {
-      if (activeAI !== cmd) { setActiveAI(cmd); await sendMessage(userId, `已切换到 ${cmd === "cc" ? "Claude Code" : "Codex"}`, contextToken); }
-      return;
-    }
-    if (cmd === "new") {
-      const profileName = arg && Object.keys(profileTemplates).includes(arg) ? arg : null;
-      const name = profileName || arg || nextSessionName(userId);
-      const sess = makeSession(name, profileName);
-      const u = ensureUser(userId); u.list.push(sess); u.activeId = sess.id;
-      saveSessions();
-      await sendMessage(userId, `已创建${profileName ? `角色[${profileName}]` : ""}会话：${name}`, contextToken);
-      return;
-    }
-    if (cmd === "switch") {
-      const { sess, setActive } = findSession(userId, arg);
-      if (setActive) ensureUser(userId).activeId = sess.id;
-      await sendMessage(userId, `已切换到：${sess.name}`, contextToken);
-      return;
-    }
-    if (cmd === "rename") {
-      const parts = arg.split(/\s+/);
-      const { sess } = findSession(userId, parts[0] || "");
-      const newName = parts.slice(1).join(" ") || parts[0];
-      if (!newName || hasSessionName(userId, newName, sess.id)) { await sendMessage(userId, `名称无效或已存在：${newName || "(空)"}`, contextToken); return; }
-      sess.name = newName; saveSessions();
-      await sendMessage(userId, `已重命名为：${newName}`, contextToken);
-      return;
-    }
-    if (cmd === "close") {
-      const { sess } = findSession(userId, arg);
-      if (ensureUser(userId).list.length <= 1) { await sendMessage(userId, "无法关闭最后一个会话", contextToken); return; }
-      sess._closing = true;
-      const u = ensureUser(userId);
-      if (u.activeId === sess.id) u.activeId = u.list.find(s => s.id !== sess.id)?.id || u.list[0].id;
-      u.list = u.list.filter(s => s.id !== sess.id);
-      saveSessions();
-      await sendMessage(userId, `已关闭：${sess.name}`, contextToken);
-      return;
-    }
-    if (cmd === "status") {
-      const sess = activeSession(userId);
-      const aiLabel = activeAI === "cc" ? "Claude Code" : "Codex";
-      const model = modelNames[activeAI] || "unknown";
-      await sendMessage(userId, `[${aiLabel}] ${model}\n会话: ${sess.name} | 角色: ${sess._profile || "默认"}`, contextToken);
-      return;
-    }
-    if (cmd === "profile") {
-      const sess = activeSession(userId);
-      if (!arg || arg === "off") { sess._profile = null; saveSessions(); await sendMessage(userId, "已解除角色绑定", contextToken); return; }
-      if (!profileTemplates[arg]) { await sendMessage(userId, `角色 "${arg}" 不存在。可用角色：${Object.keys(profileTemplates).join("、")}`, contextToken); return; }
-      sess._profile = arg; saveSessions();
-      await sendMessage(userId, `当前会话已绑定角色：${arg}`, contextToken);
-      return;
-    }
-    if (cmd === "memory") { await handleMemoryCommand(userId, body, contextToken, activeSession(userId)._profile || "默认"); return; }
-    if (cmd === "sessions" || cmd === "threads" || cmd === "list") { await sendMessage(userId, sessionsListText(userId), contextToken); return; }
-    if (cmd === "cancel") {
-      const sess = activeSession(userId);
-      if (sess._lastProc && sess._lastProc.pid) { killProc(sess._lastProc); sess._lastProc = null; await sendMessage(userId, "已取消当前任务", contextToken); }
-      else { await sendMessage(userId, "没有正在运行的任务", contextToken); }
-      return;
-    }
-    if (cmd === "help") {
-      await sendMessage(userId, ["WeChat AI Bot 命令：", "/cc /codex /new /switch /rename /close /sessions /status /cancel /profile /memory /help"].join("\n"), contextToken);
-      return;
-    }
-  }
+  const payload = await extractInboundPayload(msg);
+  let body = payload.body;
+  const { shouldBatch, canAppendToBatch } = payload;
+  if (!body.trim()) return;
 
   const messageAI = activeAI;
+  const activeSess = activeSession(userId, messageAI);
+  const prefix = replyPrefix(activeSess?.name || "S1", messageAI);
+  const isCommand = /^\/\S+/.test(body);
+  if (isCommand && !/^\/cancel$/.test(body)) {
+    flushPendingInput(userId);
+  }
+
+  // ── /help ──
+  if (/^\/help$/.test(body)) {
+    await sendMessage(userId, [
+      `# 帮助`,
+      ``,
+      `【AI 切换】`,
+      `/cc                 切换到 Claude Code`,
+      `/codex              切换到 Codex`,
+      ``,
+      `【线程管理】`,
+      `/new [名称]         创建新会话线程`,
+      `/rename [序号|名称] <新名称>  重命名线程`,
+      `/switch [序号|名称]  切换活跃线程`,
+      `/sessions           查看所有线程`,
+      `/close [序号|名称]   关闭线程 (排空中)`,
+      `/cancel             取消当前运行的任务`,
+      `/memory             查看当前角色 memory 统计和每类前 3 条`,
+      `/memory all         查看当前角色完整 memory`,
+      `/memory 性格|偏好|事实 查看当前角色某一类 memory`,
+      `/memory <角色名>     查看指定角色的 memory`,
+      `/status             查看当前状态`,
+      ``,
+      `【角色管理】`,
+      `/profile                     查看所有角色`,
+      `/profile <名称>              切换到指定角色`,
+      `/profile off                 关闭角色，恢复默认`,
+      ``,
+      `当前 AI: ${activeAI === "cc" ? "Claude Code" : "Codex"}`,
+    ].join("\n"), ctx);
+    return;
+  }
+
+  // ── /memory ──
+  if (/^\/memory(\s|$)/i.test(body)) {
+    await handleMemoryCommand(userId, body, ctx, activeSess?._profile ?? null);
+    return;
+  }
+
+  // ── /cc ──
+  if (/^\/cc$/.test(body)) {
+    if (activeAI === "cc") { await sendMessage(userId, "⚠️ 当前已是 Claude Code", ctx); return; }
+    setActiveAI("cc");
+    saveSessions(); saveToken();
+    await sendMessage(userId, `✅ 已切换到 Claude Code`, ctx);
+    return;
+  }
+
+  // ── /codex ──
+  if (/^\/codex$/.test(body)) {
+    if (activeAI === "codex") { await sendMessage(userId, "⚠️ 当前已是 Codex", ctx); return; }
+    setActiveAI("codex");
+    saveSessions(); saveToken();
+    await sendMessage(userId, `✅ 已切换到 Codex`, ctx);
+    return;
+  }
+
+  // ── /new ──
+  if (/^\/new(\s|$)/.test(body)) {
+    let rest = body.slice(5).trim();
+    const name = rest || nextSessionName(userId, messageAI);
+    if (hasSessionName(userId, name, null, messageAI)) {
+      await sendMessage(userId, `⚠️ 线程名 "${name}" 已存在，请换一个名称`, ctx);
+      return;
+    }
+    const boundProfile = name === "默认" ? null : (profileTemplates[name] && name !== "默认" ? name : null);
+    const u = ensureUser(userId);
+    const sess = makeSession(name, boundProfile);
+    u.list.push(sess);
+    u.activeId = sess.id;
+    saveSessions();
+    await sendMessage(userId, `✅ 新线程: ${name}${boundProfile ? `\n角色: ${boundProfile}` : ""}`, ctx);
+    return;
+  }
+
+  // ── /switch ──
+  if (/^\/switch(\s|$)/.test(body)) {
+    const key = body.slice(8).trim();
+    if (!key) { await sendMessage(userId, `线程:\n${sessionsListText(userId)}`, ctx); return; }
+    const sess = findSession(userId, key);
+    if (!sess) { await sendMessage(userId, `⚠️ 未找到 "${key}"\n${sessionsListText(userId)}`, ctx); return; }
+    ensureUser(userId).activeId = sess.id;
+    saveSessions();
+    await sendMessage(userId, `✅ 已切换: ${sess.name}`, ctx);
+    return;
+  }
+
+  // ── /rename ──
+  if (/^\/rename(\s|$)/.test(body)) {
+    const rest = body.slice(8).trim();
+    if (!rest) { await sendMessage(userId, "用法: /rename <新名称>  重命名当前线程\n/rename [序号|名称] <新名称>  重命名指定线程", ctx); return; }
+    const tokens = rest.split(/\s+/);
+    const first = tokens[0];
+    const numIdx = parseInt(first);
+    const u = ensureUser(userId);
+    const isNumRef = Number.isInteger(numIdx) && numIdx >= 1 && numIdx <= u.list.length;
+    const isNameRef = u.list.some(s => s.name === first || s.name.includes(first));
+    let key, newName;
+    if ((isNumRef || isNameRef) && tokens.length >= 2) {
+      key = first;
+      newName = tokens.slice(1).join(" ");
+    } else {
+      newName = rest;
+    }
+    if (!newName) { await sendMessage(userId, "⚠️ 新名称不能为空", ctx); return; }
+    let target;
+    if (key) {
+      target = findSession(userId, key);
+      if (!target) { await sendMessage(userId, `⚠️ 未找到 "${key}"`, ctx); return; }
+    } else {
+      target = activeSession(userId);
+    }
+    if (hasSessionName(userId, newName, target.id, messageAI)) {
+      await sendMessage(userId, `⚠️ 线程名 "${newName}" 已存在，重命名失败`, ctx);
+      return;
+    }
+    target.name = newName;
+    saveSessions();
+    await sendMessage(userId, `✅ 已重命名: ${newName}`, ctx);
+    return;
+  }
+
+  // ── /sessions ──
+  if (/^\/sessions$/.test(body)) {
+    await sendMessage(userId, `线程 (${activeAI === "cc" ? "Claude Code" : "Codex"}):\n${sessionsListText(userId)}`, ctx);
+    return;
+  }
+
+  // ── /profile ──
+  if (/^\/profile(\s|$)/.test(body)) {
+    const rest = body.slice(9).trim();
+
+    if (!rest) {
+      const cur = sessionProfile(activeSession(userId));
+      const list = Object.entries(profileTemplates)
+        .map(([k, v]) => `${k === cur ? "→" : " "} ${k}: ${v.slice(0, 40)}...`)
+        .join("\n");
+      const aiLabel = activeAI === "cc" ? "Claude Code" : "Codex";
+      const sess = activeSession(userId);
+      const current = [
+        `AI: ${aiLabel}`,
+        `线程: ${sess.name}`,
+        `角色: ${cur || "默认"}`,
+      ].join("\n");
+      await sendMessage(userId, `${current}\n\n模板:\n${list}\n\n/profile 名字 切换\n/profile off 关闭`, ctx);
+      return;
+    }
+    if (rest === "off" || rest === "关闭" || rest === "默认") {
+      const sess = activeSession(userId);
+      if (sess._profile) {
+        await sendMessage(userId, `⚠️ 当前线程已绑定角色「${sess._profile}」，不能切回默认。\n请用 /new 默认 新建默认线程，或 /switch 切到其他默认线程。`, ctx);
+        return;
+      }
+      await sendMessage(userId, `✅ 当前线程保持默认风格`, ctx);
+      return;
+    }
+    if (!profileTemplates[rest]) {
+      await sendMessage(userId, `⚠️ 未找到 "${rest}"。\n可用: ${Object.keys(profileTemplates).join(", ")}`, ctx);
+      return;
+    }
+    const sess = activeSession(userId);
+    if (sess._profile && sess._profile !== rest) {
+      await sendMessage(userId, `⚠️ 当前线程已绑定角色「${sess._profile}」，不能切换成「${rest}」。\n请先 /new ${rest} 新建线程，再 /profile ${rest}。`, ctx);
+      return;
+    }
+    sess._profile = rest;
+    saveSessions();
+    await sendMessage(userId, `✅ 当前线程已绑定角色: ${rest}${sess._firstTurn ? "" : "\n提示：这个线程已有历史上下文；如果仍有旧口吻残留，请用 /new " + rest + " 新开线程。"}`, ctx);
+    return;
+  }
+
+  // ── /close ──
+  if (/^\/close(\s|$)/.test(body)) {
+    const key = body.slice(7).trim();
+    const u = ensureUser(userId);
+    let target;
+    if (key) {
+      target = findSession(userId, key);
+      if (!target) { await sendMessage(userId, `⚠️ 未找到 "${key}"`, ctx); return; }
+    } else {
+      target = activeSession(userId);
+    }
+    if (target.busy) { await sendMessage(userId, `⚠️ ${target.name} 正在运行，请等任务完成后再关闭`, ctx); return; }
+    const pending = pendingInputs.get(userId);
+    const clearedPending = clearPendingInput(userId);
+
+    const targetIdx = u.list.indexOf(target);
+    const closedName = target.name;
+    target._closing = true;
+
+    if (target.queue.length === 0) {
+      u.list.splice(targetIdx, 1);
+    }
+
+    let autoCreated = null;
+    if (u.list.length === 0) {
+      const newName = nextSessionName(userId);
+      const newSess = makeSession(newName);
+      u.list.push(newSess);
+      u.activeId = newSess.id;
+      autoCreated = newName;
+    } else if (u.activeId === target.id) {
+      const prevIdx = Math.max(0, targetIdx - 1);
+      u.activeId = u.list[Math.min(prevIdx, u.list.length - 1)].id;
+    }
+    saveSessions();
+
+    const nowActive = u.list.find(s => s.id === u.activeId);
+    const nowName = nowActive ? nowActive.name : "?";
+    const parts = [`✅ 已关闭 ${closedName}`];
+    if (autoCreated) parts.push(`已自动创建新线程: ${autoCreated}`);
+    if (clearedPending) parts.push("已清除该线程的待处理附件");
+    parts.push(`当前线程: ${nowName}`);
+    await sendMessage(userId, parts.join("\n"), ctx);
+    return;
+  }
+
+  // ── /status ──
+  if (/^\/status$/.test(body)) {
+    const u = ensureUser(userId);
+    const sess = activeSession(userId);
+    const idx = u.list.indexOf(sess) + 1;
+    const otherAI = activeAI === "cc" ? "codex" : "cc";
+    const otherMap = sessions[otherAI];
+    const otherCount = otherMap ? Array.from(otherMap.values()).reduce((s, u) => s + u.list.length, 0) : 0;
+    const profile = sessionProfile(sess);
+    const status = sess.busy ? "⏳ 运行中" : sess.queue.length ? `排队 ${sess.queue.length}` : "空闲";
+    await sendMessage(userId, [
+      `# 状态`,
+      ``,
+      `AI:     ${activeAI === "cc" ? "Claude Code" : "Codex"}  (${modelNames[activeAI]})`,
+      `会话:   [${idx}] ${sess.name}`,
+      `角色:   ${profile || "默认"}`,
+      `状态:   ${status}`,
+      `SID:    ${sess.sid}`,
+      ``,
+      `${activeAI === "cc" ? "CC" : "Codex"} 线程数: ${u.list.length}  |  ${activeAI === "cc" ? "Codex" : "CC"} 线程数: ${otherCount}`,
+    ].filter(line => line !== null).join("\n"), ctx);
+    return;
+  }
+
+  // ── /cancel ──
+  if (/^\/cancel$/.test(body)) {
+    const sess = activeSession(userId);
+    const clearedPending = clearPendingInput(userId);
+    if (!sess?.busy) {
+      await sendMessage(userId, clearedPending ? "⏹️ 已清除待处理的附件消息" : "⚠️ 当前没有运行中的任务", ctx);
+      return;
+    }
+    if (sess._lastProc) {
+      killProc(sess._lastProc);
+      sess._lastProc = null;
+    }
+    sess.queue.length = 0;
+    await sendMessage(userId, `# ${prefix}\n⏹️ 正在取消...${clearedPending ? "\n已清除待处理的附件消息" : ""}`, ctx);
+    return;
+  }
+
+  // ── route to active session ──
+  const messageAIFinal = activeAI;
   if (shouldBatch) {
     const pending = pendingInputs.get(userId);
-    if (pending && body === pending.body) clearTimeout(pending.timer);
-    const combinedBody = pending && pending.messageAI === messageAI ? `${pending.body}\n---\n${body}` : body;
+    if (pending && body === (pending.body || (pending.parts && pending.parts.join("\n\n")))) {
+      clearTimeout(pending.timer);
+    }
+    const combinedBody = pending && pending.messageAI === messageAIFinal
+      ? `${pending.body || (pending.parts && pending.parts.join("\n\n"))}\n---\n${body}`
+      : body;
     clearPendingInput(userId);
-    pendingInputs.set(userId, { messageAI, ctx: { context_token: contextToken }, body: combinedBody, timer: setTimeout(() => flushPendingInput(userId), INPUT_BATCH_MS) });
+    pendingInputs.set(userId, {
+      messageAI: messageAIFinal,
+      ctx: { context_token: contextToken },
+      body: combinedBody,
+      timer: setTimeout(() => flushPendingInput(userId), INPUT_BATCH_MS),
+    });
   } else if (canAppendToBatch) {
     const pending = pendingInputs.get(userId);
-    if (pending && pending.messageAI === messageAI) { clearTimeout(pending.timer); pending.body = `${pending.body}\n${body}`; pending.timer = setTimeout(() => flushPendingInput(userId), INPUT_BATCH_MS); }
-    else { clearPendingInput(userId); enqueueUserBody(messageAI, userId, body, { context_token: contextToken }); }
+    if (pending && pending.messageAI === messageAIFinal) {
+      clearTimeout(pending.timer);
+      pending.body = `${pending.body || (pending.parts && pending.parts.join("\n\n"))}\n${body}`;
+      pending.timer = setTimeout(() => flushPendingInput(userId), INPUT_BATCH_MS);
+    } else {
+      clearPendingInput(userId);
+      enqueueUserBody(messageAIFinal, userId, body, { context_token: contextToken });
+    }
   } else {
     clearPendingInput(userId);
-    enqueueUserBody(messageAI, userId, body, { context_token: contextToken });
+    enqueueUserBody(messageAIFinal, userId, body, { context_token: contextToken });
   }
 }
 
 async function handleMemoryCommand(userId, body, ctx, activeProfile) {
-  const arg = body.replace(/^\s*\/memory\s*/, "").trim();
-  if (arg === "all") { const text = memoryListText(userId, { profile: activeProfile, full: true }); await sendMessage(userId, text || "暂无长期记忆", ctx); return; }
-  const cat = normalizeMemoryCategory(arg);
-  if (cat) { const text = memoryListText(userId, { profile: activeProfile, category: cat }); const labels = { trait: "性格/价值观", preference: "偏好", fact: "事实" }; await sendMessage(userId, text || `暂无[${labels[cat]}]分类记忆`, ctx); return; }
-  if (arg && profileTemplates[arg]) { const text = memoryListText(userId, { profile: arg }); await sendMessage(userId, text || `角色 ${arg} 暂无长期记忆`, ctx); return; }
-  if (arg && !profileTemplates[arg]) { await sendMessage(userId, `未知角色: ${arg}`, ctx); return; }
-  const text = memoryListText(userId, { profile: activeProfile });
-  await sendMessage(userId, text || "暂无长期记忆", ctx);
+  const rest = body.replace(/^\/memory\s*/i, "").trim();
+  const help = [
+    "Memory commands:",
+    "/memory                  查看当前角色统计和每类前 3 条",
+    "/memory all              查看当前角色完整 memory",
+    "/memory 性格|偏好|事实   只查看某一类",
+    "/memory <角色名>         查看指定角色的 memory",
+  ].join("\n");
+
+  let targetProfile = activeProfile;
+  let lookedUpRole = false;
+  if (rest && rest !== "all" && !["性格", "偏好", "事实"].includes(rest)) {
+    if (profileTemplates[rest]) {
+      targetProfile = rest;
+      lookedUpRole = true;
+    } else {
+      const match = Object.keys(profileTemplates).find(k => k.includes(rest) || rest.includes(k));
+      if (match) { targetProfile = match; lookedUpRole = true; }
+    }
+  }
+
+  const isOtherRole = targetProfile !== activeProfile;
+  const label = isOtherRole ? `角色: ${targetProfile}` : "";
+
+  if (!rest || lookedUpRole) {
+    const notice = memoryMaintenanceNotice(userId, { profile: targetProfile });
+    const text = [label, memoryListText(userId, { profile: targetProfile }), notice].filter(Boolean).join("\n\n");
+    await sendMessage(userId, text, ctx);
+    return;
+  }
+  if (rest === "all") {
+    const notice = memoryMaintenanceNotice(userId, { profile: targetProfile });
+    const text = [label, memoryListText(userId, { profile: targetProfile, full: true }), notice].filter(Boolean).join("\n\n");
+    await sendMessage(userId, text, ctx);
+    return;
+  }
+
+  const category = ["性格", "偏好", "事实"].includes(rest) ? normalizeMemoryCategory(rest) : null;
+  if (category) {
+    const text = [label, memoryListText(userId, { profile: targetProfile, category, full: true })].filter(Boolean).join("\n\n");
+    await sendMessage(userId, text, ctx);
+    return;
+  }
+
+  await sendMessage(userId, help, ctx);
 }
 
 // ─── STARTUP CHECK ─────────────────────────────────────────
 function startupCheck() {
-  const results = [];
-  const pass = (name, detail) => results.push({ name, status: "ok", detail });
-  const warn = (name, detail) => results.push({ name, status: "warn", detail });
-  const fail = (name, detail) => results.push({ name, status: "fail", detail });
-  pass("Node.js", process.version);
-  if (commandExists(CLAUDE)) pass("Claude Code", CLAUDE); else fail("Claude Code", `${CLAUDE} 不存在`);
-  if (commandExists(CODEX)) pass("Codex", CODEX); else warn("Codex", `${CODEX} 不存在`);
+  const checks = [];
+  const pass = (label, detail = "") => checks.push({ ok: true, label, detail });
+  const warn = (label, detail = "") => checks.push({ ok: false, label, detail, critical: false });
+  const fail = (label, detail = "") => checks.push({ ok: false, label, detail, critical: true });
+
+  // Claude Code
+  if (commandExists(CLAUDE)) {
+    pass("Claude Code", CLAUDE);
+  } else {
+    fail("Claude Code", `${CLAUDE} 不存在`);
+  }
+
+  // Codex
+  if (commandExists(CODEX)) {
+    pass("Codex", CODEX);
+  } else {
+    warn("Codex", `${CODEX} 不存在 (Codex 功能将不可用)`);
+  }
+
+  // Python
   const py = spawnSync("python", ["--version"], { encoding: "utf8", timeout: 3000, windowsHide: true });
-  if (py.status === 0) pass("Python", (py.stdout || py.stderr || "").trim()); else fail("Python", "python 不可用");
+  if (py.status === 0) {
+    pass("Python", (py.stdout || py.stderr || "").trim());
+  } else {
+    fail("Python", "python 命令不可用 (RAG / 文件提取将不可用)");
+  }
+
   if (VOICE_ASR_ENABLED) {
-    const wx = spawnSync(VOICE_WHISPERX_PYTHON, ["-m", "whisperx", "--version"], { encoding: "utf8", timeout: 15000, windowsHide: true });
-    if (wx.status === 0) pass("Voice WhisperX", (wx.stdout || wx.stderr || VOICE_WHISPERX_PYTHON).trim().split(/\r?\n/)[0]);
-    else warn("Voice WhisperX", `${VOICE_WHISPERX_PYTHON} is not available`);
-  } else warn("Voice WhisperX", "disabled");
+    const wx = spawnSync(VOICE_WHISPERX_PYTHON, ["-m", "whisperx", "--version"], { encoding: "utf8", timeout: 15_000, windowsHide: true });
+    if (wx.status === 0) {
+      pass("Voice WhisperX", (wx.stdout || wx.stderr || VOICE_WHISPERX_PYTHON).trim().split(/\r?\n/)[0]);
+    } else {
+      warn("Voice WhisperX", `${VOICE_WHISPERX_PYTHON} is not available; WeChat voice fallback transcript will still be used`);
+    }
+  } else {
+    warn("Voice WhisperX", "disabled");
+  }
+
+  // ffmpeg (optional)
   const ff = spawnSync("ffmpeg", ["-version"], { encoding: "utf8", timeout: 3000, windowsHide: true });
-  if (ff.status === 0) pass("ffmpeg", "已安装"); else warn("ffmpeg", "未找到");
+  if (ff.status === 0) {
+    pass("ffmpeg", "已安装");
+  } else {
+    warn("ffmpeg", "未找到 (视频首帧提取将不可用)");
+  }
+
+  // RAG index
   if (RAG_ENABLED) {
     const storeDir = resolveProjectPath(configValue("rag.storeDir", "data/rag_vector_store"));
     const metaPath = path.join(storeDir, "rag_meta.json");
-    if (fs.existsSync(metaPath)) pass("RAG 知识库", `${storeDir} (索引存在)`);
-    else warn("RAG 知识库", `${storeDir} (索引不存在)`);
+    if (fs.existsSync(metaPath)) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+        pass("RAG 知识库", `${storeDir} (索引存在)`);
+      } catch {
+        warn("RAG 知识库", `${storeDir} (rag_meta.json 解析失败，可运行 scripts\\rebuild-rag.bat 重建)`);
+      }
+    } else {
+      warn("RAG 知识库", `${storeDir} (索引不存在，请运行 scripts\\rebuild-rag.bat 初始化)`);
+    }
   }
+
+  // Vision handling
   if (shouldUseExternalVision()) {
-    if (hasExternalVisionConfig()) pass("视觉模式", `${VISION_MODE} -> external: ${VISION_MODEL} @ ${VISION_BASE_URL}`);
-    else warn("视觉模式", `${VISION_MODE}: 外部视觉 API 未完整配置`);
-  } else if (VISION_MODE === "off" || VISION_MODE === "none") warn("视觉模式", "off");
-  else pass("视觉模式", `${VISION_MODE || "native"}`);
-  return results;
+    if (hasExternalVisionConfig()) {
+      pass("视觉模式", `${VISION_MODE} -> external: ${VISION_MODEL} @ ${VISION_BASE_URL}`);
+    } else {
+      warn("视觉模式", `${VISION_MODE}: 外部视觉 API 未完整配置，将仅传递本地媒体路径`);
+    }
+  } else if (VISION_MODE === "off" || VISION_MODE === "none") {
+    warn("视觉模式", "off (仅保存媒体路径，不生成视觉描述)");
+  } else {
+    pass("视觉模式", `${VISION_MODE || "native"} (交给 AI 后端读取本地媒体路径)`);
+  }
+
+  // node_modules
+  if (fs.existsSync(appPath("node_modules", "qrcode-terminal"))) {
+    pass("Node 依赖", "qrcode-terminal 已安装");
+  } else {
+    warn("Node 依赖", "qrcode-terminal 未安装 (二维码终端显示将降级)");
+  }
+
+  // Print report
+  process.stdout.write("\n");
+  let criticalCount = 0;
+  let warnCount = 0;
+  for (const c of checks) {
+    const flag = c.ok ? "  OK" : (c.critical ? "FAIL" : "WARN");
+    process.stdout.write(`[${flag}] ${c.label}${c.detail ? ` — ${c.detail}` : ""}\n`);
+    if (!c.ok && c.critical) criticalCount++;
+    if (!c.ok && !c.critical) warnCount++;
+  }
+
+  if (criticalCount > 0) {
+    process.stderr.write(`\n${criticalCount} 个严重问题：关键依赖缺失，bot 可能无法正常工作。请检查 data/config.json 中的路径配置。\n`);
+  }
+  if (warnCount > 0) {
+    process.stdout.write(`${warnCount} 个警告：部分功能将降级或不可用。\n`);
+  }
+  if (criticalCount === 0 && warnCount === 0) {
+    process.stdout.write("全部自检通过。\n");
+  }
+  process.stdout.write("\n");
 }
 
 // ─── MAIN LOOP ─────────────────────────────────────────────
@@ -652,18 +979,21 @@ async function mainLoop() {
 }
 
 async function main() {
+  // ─── CRASH GUARDS ────────────────────────────────────────────
   process.on("uncaughtException", (e) => { log("\u{1F4A5}", `uncaught: ${e.message}\n${e.stack?.slice(0, 300)}`); });
   process.on("unhandledRejection", (r) => { log("\u{1F4A5}", `unhandled rejection: ${r}`); });
   process.on("exit", releaseInstanceLock);
   process.on("SIGINT", () => { stopServer(); releaseInstanceLock(); process.exit(0); });
   process.on("SIGTERM", () => { stopServer(); releaseInstanceLock(); process.exit(0); });
 
+  // ─── STARTUP ────────────────────────────────────────────────
   acquireInstanceLock();
   process.stdout.write("\nWeChat AI Bot\n=============\n");
   startupCheck();
   cleanupOldLogs();
   setInterval(cleanupOldLogs, LOG_CLEANUP_INTERVAL_MS).unref();
 
+  // Restore last active AI before loading profiles (so profile display is correct).
   try {
     if (fs.existsSync(TOKEN_FILE)) {
       const d = JSON.parse(fs.readFileSync(TOKEN_FILE, "utf-8"));
@@ -676,19 +1006,38 @@ async function main() {
   loadSessions();
   loadRoleWorlds();
 
-  registerStatusRoutes(); registerSessionRoutes(); registerProfileRoutes(); registerConfigRoutes();
-  registerHistoryRoutes(); registerProactiveRoutes(); registerMemoryRoutes(); registerPromptsRoutes(); registerWorldRoutes();
-  await startServer();
-  sleep(600).then(() => { try { execSync("cmd /c start http://127.0.0.1:18720", { timeout: 5000, windowsHide: true }); } catch {} });
+  // ─── Start GUI server first ──────────────────────────────────
+  registerStatusRoutes();
+  registerSessionRoutes();
+  registerProfileRoutes();
+  registerConfigRoutes();
+  registerHistoryRoutes();
+  registerProactiveRoutes();
+  registerMemoryRoutes();
+  registerPromptsRoutes();
+  registerWorldRoutes();
+  startServer();
 
-  process.stdout.write("GUI will open automatically after login at http://127.0.0.1:18720\n\n");
-  loadToken();
-  if (!getUpdatesBuf) await loginWithQr();
-  saveToken();
-  if (!getUpdatesBuf) loadSessions();
-  log("\u{1F440}", "listening for WeChat messages...");
+  // ─── WeChat login ────────────────────────────────────────────
+  if (!loadToken()) {
+    await loginWithQr();
+  } else {
+    try {
+      const resp = await apiPost("ilink/bot/getupdates", { get_updates_buf: "" }, 10_000);
+      if (resp.errcode === -14 || (resp.ret && resp.ret !== 0 && resp.errcode)) {
+        log("⚠️", "Token 过期，重新登录..."); setToken(null); await loginWithQr();
+      } else {
+        if (resp.get_updates_buf) setSyncBuf(resp.get_updates_buf);
+      }
+    } catch {
+      log("⚠️", "Token 验证失败，重新登录..."); setToken(null); await loginWithQr();
+    }
+  }
+
+  log("\u{1F680}", `开始监听微信消息... (当前: ${activeAI === "cc" ? "Claude Code" : "Codex"})`);
   await mainLoop();
 }
 
-await sleep(0);
-main().catch(e => { process.stderr.write(`\u{1F4A5} uncaught: ${e.message}\n${e.stack}\n`); process.exit(1); });
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  await main();
+}
