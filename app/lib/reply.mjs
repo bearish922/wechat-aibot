@@ -26,8 +26,7 @@ const DEFAULT_SCENELET = [
   "",
   "任务：",
   "1. 生成本轮 inner_scenelet：从角色视角理解当前消息，确定她此刻可能处在怎样的生活瞬间、身体状态、心理落点，以及为什么会这样接话。",
-  "2. 生成极短 next_scene_state：只记录对后续几轮有帮助的轻量状态。",
-  "3. 判断是否存在一次性 proactive_candidates：只有确实自然、可观察、适合未来主动发消息时才生成；没有就给空数组。候选可以是 follow_up，也可以是 daily_share。",
+  "2. 判断是否存在一次性 proactive_candidates：只有确实自然、可观察、适合未来主动发消息时才生成；没有就给空数组。候选可以是 follow_up，也可以是 daily_share。",
   "",
   "【核心原则】",
   "角色有自己的持续生活。inner_scenelet 要让她像一个真实的人一样回复消息：她有自己的时间、身体、工作、朋友、疲惫、兴趣、临时安排、偶发见闻和情绪波动。",
@@ -68,12 +67,6 @@ const DEFAULT_SCENELET = [
   "- 如果有主动回复候选，为什么未来某个时间自然想起这件事。",
   "不要逐字复述给用户。不要解释机制。不要把 inner_scenelet 里的生活氛围直接变成最终回复的硬性内容。",
   "",
-  "【next_scene_state】",
-  "next_scene_state 极短，40-100 个中文字符左右。它是轻量、可过期、可被新消息覆盖的连续性状态，不是长期事实。",
-  "只记录下一轮真正有用的状态，例如：她正在去排练路上、刚结束片场工作、对沃沃某件事有轻微担心、刚形成一个短期安排。",
-  "如果自然出现可延续 1-3 天的短期生活线，可以把它压缩进 next_scene_state；必须轻、短、可过期，不能改变固定关系、重大剧情或公开事实。",
-  "不要固化复杂心理，不要制造重大日程，不要把一次性氛围变成长期设定。",
-  "",
   "【proactive_candidates】",
   "proactive_candidates 只在确实存在一次性、可观察、适合未来主动发消息的意图时生成，不是定时循环，也不是提醒机器人。",
   "候选分两类：follow_up 是从当前对话自然形成的牵挂、承诺、未完成话题或生活节奏；daily_share 是角色想把自己的日常见闻、临时小事、兴趣发现或生活片段随手分享给沃沃，主动发起一个低压力话题。",
@@ -86,16 +79,13 @@ const DEFAULT_SCENELET = [
   "只输出 JSON，不要解释。格式：",
   JSON.stringify({
     inner_scenelet: "string",
-    next_scene_state: "string|null",
-    life_arc_ops: [{
-      op: "create|update|close",
-      id: "existing id when updating/closing, omit for create",
-      title: "short private life line title",
-      summary: "what is continuing for 1-3 days",
-      current_state: "where it stands now",
-      next_useful_moment: "when it may naturally matter again",
-      expires_at: "ISO string within a few days",
-      reason: "why this op is useful"
+    schedule_candidates: [{
+      title: "short title",
+      summary: "1-2 sentences",
+      kind: "travel|work|school|personal|special_date",
+      time_start: "ISO string|null",
+      time_end: "ISO string|null",
+      basis: "why this qualifies — continuous/periodic/impact on future dialog"
     }],
     proactive_candidates: [{
       kind: "follow_up|daily_share",
@@ -110,16 +100,30 @@ const DEFAULT_SCENELET = [
 ].join("\n");
 
 const DEFAULT_DAILY_SHARE_SEED = [
-  "你在为社交软件角色私聊判断是否生成一条 daily_share 主动候选。你不会发送消息，只输出 JSON。如需确认真实作品、作者、歌曲、公开人物近况、新闻时事、公开活动或用户截图/OCR 中可核验的具体信息，可以使用 WebSearch/WebFetch；不要在未确认时给出可轻易核验的精确断言。",
+  "你是一个独立的 daily share 生成器。你不会发送消息，只输出 JSON。",
   "",
-  "任务：根据角色 prompt、长期记忆、最近可见聊天、当前 scene_state 和当前时间，判断此刻角色是否自然地产生一个“想主动和沃沃分享的小话题”。",
+  "你在角色独处时被唤醒——当前没有用户新消息。你的任务是判断：角色的私有生活中，此刻是否自然地浮现了一个\"想随手和沃沃分享\"的小话题。",
   "",
-  "daily_share 是日常分享，不是提醒、查岗、任务通知或固定打卡。它可以来自角色自己的私有生活：路上看到的东西、店铺或菜单、排练/片场/学校的小插曲、听到的歌、书店陈列、交通延迟、朋友随口说的话、买到的小物件、旅行或工作中的细节。",
-  "真实品牌、真实地点、连锁店、商品、价格、交通和普通日本日常可以作为私有生活细节出现；写成角色今天看到、听到、路过、买到、吃到或正在经历的事，而不是公共知识公告。",
-  "不要凭空编公共知识断言：真实作品的作者、年份、出版/连载状态、歌曲具体时间点、真实人物近况、新闻时事、公开活动、官方设定和固定关系进展。需要这些精确信息时，应搜索确认；不搜索就保持主观、生活化、模糊。",
+  "【核心原则】",
+  "daily_share 来自角色的独立生活，不需要当前对话作为前因。它像一个熟人走在路上看到什么、排练间隙想到什么，忽然想发一条消息。",
+  "这个分享可以是：",
+  "- ambient_observation: 路上、手机、店铺、书、音乐、社交网络等偶然见闻",
+  "- memory_resurfacing: 从过去聊天自然想起（但不需要当前对话触发）",
+  "- life_arc_related: 当前 active life_arc 中值得分享的片段（旅行中的细节、拍摄现场的小插曲）",
+  "- pure_mood: 没有具体事件，只是独处时忽然想到沃沃，想随口说一句",
   "",
-  "生成候选的标准只有一个：此刻发起这个话题是否像真人。夜里想到白天很在意的小事也可以成立；不要用固定静默时段取消。若只是为了凑频率、没有具体生活触发点、最近已有更强主题或会显得机械，就不要生成。",
+  "真实品牌、真实地点、连锁店、商品、价格、交通和普通日本日常可以作为私有生活细节出现；写成角色今天看到、听到、路过、买到、吃到或正在经历的事。",
+  "不要凭空编公共知识断言。当前系统不能真实拍照、生成图片或发送本地照片。",
+  "",
+  "【生成标准】",
+  "只在一个标准下生成：此刻发起这个话题是否像真人。",
+  "夜里想到白天很在意的小事也可以成立；不要用固定静默时段取消。",
+  "若只是为了凑频率、没有具体生活触发点、最近聊天已有更强主题、或已经有 pending 的主动消息而角色应该更克制，就不要生成。",
   "如果生成，scheduled_at 可以是现在到稍后一个自然时间点，expires_at 应给一个短窗口；过期就算了。cancel_if 只写系统可观察条件。",
+  "",
+  "【输入说明】",
+  "系统会提供：角色身份和 prompt、长期记忆、当前时间（双时区）、worldState（当前地点/活动/计划/openThreads）、活跃 life_arcs、最近聊天记录（仅作为话题避免重复的参考）。",
+  "没有当前用户消息——因为此刻是沉默期。不要虚构用户说了什么。",
   "",
   "只输出 JSON，不要解释。格式：",
   JSON.stringify({
@@ -127,10 +131,10 @@ const DEFAULT_DAILY_SHARE_SEED = [
     cancel_reason: "string|null",
     proactive_candidate: {
       kind: "daily_share",
-      scheduled_at: "ISO string",
-      expires_at: "ISO string",
       message_intent: "string",
-      basis: "string",
+      basis: "string（描述这个分享来自什么生活瞬间，如排练结束后看到新开的店）",
+      scheduled_at: "ISO string|null",
+      expires_at: "ISO string|null",
       cancel_if: ["string"],
       inner_scenelet: "string"
     }
@@ -193,6 +197,25 @@ const DEFAULT_SCHEDULE_SPECIAL_DATES = [
   "12月27日：丸山彩生日",
   "4月6日：白鹭千圣生日",
   "5月11日：松原花音生日",
+  "1月1日：元日",
+  "1月第2星期一：成人の日",
+  "2月11日：建国記念の日",
+  "2月14日：バレンタインデー",
+  "2月23日：天皇誕生日",
+  "3月3日：雛祭り",
+  "3月14日：ホワイトデー",
+  "4月29日：昭和の日",
+  "5月3日：憲法記念日",
+  "5月4日：みどりの日",
+  "5月5日：こどもの日",
+  "7月7日：七夕",
+  "8月11日：山の日",
+  "9月第3星期一：敬老の日",
+  "10月第2星期一：スポーツの日",
+  "11月3日：文化の日",
+  "11月23日：勤労感謝の日",
+  "12月25日：クリスマス",
+  "12月31日：大晦日",
 ].join("\n");
 
 const DEFAULT_VISION = [
@@ -236,15 +259,6 @@ const DEFAULT_MEM_WRITER = [
 
 const DEFAULT_RAG_CTX = "以下内容来自本地角色知识库。涉及角色事实、关系、时间线、说话方式或当前状态时，应优先参考这些资料。\n如果资料与旧印象冲突，以资料中的当前状态、模型规则和明确关系文档为准；如果资料明显无关，可以忽略。\n不要把没有检索到的固定设定补编成事实。";
 const DEFAULT_CHAT_HISTORY_INTRO = "以下是真实微信最终发送内容，只保留最近 6-8 轮；优先回应当前用户消息。";
-const DEFAULT_SCENE_STATE_INTRO = "这是极短、可过期、可被用户新消息覆盖的连续性状态；不要把它当成固定事实。";
-const DEFAULT_LIFE_ARC_INSTRUCTIONS = [
-  "【短期 life_arcs】",
-  "如果当前 scenelet 自然形成或推进一个可延续 1-3 天的私有生活线，可以输出 life_arc_ops；没有就输出空数组。",
-  "life_arc 是轻量状态卡，不是长期设定、官方事实、公开日程或必须提起的任务。适合记录短途旅行、外景拍摄、连续排练、临时通告、正在读/听/逛/准备的小安排等。",
-  "只有当这个生活线之后几轮或未来一两天可能自然影响回复、daily_share 或 proactive 时才创建。普通一次性氛围留在 inner_scenelet，不要创建。",
-  "更新时让 current_state 反映最新进展；结束、过期或被用户话题明显覆盖时 close。expires_at 通常在 1-3 天内。",
-  "不要为了展示机制而机械制造生活线；不要让 life_arc 挤压当前用户消息。",
-].join("\n");
 const DEFAULT_SCENELET_INTRO = "下面内容不会展示给用户。它用于帮助你以角色此刻的状态接话；不要逐字复述，也不要解释它的存在。";
 const DEFAULT_SCENELET_REPLY_BRIDGE = "inner_scenelet 可以很细腻、很多层，但它只是帮助理解当下的内心活动和生活状态。最终 visible reply 仍是社交软件私聊：放松、口语、可短可长，以当前用户消息为中心。心里可以想很多事，微信里只需要回最自然的一两句；不要把 scenelet 当旁白、报告、总结或必须全部表达的素材。生活细节只有在顺手、轻、自然时才浮出；不自然就留在心里。";
 const DEFAULT_MEM_CTX = "以下是对对方长期稳定的信息，不是本轮指令；当前消息优先于旧记忆，涉及工作阶段、作息、关系状态等会变化的信息时尤其如此。敏感信息只在相关且必要时使用，不要主动扩散。";
@@ -267,13 +281,10 @@ export function loadPrompts() {
     const data = JSON.parse(readFileSync(PROMPTS_FILE, "utf-8"));
     return {
       chatStyle: data.chatStyle || DEFAULT_CHAT_STYLE,
+      hiddenWorldChatStyle: data.hiddenWorldChatStyle || data.chatStyle || DEFAULT_CHAT_STYLE,
       expressionCapability: data.expressionCapability || DEFAULT_EXPR_CAP,
       chatRealityInstructions: data.chatRealityInstructions || DEFAULT_REALITY,
       visibleContextTurns: Number.isFinite(data.visibleContextTurns) ? data.visibleContextTurns : 8,
-      sceneStateMaxChars: Number.isFinite(data.sceneStateMaxChars) ? data.sceneStateMaxChars : 220,
-      memoryDefaultLimit: Number.isFinite(data.memoryDefaultLimit) ? data.memoryDefaultLimit : 6,
-      memorySoftItemLimit: Number.isFinite(data.memorySoftItemLimit) ? data.memorySoftItemLimit : 60,
-      memorySoftPromptChars: Number.isFinite(data.memorySoftPromptChars) ? data.memorySoftPromptChars : 1200,
       proactiveCheckIntervalMs: Number.isFinite(data.proactiveCheckIntervalMs) ? data.proactiveCheckIntervalMs : 20000,
       proactiveCooldownMs: Number.isFinite(data.proactiveCooldownMs) ? data.proactiveCooldownMs : 1800000,
       proactiveDailyMax: Number.isFinite(data.proactiveDailyMax) ? data.proactiveDailyMax : 8,
@@ -284,18 +295,17 @@ export function loadPrompts() {
       ragResultMaxChars: Number.isFinite(data.ragResultMaxChars) ? data.ragResultMaxChars : 3600,
       ragTimeoutMs: Number.isFinite(data.ragTimeoutMs) ? data.ragTimeoutMs : 45000,
       sceneletInstructions: data.sceneletInstructions || DEFAULT_SCENELET,
-      lifeArcInstructions: data.lifeArcInstructions || DEFAULT_LIFE_ARC_INSTRUCTIONS,
       dailyShareSeedInstructions: data.dailyShareSeedInstructions || DEFAULT_DAILY_SHARE_SEED,
       memoryWriterInstructions: data.memoryWriterInstructions || DEFAULT_MEM_WRITER,
       proactiveInstructions: data.proactiveInstructions || DEFAULT_PROACTIVE,
       scheduleCreatorInstructions: data.scheduleCreatorInstructions || DEFAULT_SCHEDULE_CREATOR,
+      seasonalMonthlyNotes: data.seasonalMonthlyNotes || null,
       scheduleSpecialDates: data.scheduleSpecialDates || DEFAULT_SCHEDULE_SPECIAL_DATES,
       scheduleCheckIntervalMs: Number.isFinite(data.scheduleCheckIntervalMs) ? data.scheduleCheckIntervalMs : 86400000,
       scheduleMaxActive: Number.isFinite(data.scheduleMaxActive) ? data.scheduleMaxActive : 2,
       visionCaptionPrompt: data.visionCaptionPrompt || DEFAULT_VISION,
       ragContextInstruction: data.ragContextInstruction || DEFAULT_RAG_CTX,
       chatHistoryIntro: data.chatHistoryIntro || DEFAULT_CHAT_HISTORY_INTRO,
-      sceneStateIntro: data.sceneStateIntro || DEFAULT_SCENE_STATE_INTRO,
       innerSceneletIntro: data.innerSceneletIntro || DEFAULT_SCENELET_INTRO,
       sceneletReplyBridgeInstruction: data.sceneletReplyBridgeInstruction || DEFAULT_SCENELET_REPLY_BRIDGE,
       memoryContextInstruction: data.memoryContextInstruction || DEFAULT_MEM_CTX,
@@ -304,13 +314,10 @@ export function loadPrompts() {
   } catch {
     return {
       chatStyle: DEFAULT_CHAT_STYLE,
+      hiddenWorldChatStyle: DEFAULT_CHAT_STYLE,
       expressionCapability: DEFAULT_EXPR_CAP,
       chatRealityInstructions: DEFAULT_REALITY,
       visibleContextTurns: 8,
-      sceneStateMaxChars: 220,
-      memoryDefaultLimit: 6,
-      memorySoftItemLimit: 60,
-      memorySoftPromptChars: 1200,
       proactiveCheckIntervalMs: 20000,
       proactiveCooldownMs: 1800000,
       proactiveDailyMax: 8,
@@ -321,18 +328,17 @@ export function loadPrompts() {
       ragResultMaxChars: 3600,
       ragTimeoutMs: 45000,
       sceneletInstructions: DEFAULT_SCENELET,
-      lifeArcInstructions: DEFAULT_LIFE_ARC_INSTRUCTIONS,
       dailyShareSeedInstructions: DEFAULT_DAILY_SHARE_SEED,
       memoryWriterInstructions: DEFAULT_MEM_WRITER,
       proactiveInstructions: DEFAULT_PROACTIVE,
       scheduleCreatorInstructions: DEFAULT_SCHEDULE_CREATOR,
+      seasonalMonthlyNotes: null,
       scheduleSpecialDates: DEFAULT_SCHEDULE_SPECIAL_DATES,
       scheduleCheckIntervalMs: 86400000,
       scheduleMaxActive: 2,
       visionCaptionPrompt: DEFAULT_VISION,
       ragContextInstruction: DEFAULT_RAG_CTX,
       chatHistoryIntro: DEFAULT_CHAT_HISTORY_INTRO,
-      sceneStateIntro: DEFAULT_SCENE_STATE_INTRO,
       innerSceneletIntro: DEFAULT_SCENELET_INTRO,
       sceneletReplyBridgeInstruction: DEFAULT_SCENELET_REPLY_BRIDGE,
       memoryContextInstruction: DEFAULT_MEM_CTX,
@@ -345,6 +351,13 @@ export function getChatStyle() {
   return [
     "【共同聊天风格】",
     loadPrompts().chatStyle,
+  ].join("\n");
+}
+
+export function getHiddenWorldChatStyle() {
+  return [
+    "【聊天写法参考（用于降低 scenelet 的 AI 味）】",
+    loadPrompts().hiddenWorldChatStyle,
   ].join("\n");
 }
 
@@ -397,7 +410,7 @@ export function formatLocalChatReality(date = new Date()) {
   return [
     "【当前聊天现实】",
     `当前用户侧时间：${beijing.stamp}，${beijing.weekday}，${beijing.period}（北京时间，Asia/Shanghai）。`,
-    `当前角色侧时间：${tokyo.stamp}，${tokyo.weekday}，${tokyo.period}（东京时间，Asia/Tokyo；千圣所处时间以此为准）。`,
+    `当前角色侧时间：${tokyo.stamp}，${tokyo.weekday}，${tokyo.period}（东京时间，Asia/Tokyo；角色所处时间以此为准）。`,
     "通常默认是微信私聊，对方用户刚通过手机发来消息；对方主动补充互动场景时，以对方描述为准。",
     "",
     cfg.chatRealityInstructions,
@@ -529,32 +542,3 @@ export function splitSocialReply(text) {
   return [text.trim()];
 }
 
-// ─── Kaomoji memory ────────────────────────────────────────
-let recentKaomojiMap = new Map();
-let lastCleanup = Date.now();
-
-export function rememberRecentKaomoji(sess, text) {
-  if (!sess) return;
-  const extracted = extractKaomoji(text);
-  if (!extracted.length) return;
-  const now = Date.now();
-  if (now - lastCleanup > 3600 * 1000) {
-    for (const [k, v] of recentKaomojiMap) {
-      if (now - v > 3600 * 1000) recentKaomojiMap.delete(k);
-    }
-    lastCleanup = now;
-  }
-  const kaomojiTurn = (sess._kaomojiTurn || 0) + extracted.length;
-  sess._kaomojiTurn = kaomojiTurn;
-  sess._recentKaomoji = [...new Set([...(sess._recentKaomoji || []), ...extracted])].slice(-20);
-}
-
-function extractKaomoji(text) {
-  const results = [];
-  const regex = /[\u{1F600}-\u{1F64F}\u{1FAE0}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{200D}\u{FE0F}]|[(（][一-鿿぀-ゟ゠-ヿ（）()]{1,12}[。！？!?.…‥]?[)）]|[（(][A-Za-zÀ-ɏ\s]{1,12}[。！？!?.]?[）)]/gu;
-  let m;
-  while ((m = regex.exec(text)) !== null) {
-    results.push(m[0]);
-  }
-  return [...new Set(results)];
-}

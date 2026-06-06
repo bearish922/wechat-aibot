@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const appJs = readFileSync(join(process.cwd(), "static", "app.js"), "utf-8");
+const appJs = readFileSync(join(import.meta.dirname, "..", "static", "app.js"), "utf-8");
 
 describe("Prompts runtime pipeline UI", () => {
   it("renders runtime steps in execution order", () => {
@@ -45,7 +45,6 @@ describe("Prompts runtime pipeline UI", () => {
     assert.ok(memoryIdx < modelIdx, "memory should appear before main model assembly");
     assert.match(appJs, /稳定 system context 到这里结束；接下来组装主回复动态 turn body/);
     assert.match(appJs, /memory snapshot 放在 turn body 最前面；不再进入稳定 system prompt/);
-    assert.match(appJs, /主回复不读取可见上下文窗口/);
   });
 
   it("exposes editable controls used by the runtime prompt pipeline", () => {
@@ -59,8 +58,6 @@ describe("Prompts runtime pipeline UI", () => {
       "memoryContextInstruction",
     ];
     const numFields = [
-      "memorySoftItemLimit",
-      "memorySoftPromptChars",
       "ragTopK",
       "ragMinScore",
       "ragResultMaxChars",

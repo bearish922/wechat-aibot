@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const appJs = readFileSync(join(process.cwd(), "static", "app.js"), "utf-8");
-const chatHistory = readFileSync(join(process.cwd(), "lib", "chat-history.mjs"), "utf-8");
+const appJs = readFileSync(join(import.meta.dirname, "..", "static", "app.js"), "utf-8");
+const chatHistory = readFileSync(join(import.meta.dirname, "..", "lib", "chat-history.mjs"), "utf-8");
 
 describe("History tool usage UI", () => {
   it("renders a small missing-scenelet note for assistant messages", () => {
