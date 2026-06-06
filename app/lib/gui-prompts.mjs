@@ -19,8 +19,8 @@ export function registerPromptsRoutes() {
   addRoute("PUT", "/api/prompts", ({ body }) => {
     const current = loadPrompts();
     const updates = {};
-    const textFields = ["chatStyle", "expressionCapability", "chatRealityInstructions", "sceneletInstructions", "lifeArcInstructions", "dailyShareSeedInstructions", "memoryWriterInstructions", "proactiveInstructions", "scheduleCreatorInstructions", "scheduleSpecialDates", "visionCaptionPrompt", "ragContextInstruction", "chatHistoryIntro", "sceneStateIntro", "innerSceneletIntro", "sceneletReplyBridgeInstruction", "memoryContextInstruction"];
-    const numFields = ["visibleContextTurns", "sceneStateMaxChars", "memoryDefaultLimit", "memorySoftItemLimit", "memorySoftPromptChars", "proactiveCheckIntervalMs", "proactiveCooldownMs", "proactiveDailyMax", "dailyShareSeedIntervalMs", "dailyShareMinIdleMs", "scheduleCheckIntervalMs", "scheduleMaxActive", "ragTopK", "ragMinScore", "ragResultMaxChars", "ragTimeoutMs"];
+    const textFields = ["chatStyle", "hiddenWorldChatStyle", "expressionCapability", "chatRealityInstructions", "sceneletInstructions", "dailyShareSeedInstructions", "memoryWriterInstructions", "proactiveInstructions", "scheduleCreatorInstructions", "scheduleSpecialDates", "visionCaptionPrompt", "ragContextInstruction", "chatHistoryIntro", "innerSceneletIntro", "sceneletReplyBridgeInstruction", "memoryContextInstruction"];
+    const numFields = ["visibleContextTurns", "proactiveCheckIntervalMs", "proactiveCooldownMs", "proactiveDailyMax", "dailyShareSeedIntervalMs", "dailyShareMinIdleMs", "scheduleCheckIntervalMs", "scheduleMaxActive", "ragTopK", "ragMinScore", "ragResultMaxChars", "ragTimeoutMs"];
     for (const key of textFields) {
       if (body[key] !== undefined) updates[key] = String(body[key]);
     }
@@ -33,6 +33,9 @@ export function registerPromptsRoutes() {
         lore: kw.lore !== undefined ? String(kw.lore) : (current.ragKeywords?.lore || ""),
         names: kw.names !== undefined ? String(kw.names) : (current.ragKeywords?.names || ""),
       };
+    }
+    if (body.seasonalMonthlyNotes !== undefined) {
+      try { updates.seasonalMonthlyNotes = typeof body.seasonalMonthlyNotes === "string" ? JSON.parse(body.seasonalMonthlyNotes) : body.seasonalMonthlyNotes; } catch { updates.seasonalMonthlyNotes = current.seasonalMonthlyNotes || null; }
     }
     const merged = { ...current, ...updates };
     savePrompts(merged);

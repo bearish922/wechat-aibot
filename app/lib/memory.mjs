@@ -1,9 +1,9 @@
 import fs from "node:fs";
-import { rootPath, ensureDir, PROJECT_ROOT } from "./paths.mjs";
+import { dataPath, ensureDir, PROJECT_ROOT } from "./paths.mjs";
 import { loadPrompts } from "./reply.mjs";
 import { shortId } from "./utils.mjs";
 
-export const MEMORY_FILE = rootPath("wechat-memory.json");
+export const MEMORY_FILE = dataPath("wechat-memory.json");
 export const MEMORY_NOTICE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 function readPromptsNum(key, fallback) {
@@ -23,10 +23,6 @@ function readPromptsText(key, fallback = "") {
     return fallback;
   }
 }
-
-export function getMemorySoftItemLimit() { return readPromptsNum("memorySoftItemLimit", 60); }
-export function getMemorySoftPromptChars() { return readPromptsNum("memorySoftPromptChars", 1200); }
-export function getMemoryDefaultLimit() { return readPromptsNum("memoryDefaultLimit", 6); }
 
 const DEFAULT_ROLE = "__default__";
 
@@ -305,29 +301,8 @@ export function listMemoryItems(userId, options = {}) {
   }));
 }
 
-export function memoryMaintenanceNotice(userId, options = {}) {
-  const profile = options.profile || DEFAULT_ROLE;
-  const store = loadMemoryStore();
-  const { user, items } = ensureUserMemory(store, userId, profile);
-  const prompt = renderMemoryPrompt(userId, { profile });
-  const itemCount = items.length;
-  const promptChars = prompt.length;
-  const tooManyItems = itemCount > getMemorySoftItemLimit();
-  const tooLongPrompt = promptChars > getMemorySoftPromptChars();
-  if (!tooManyItems && !tooLongPrompt) return "";
+export function memoryMaintenanceNotice(_userId, _options = {}) { return ""; }
 
-  const now = Date.now();
-  const last = user.lastMaintenanceNoticeAt ? Date.parse(user.lastMaintenanceNoticeAt) : 0;
-  if (options.mark && now - last < MEMORY_NOTICE_INTERVAL_MS) return "";
-  if (options.mark) {
-    user.lastMaintenanceNoticeAt = new Date(now).toISOString();
-    saveMemoryStore(store);
-  }
-  const reasons = [];
-  if (tooManyItems) reasons.push(`已有 ${itemCount} 条，建议约 60 条以内`);
-  if (tooLongPrompt) reasons.push(`注入上下文约 ${promptChars} 字，建议约 800-1200 字`);
-  return `⚠️ Memory 偏长：${reasons.join("；")}。可以用 /memory 查看概要，或用 /memory all 查看完整内容后整理 wechat-memory.json。`;
-}
 
 export function shouldRunMemoryWriter(text = "") {
   const value = String(text || "").trim();

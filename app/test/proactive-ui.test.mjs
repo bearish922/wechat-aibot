@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const appJs = readFileSync(join(process.cwd(), "static", "app.js"), "utf-8");
-const guiProactive = readFileSync(join(process.cwd(), "lib", "gui-proactive.mjs"), "utf-8");
+const appJs = readFileSync(join(import.meta.dirname, "..", "static", "app.js"), "utf-8");
+const guiProactive = readFileSync(join(import.meta.dirname, "..", "lib", "gui-proactive.mjs"), "utf-8");
 
 describe("Proactive life arcs UI", () => {
   it("uses the shared time formatter for life arc dates", () => {
