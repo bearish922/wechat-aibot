@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { addMemoryItem, buildMemoryWriterPrompt, buildMemoryWriterSystemPrompt, clearMemory, parseMemoryWriterOutput, shouldRunMemoryWriter, memoryListText, MEMORY_FILE } from "../lib/memory.mjs";
+import { addMemoryItem, clearMemory, parseMemoryWriterOutput, shouldRunMemoryWriter, memoryListText, MEMORY_FILE } from "../lib/memory.mjs";
 
 const TEST_USER = "test_memory_user";
 const TEST_ROLE = "__default__";
@@ -31,28 +31,6 @@ describe("shouldRunMemoryWriter", () => {
   it("skips empty input and commands", () => {
     assert.equal(shouldRunMemoryWriter("   "), false);
     assert.equal(shouldRunMemoryWriter("/memory"), false);
-  });
-});
-
-describe("buildMemoryWriterPrompt", () => {
-  it("guides the writer toward durable user memory without saving chat residue", () => {
-    // use a test user so it doesn't pick up real memory from 白鹭千圣
-    const prompt = buildMemoryWriterPrompt("我不希望你每次都夸我", TEST_USER, TEST_ROLE);
-    assert.match(prompt, /审慎的人类助手/u);
-    assert.match(prompt, /宠物\/长期陪伴对象/u);
-    assert.match(prompt, /回复方式的长期偏好/u);
-    assert.match(prompt, /实习、转正、求职/u);
-    assert.match(prompt, /单次歌曲\/作品即时反应/u);
-    assert.match(prompt, /饭点\/天气\/通勤\/犯困/u);
-    assert.match(prompt, /只抽取稳定信息写入/u);
-    assert.match(prompt, /不要推断用户能力、性格缺陷、岗位适配性/u);
-    assert.match(prompt, /用户消息：/u);
-  });
-
-  it("can render instructions separately for a system prompt file", () => {
-    const prompt = buildMemoryWriterSystemPrompt(TEST_USER, TEST_ROLE);
-    assert.match(prompt, /独立的长期记忆写入器/u);
-    assert.doesNotMatch(prompt, /\n用户消息：\n/u);
   });
 });
 

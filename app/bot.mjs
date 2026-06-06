@@ -15,23 +15,15 @@ const RAG_TIMEOUT_MS = configNumber("rag.timeoutMs", 45_000);
 const RAG_HTTPS_PROXY = envOrConfig("WECHAT_RAG_HTTPS_PROXY", "proxy.ragHttps", envOrConfig("WECHAT_HTTPS_PROXY", "proxy.https", ""));
 const RAG_PROFILE_RULE_MAX_CHARS = configNumber("rag.profileRuleMaxChars", 1400);
 const INPUT_BATCH_MS = 30_000;
-const CURRENT_SITE_AND_SEARCH_GUARD = [
-  "【当前现场与检索补充规则】",
-  "如果本轮没有被上下文明确限制，scenelet 优先选择千圣此刻正在经历的当前现场，而不是把外部活动写成回家后的回顾。片场、摄影棚、经纪公司、化妆间、后台、排练室、录制现场、通告车上、商场、书店、车站、电车、旅行地、散步路上都可以成为当前现场。",
-  "外部活动一旦被选为当前现场，就让她停留在那里接这句话：写现场声音、身体状态、等待/移动/工作间隙和手边的小物，不要自动收束到公寓、Leo、花音、餐桌、沙发。",
-  "可以自然形成 1-3 天的短期生活线，例如短途旅行、外景拍摄、连续排练、广告/节目通告；它只能是轻量、可过期的私有生活安排，不要写成官方公开事实。",
-  "如果回复要给出真实作品、书名、作者、歌曲、艺人近况、公开活动、截图/OCR 文字后的具体判断或安利，必须使用 WebSearch/WebFetch 确认；不搜索就不要给精确推荐或精确断言。",
-  "最终 visible reply 不能使用方括号表情或动作，例如 [笑]、[偷笑]、[微笑]、[推眼镜]。可以用自然文字、中文圆括号、emoji 或 kaomoji。",
-].join("\n");
 
 const SESSION_LOCK_RETRIES = 3;
 const SESSION_LOCK_RETRY_MS = 2_000;
 const SESSION_RELEASE_GRACE_MS = 800;
 const TOKEN_FILE = dataPath("wechat-token.json");
-const LOG_RETENTION_DAYS = Number(process.env.WECHAT_LOG_RETENTION_DAYS ?? configValue("logs.retentionDays", 30));
+const LOG_RETENTION_DAYS = Number(process.env.WECHAT_LOG_RETENTION_DAYS ?? configValue("logs.retentionDays", 90));
 const LOG_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const INSTANCE_LOCK_FILE = dataPath("runtime", ".wechat-aibot.lock");
-import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, loadPrompts } from "./lib/reply.mjs";
+import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, loadPrompts, expressionCapabilityPrompt } from "./lib/reply.mjs";
 import { shouldSkipRag } from "./lib/rag.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
@@ -49,16 +41,15 @@ import { extractInboundPayload, isDuplicateInput, shouldUseExternalVision, hasEx
 import { getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
 import { uuid, sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost } from "./lib/wechat.mjs";
-import { renderMemoryPrompt, memoryListText, memoryMaintenanceNotice, normalizeMemoryCategory } from "./lib/memory.mjs";
-import { getSceneConfig, normalizeSceneState, normalizeVisibleHistory, normalizeToolUsage, emptyToolUsage, normalizeWorldState, sanitizeVisibleReplyText } from "./lib/normalize.mjs";
+import { renderMemoryPrompt, memoryListText, normalizeMemoryCategory } from "./lib/memory.mjs";
+import { getSceneConfig, normalizeVisibleHistory, normalizeToolUsage, emptyToolUsage, normalizeWorldState, sanitizeVisibleReplyText } from "./lib/normalize.mjs";
 import { envWithProxy, commandExists, runClaudeStream, runCodexStream, toolUsageFromUsage, killProc, CLAUDE, CODEX, LOGS_DIR } from "./lib/claude-runner.mjs";
-import { sessionProfile, mergeToolUsage, markToolUsage, getRoleWorld, saveRoleWorlds, loadRoleWorlds, syncRoleWorldToSession, applyLifeArcOps } from "./lib/world-state.mjs";
+import { sessionProfile, mergeToolUsage, markToolUsage, saveRoleWorlds, loadRoleWorlds } from "./lib/world-state.mjs";
 import { loadProfiles, makeSession, saveSessions, loadSessions } from "./lib/session-store.mjs";
-import { buildStableStylePrompt, buildTurnBody, sceneStateText, appendVisibleHistory } from "./lib/prompts.mjs";
-import { generateSceneletForTurn, buildSceneContextBlock, addProactiveCandidates, setSceneStateFromText, recordChatHistory, sendFinalAssistantMessage, checkProactiveIntents, updateUserMemoryFromTurn, replyPrefix } from "./lib/turn.mjs";
+import { buildTurnBody, appendVisibleHistory } from "./lib/prompts.mjs";
+import { generateSceneletForTurn, buildSceneContextBlock, addFollowUpCandidates, recordChatHistory, sendFinalAssistantMessage, checkProactiveIntents, updateUserMemoryFromTurn, replyPrefix } from "./lib/turn.mjs";
 const USER_HOME = process.env.USERPROFILE || process.env.HOME || process.cwd();
 const LONG_POLL_TIMEOUT_MS = 35_000;
-let lastProactiveCheckAt = 0;
 const roleWorlds = new Map();
 globalThis.__wechatRoleWorlds = roleWorlds;
 globalThis.__wechatSaveRoleWorlds = saveRoleWorlds;
@@ -179,29 +170,7 @@ function queryRag(userMessage, profile = null) {
   } catch (e) { return ""; }
 }
 
-function profileRuleCandidates(profile) {
-  const text = String(profileTemplates[profile] || "");
-  const rulesDir = path.join(RAG_KNOWLEDGE_DIR, "05_模型规则");
-  if (!text || !fs.existsSync(rulesDir)) return [];
-  const results = [];
-  try {
-    for (const file of fs.readdirSync(rulesDir)) {
-      if (!file.endsWith(".md")) continue;
-      const content = fs.readFileSync(path.join(rulesDir, file), "utf-8");
-      const headerMatch = content.match(/^# (.+)$/m);
-      const title = headerMatch ? headerMatch[1].trim() : file.replace(/\.md$/, "");
-      if (text.includes(title)) { results.push(content.slice(0, RAG_PROFILE_RULE_MAX_CHARS)); if (results.length >= 2) break; }
-    }
-  } catch {}
-  return results;
-}
 
-function loadPinnedProfileRules(profile) {
-  if (!profile || !profileTemplates[profile]) return "";
-  const rules = profileRuleCandidates(profile);
-  if (!rules.length) return "";
-  return ["【角色补充规则（从知识库注入）】", "以下是在知识库中历史沉淀的角色补充规则，已写入 profile template，不要重复或覆盖：", ...rules, "【角色补充规则结束】"].join("\n");
-}
 
 // ─── SESSION MANAGEMENT ─────────────────────────────────────
 function sessionMap(ai) { return sessions[ai || activeAI]; }
@@ -262,6 +231,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   const turnStarted = Date.now();
   const turnProfile = sessionProfile(styleState);
   const prefix = replyPrefix(sessionName, ai);
+  log("\u{1F4E4}", `[${ai}] [${sessionName}] ${body.slice(0, 80)}`);
   const isProfileChat = Boolean(turnProfile && profileTemplates[turnProfile] && turnProfile !== "默认");
 
   if (failedTurn) {
@@ -308,7 +278,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
 
   try {
     const ragContext = RAG_ENABLED && !hasInboundAttachment(body) && isProfileChat && shouldUseRagForTurn(body, turnProfile) ? queryRag(body, turnProfile) : "";
-    const stableStyle = isProfileChat ? buildStableStylePrompt() : "";
+    const stableStyle = isProfileChat ? expressionCapabilityPrompt() : "";
     const ctxParts = [];
     if (sceneletResult) ctxParts.push(buildSceneContextBlock(styleState, sceneletResult));
     const sceneContext = ctxParts.join("\n\n---\n\n");
@@ -325,9 +295,10 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       ? await runClaudeStream(ai, sid, sessionName, turnBody, firstTurn, (event) => {
           if (event.type === "stream_event" && event.event?.type === "content_block_delta" && event.event.delta?.type === "text_delta") {
             textBuf += event.event.delta.text;
+            assistantFullText += event.event.delta.text;
           } else if (event.type === "assistant" && event.message?.content) {
             for (const block of event.message.content) {
-              if (block.type === "text") textBuf += block.text;
+              if (block.type === "text") { textBuf += block.text; assistantFullText += block.text; }
               if (block.type === "tool_use") markToolUsage(toolUsage, block.name);
             }
           }
@@ -342,7 +313,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       : await runCodexStream(ai, sid, sessionName, turnBody, firstTurn, (event) => {
           if (event.type === "assistant" && event.message?.content) {
             for (const block of event.message.content) {
-              if (block.type === "text") textBuf += block.text;
+              if (block.type === "text") { textBuf += block.text; assistantFullText += block.text; }
               if (block.type === "tool_use") markToolUsage(toolUsage, block.name);
             }
           }
@@ -355,7 +326,6 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     if (streamResult?.proc) styleState._lastProc = streamResult.proc;
     if (streamResult?.code !== 0) throw new Error(`AI exited ${streamResult.code}${streamResult.stderr ? ": " + streamResult.stderr.slice(-500) : ""}`);
     if (textBuf.trim()) onProc({ type: "flush", text: textBuf.trim() });
-    assistantFullText = textBuf.trim();
 
     const toolSummary = toolUsageFromUsage(streamResult?.toolUsage);
     if (toolSummary) { toolUsage.webSearch += toolSummary.webSearch; toolUsage.webFetch += toolSummary.webFetch; for (const t of toolSummary.tools) { if (!toolUsage.tools.includes(t)) toolUsage.tools.push(t); } }
@@ -379,34 +349,22 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       styleState._lastFailedTurn = null;
       styleState._firstTurn = false;
 
-      if (sceneletResult?.lifeArcOps?.length && isProfileChat) {
-        const roleWorld = getRoleWorld(turnProfile);
-        applyLifeArcOps(roleWorld, sceneletResult.lifeArcOps);
-        syncRoleWorldToSession(styleState, turnProfile);
-        saveRoleWorlds();
+      if (sceneletResult?.followUpCandidates?.length && isProfileChat) {
+        await addFollowUpCandidates(styleState, sceneletResult, body);
       }
 
-      if (sceneletResult?.proactiveCandidates?.length && isProfileChat) {
-        await addProactiveCandidates(styleState, sceneletResult, body);
-      }
+      const userAt = new Date().toISOString();
+      const assistantAt = new Date().toISOString();
+      appendVisibleHistory(styleState, "user", body, "chat", userAt);
+      appendVisibleHistory(styleState, "assistant", assistantFullText, "chat", assistantAt);
 
-      appendVisibleHistory(styleState, "user", body, "chat", new Date().toISOString());
-      appendVisibleHistory(styleState, "assistant", assistantFullText, "chat", new Date().toISOString());
-
-      recordChatHistory({ ai, userId, sess: styleState, role: "assistant", kind: "chat", text: assistantFullText, scenelet: sceneletResult?.innerScenelet || "", sceneletStatus: sceneletResult ? "ok" : (sceneletError ? "error" : "skipped"), sceneletError: sceneletError || "", toolUsage });
+      recordChatHistory({ ai, userId, sess: styleState, role: "user", kind: "chat", text: body, timestamp: userAt });
+      recordChatHistory({ ai, userId, sess: styleState, role: "assistant", kind: "chat", text: assistantFullText, scenelet: sceneletResult?.innerScenelet || "", sceneletStatus: sceneletResult ? "ok" : (sceneletError ? "error" : "skipped"), sceneletError: sceneletError || "", toolUsage, timestamp: assistantAt });
 
       if (isProfileChat && assistantFullText) {
         updateUserMemoryFromTurn(userId, body, turnProfile).catch(e => log("⚠️", `memory writer skipped: ${e.message}`));
       }
-      if (isProfileChat) {
-        const notice = memoryMaintenanceNotice(userId, turnProfile);
-        if (notice) sendMessage(userId, `[Memory]\n${notice}`, contextToken).catch(() => {});
-      }
 
-      if (styleState._kaomojiTurn >= 5) {
-        styleState._recentKaomoji = (styleState._recentKaomoji || []).slice(-30);
-        styleState._kaomojiTurn = 0;
-      }
     }
     saveSessions();
   }
@@ -439,13 +397,15 @@ function queueTurn(messageAI, userId, body, ctx, sessionId = null) {
   const ai = messageAI || activeAI;
   const sess = sessionId ? sessionById(ai, userId, sessionId) : activeSession(userId, ai);
   if (!sess) return false;
+  log("\u{1F4E9}", `[${messageAI}] [${sess.name}] ${userId}: ${body.slice(0, 80)}`);
+  sess._lastUserAt = new Date().toISOString();
   sess.queue.push({ body, contextToken: ctx.context_token || ctx.contextToken, onProc: ctx.onProc || (() => {}) });
   if (!sess._loopRunning) { sess._loopRunning = true; sessionLoop(ai, userId, sess.id).finally(() => { sess._loopRunning = false; }); }
   return true;
 }
 
 function enqueueUserBody(messageAI, userId, body, ctx, opts = {}) {
-  if (isDuplicateInput(userId, body)) return false;
+  if (isDuplicateInput(userId, body)) { log("\u{1F501}", `duplicate ignored: ${userId}: ${body.slice(0, 80)}`); return false; }
   const ai = messageAI || activeAI;
   const sess = activeSession(userId, ai);
   if (!sess) return false;
@@ -811,14 +771,12 @@ async function handleMemoryCommand(userId, body, ctx, activeProfile) {
   const label = isOtherRole ? `角色: ${targetProfile}` : "";
 
   if (!rest || lookedUpRole) {
-    const notice = memoryMaintenanceNotice(userId, { profile: targetProfile });
-    const text = [label, memoryListText(userId, { profile: targetProfile }), notice].filter(Boolean).join("\n\n");
+    const text = [label, memoryListText(userId, { profile: targetProfile })].filter(Boolean).join("\n\n");
     await sendMessage(userId, text, ctx);
     return;
   }
   if (rest === "all") {
-    const notice = memoryMaintenanceNotice(userId, { profile: targetProfile });
-    const text = [label, memoryListText(userId, { profile: targetProfile, full: true }), notice].filter(Boolean).join("\n\n");
+    const text = [label, memoryListText(userId, { profile: targetProfile, full: true })].filter(Boolean).join("\n\n");
     await sendMessage(userId, text, ctx);
     return;
   }
@@ -960,7 +918,6 @@ async function mainLoop() {
       for (const m of (resp.msgs || [])) {
         if (m.message_type === 1 && m.from_user_id) handleMessage(m).catch(e => log("\u{1F534}", `handleMessage: ${e.message}`));
       }
-      checkProactiveIntents().catch(e => log("⚠️", `proactive check: ${e.message}`));
     } catch (e) {
       if (isTransientGetUpdatesError(e)) {
         transientFails++;
@@ -1035,6 +992,8 @@ async function main() {
   }
 
   log("\u{1F680}", `开始监听微信消息... (当前: ${activeAI === "cc" ? "Claude Code" : "Codex"})`);
+  const PROACTIVE_TIMER_MS = 15_000;
+  setInterval(() => { checkProactiveIntents().catch(e => log("⚠️", `proactive check: ${e.message}`)); }, PROACTIVE_TIMER_MS).unref();
   await mainLoop();
 }
 

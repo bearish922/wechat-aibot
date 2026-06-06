@@ -9,7 +9,6 @@ function getSceneConfig() {
   const p = loadPrompts();
   return {
     visibleContextTurns: p.visibleContextTurns || 8,
-    sceneStateMaxChars: p.sceneStateMaxChars || 220,
     proactiveCheckIntervalMs: p.proactiveCheckIntervalMs || 20000,
     proactiveCooldownMs: p.proactiveCooldownMs || 1800000,
     proactiveDailyMax: p.proactiveDailyMax || 8,
@@ -31,17 +30,6 @@ function normalizeFailedTurn(raw) {
     timestamp: raw.timestamp ? String(raw.timestamp) : null,
     reason: raw.reason ? String(raw.reason).slice(0, 500) : "",
     sid: raw.sid ? String(raw.sid) : null,
-  };
-}
-
-function normalizeSceneState(raw) {
-  if (!raw) return null;
-  const text = typeof raw === "string" ? raw : raw.text;
-  if (!text) return null;
-  return {
-    text: String(text).slice(0, getSceneConfig().sceneStateMaxChars),
-    updatedAt: raw.updatedAt ? String(raw.updatedAt) : new Date().toISOString(),
-    expiresAt: raw.expiresAt ? String(raw.expiresAt) : null,
   };
 }
 
@@ -169,12 +157,9 @@ function normalizeWorldLastOutput(raw = null) {
   return {
     timestamp: raw.timestamp ? String(raw.timestamp) : null,
     innerScenelet: raw.innerScenelet ? String(raw.innerScenelet).slice(0, 4000) : "",
-    nextSceneState: raw.nextSceneState ? String(raw.nextSceneState).slice(0, getSceneConfig().sceneStateMaxChars) : "",
     worldStatePatch: raw.worldStatePatch && typeof raw.worldStatePatch === "object" ? raw.worldStatePatch : null,
     dailyShareCandidates: Array.isArray(raw.dailyShareCandidates) ? raw.dailyShareCandidates.slice(0, 5) : [],
     scheduleCandidates: Array.isArray(raw.scheduleCandidates) ? raw.scheduleCandidates.slice(0, 5) : [],
-    timeReasoning: raw.timeReasoning && typeof raw.timeReasoning === "object" ? raw.timeReasoning : null,
-    continuityWarnings: Array.isArray(raw.continuityWarnings) ? raw.continuityWarnings.map(x => String(x).slice(0, 300)).slice(0, 8) : [],
   };
 }
 
@@ -193,7 +178,9 @@ function normalizeLifeArc(raw) {
   const rawExpiresAt = raw.expiresAt || raw.expires_at ? String(raw.expiresAt || raw.expires_at) : defaultExpiresAt;
   const expiresAt = Number.isFinite(Date.parse(rawExpiresAt)) ? rawExpiresAt : defaultExpiresAt;
   const lifeArcKinds = ["travel", "work", "school", "personal", "special_date"];
+  const lifeArcSubjects = ["role", "user", "shared"];
   const kind = lifeArcKinds.includes(raw.kind) ? raw.kind : null;
+  const subject = lifeArcSubjects.includes(raw.subject) ? raw.subject : null;
   const timeStart = raw.timeStart || raw.time_start ? String(raw.timeStart || raw.time_start) : null;
   const timeEnd = raw.timeEnd || raw.time_end ? String(raw.timeEnd || raw.time_end) : null;
   return {
@@ -205,6 +192,7 @@ function normalizeLifeArc(raw) {
     nextUsefulMoment: raw.nextUsefulMoment || raw.next_useful_moment ? String(raw.nextUsefulMoment || raw.next_useful_moment).trim().slice(0, 300) : "",
     source: raw.source ? String(raw.source).trim().slice(0, 300) : "",
     kind,
+    subject,
     timeStart,
     timeEnd,
     createdAt,
@@ -234,14 +222,10 @@ function normalizeSceneletResult(raw) {
   if (!raw || typeof raw !== "object") return null;
   return {
     innerScenelet: raw.inner_scenelet ? String(raw.inner_scenelet).trim() : "",
-    nextSceneState: raw.next_scene_state ? String(raw.next_scene_state).trim().slice(0, getSceneConfig().sceneStateMaxChars) : "",
-    lifeArcOps: [],
-    proactiveCandidates: Array.isArray(raw.proactive_candidates) ? raw.proactive_candidates : [],
+    followUpCandidates: Array.isArray(raw.follow_up_candidates) ? raw.follow_up_candidates : [],
     worldStatePatch: raw.world_state_patch && typeof raw.world_state_patch === "object" ? raw.world_state_patch : null,
     dailyShareCandidates: Array.isArray(raw.daily_share_candidates) ? raw.daily_share_candidates : [],
     scheduleCandidates: Array.isArray(raw.schedule_candidates) ? raw.schedule_candidates : [],
-    timeReasoning: raw.time_reasoning && typeof raw.time_reasoning === "object" ? raw.time_reasoning : null,
-    continuityWarnings: Array.isArray(raw.continuity_warnings) ? raw.continuity_warnings.map(x => String(x).slice(0, 300)).slice(0, 8) : [],
     toolUsage: normalizeToolUsage(raw._toolUsage) || emptyToolUsage(),
     hiddenCall: raw._hiddenCall || null,
   };
@@ -270,6 +254,7 @@ function normalizeRawProactiveCandidate(raw, { nowIso = new Date().toISOString()
 function normalizeScheduleCandidates(raw = []) {
   if (!Array.isArray(raw)) return [];
   const kinds = ["travel", "work", "school", "personal", "special_date"];
+  const subjects = ["role", "user", "shared"];
   return raw.map(item => {
     if (!item || typeof item !== "object") return null;
     const title = String(item.title || "").trim().slice(0, 80);
@@ -279,6 +264,7 @@ function normalizeScheduleCandidates(raw = []) {
       title,
       summary: String(item.summary || "").trim().slice(0, 500),
       kind,
+      subject: subjects.includes(item.subject) ? item.subject : null,
       time_start: item.time_start || item.timeStart || null,
       time_end: item.time_end || item.timeEnd || null,
       basis: String(item.basis || "").trim().slice(0, 300),
@@ -391,7 +377,6 @@ function normalizeProactiveDecision(raw) {
     cancelReason: raw.cancel_reason ? String(raw.cancel_reason).slice(0, 500) : "",
     innerScenelet: raw.inner_scenelet ? String(raw.inner_scenelet).trim() : "",
     visibleReply: raw.visible_reply ? sanitizeVisibleReplyText(raw.visible_reply) : "",
-    nextSceneState: raw.next_scene_state ? String(raw.next_scene_state).trim().slice(0, getSceneConfig().sceneStateMaxChars) : "",
     toolUsage: normalizeToolUsage(raw._toolUsage) || emptyToolUsage(),
   };
 }
@@ -399,7 +384,6 @@ function normalizeProactiveDecision(raw) {
 export {
   getSceneConfig,
   normalizeFailedTurn,
-  normalizeSceneState,
   normalizeVisibleHistory,
   normalizeProactiveIntent,
   normalizeProactiveIntents,

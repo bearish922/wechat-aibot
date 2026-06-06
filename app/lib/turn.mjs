@@ -2,10 +2,10 @@ import { uuid, log, sleep } from "./utils.mjs";
 import { sessions, profileTemplates, pendingInputs } from "./state.mjs";
 import { SCENELET_BARE, SCENELET_MODEL, CLAUDE_FAST_MODEL, CLAUDE_MAIN_MODEL, runHiddenJson } from "./claude-runner.mjs";
 import { loadPrompts, MAX_REPLY_LEN, splitText, splitSocialReply } from "./reply.mjs";
-import { getSceneConfig, normalizeFailedTurn, normalizeSceneState, normalizeVisibleHistory, normalizeProactiveIntent, normalizeProactiveIntents, normalizeToolUsage, normalizeWorldState, applyWorldStatePatch, normalizeLifeArcs, normalizeSceneletResult, normalizeRawProactiveCandidate, normalizeScheduleCandidates, normalizeMemoryCandidates, normalizeMemoryOps, normalizeProactiveDecision, sanitizeVisibleReplyText } from "./normalize.mjs";
+import { getSceneConfig, normalizeFailedTurn, normalizeVisibleHistory, normalizeProactiveIntent, normalizeProactiveIntents, normalizeToolUsage, normalizeWorldState, applyWorldStatePatch, normalizeLifeArcs, normalizeSceneletResult, normalizeRawProactiveCandidate, normalizeScheduleCandidates, normalizeMemoryCandidates, normalizeMemoryOps, normalizeProactiveDecision, sanitizeVisibleReplyText } from "./normalize.mjs";
 import { sessionProfile, roleWorldKey, ensureWorldSession, getRoleWorld, saveRoleWorlds, syncRoleWorldToSession, checkIntentDuplicateFlash, applyLifeArcOps, lifeArcPromptItems } from "./world-state.mjs";
 import { saveSessions } from "./session-store.mjs";
-import { buildHiddenWorldSystemPrompt, buildHiddenWorldPrompt, buildProactivePrompt, recentVisibleContext, sceneStateText, buildScheduleStaticContext, buildMemoryCandidatePrompt, buildMemoryMergePrompt, appendVisibleHistory } from "./prompts.mjs";
+import { buildHiddenWorldSystemPrompt, buildHiddenWorldPrompt, buildProactivePrompt, recentVisibleContext, buildMemoryCandidatePrompt, buildMemoryMergePrompt, appendVisibleHistory } from "./prompts.mjs";
 import { renderMemoryPrompt, isMemoryEnabled, shouldRunMemoryWriter, listMemoryItems, applyMemoryOps } from "./memory.mjs";
 import { appendChatEvent } from "./chat-history.mjs";
 import { sendMessage } from "./wechat.mjs";
@@ -29,7 +29,6 @@ export async function generateSceneletForTurn({ userId, sess, profile, userBody,
     sessionName: sess.name,
     profile,
     userBody,
-    carriedSceneState: "",
     lifeArcs: lifeArcPromptItems(roleWorld),
     visibleContext: recentVisibleContext(sess),
     memoryPrompt,
@@ -70,20 +69,12 @@ export async function generateSceneletForTurn({ userId, sess, profile, userBody,
   world.lastUsedAt = new Date().toISOString();
   world.lastUsage = result.hiddenCall || null;
   applyWorldStatePatch(roleWorld, result.worldStatePatch);
-  roleWorld._sceneState = normalizeSceneState({
-    text: result.nextSceneState,
-    updatedAt: world.lastUsedAt,
-    expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
-  });
   roleWorld._worldLastOutput = {
     timestamp: world.lastUsedAt,
     innerScenelet: result.innerScenelet,
-    nextSceneState: result.nextSceneState,
     worldStatePatch: result.worldStatePatch,
     dailyShareCandidates: result.dailyShareCandidates,
     scheduleCandidates: result.scheduleCandidates,
-    timeReasoning: result.timeReasoning,
-    continuityWarnings: result.continuityWarnings,
   };
   roleWorld.updatedAt = world.lastUsedAt;
   syncRoleWorldToSession(sess, profile);
@@ -103,7 +94,6 @@ export function buildSceneContextBlock(sess, sceneletResult, carriedState) {
     time_end: arc.time_end,
   })).slice(-3) : [];
   const parts = [
-    sceneletResult?.nextSceneState ? ["【轻量 scene_state】", cfg.sceneStateIntro, sceneletResult.nextSceneState].filter(Boolean).join("\n") : "",
     lifeArcSummary.length ? [
       "【短期 life_arc 简述】",
       "以下是 hidden-world 已确认的短期生活线摘要，只作为时间框架和自然接话参考，不要主动复述 JSON。",
@@ -122,11 +112,11 @@ export function buildSceneContextBlock(sess, sceneletResult, carriedState) {
   return parts.join("\n\n");
 }
 
-export async function addProactiveCandidates(sess, sceneletResult, userBody) {
-  if (!sess || !sceneletResult?.proactiveCandidates?.length) return;
+export async function addFollowUpCandidates(sess, sceneletResult, userBody) {
+  if (!sess || !sceneletResult?.followUpCandidates?.length) return;
   const nowIso = new Date().toISOString();
   const existing = normalizeProactiveIntents(sess._proactiveIntents);
-  for (const raw of sceneletResult.proactiveCandidates.slice(0, 3)) {
+  for (const raw of sceneletResult.followUpCandidates.slice(0, 3)) {
     const candidate = normalizeRawProactiveCandidate(raw, {
       nowIso,
       sourceUserText: userBody,
@@ -143,16 +133,7 @@ export async function addProactiveCandidates(sess, sceneletResult, userBody) {
   sess._proactiveIntents = normalizeProactiveIntents(existing);
 }
 
-export function setSceneStateFromText(sess, text, ttlMs = 2 * 60 * 60 * 1000) {
-  const normalized = normalizeSceneState({
-    text,
-    updatedAt: new Date().toISOString(),
-    expiresAt: new Date(Date.now() + ttlMs).toISOString(),
-  });
-  sess._sceneState = normalized;
-}
-
-export function recordChatHistory({ ai, userId, sess, role, kind = "chat", text, scenelet = "", sceneState = "", sceneletStatus = "", sceneletError = "", proactiveIntentId = "", toolUsage = null, ragUsage = null, timestamp = new Date().toISOString() }) {
+export function recordChatHistory({ ai, userId, sess, role, kind = "chat", text, scenelet = "", sceneletStatus = "", sceneletError = "", proactiveIntentId = "", toolUsage = null, ragUsage = null, timestamp = new Date().toISOString() }) {
   if (!sess || (!text?.trim() && !scenelet?.trim())) return;
   appendChatEvent({
     timestamp,
@@ -165,7 +146,6 @@ export function recordChatHistory({ ai, userId, sess, role, kind = "chat", text,
     kind,
     text,
     scenelet,
-    sceneState,
     sceneletStatus,
     sceneletError,
     proactiveIntentId,
@@ -223,7 +203,6 @@ export async function evaluateProactiveIntent({ ai, userId, sess, profile, inten
     profile,
     intent,
     memoryPrompt,
-    carriedSceneState: sceneStateText(sess),
     visibleContext: recentVisibleContext(sess),
     sess,
   });
@@ -270,7 +249,7 @@ export async function maybeSeedDailyShareIntent({ ai, userId, sess, profile, pen
     scheduled_at: scheduledAt,
     expires_at: expiresAt,
     message_intent: candidate.message_intent,
-    basis: [candidate.source_type, candidate.basis].filter(Boolean).join(": "),
+    basis: candidate.basis || "",
     cancel_if: candidate.cancel_if || ["用户已经开启新话题", "用户正在忙或没有回应上一条主动消息"],
     inner_scenelet: candidate.inner_scenelet || "",
   }, {
@@ -303,14 +282,8 @@ export async function maybeCreateScheduleEntry({ sess, profile }) {
     .slice(-5)
     .map(a => a.kind);
 
-  const now = new Date(nowMs);
-  const staticCtx = buildScheduleStaticContext(now);
-  const staticCtxShort = staticCtx.length > 2000 ? staticCtx.slice(0, 2000) + "\n...(truncated)" : staticCtx;
-
   const prompt = [
     (loadPrompts().scheduleCreatorInstructions || ""),
-    "",
-    staticCtxShort,
     "",
     "角色 prompt（截取关键身份信息）：",
     profile && profileTemplates[profile] ? profileTemplates[profile].slice(0, 800) : "",
@@ -333,6 +306,7 @@ export async function maybeCreateScheduleEntry({ sess, profile }) {
         title: "string",
         summary: "string",
         kind: "travel|work|school|personal|special_date",
+        subject: "role|user|shared",
         time_start: "ISO string|null",
         time_end: "ISO string|null"
       }
@@ -360,6 +334,7 @@ export async function maybeCreateScheduleEntry({ sess, profile }) {
     title: String(arc.title).slice(0, 80),
     summary: String(arc.summary || "").slice(0, 500),
     kind: arc.kind,
+    subject: arc.subject || null,
     time_start: arc.time_start || arc.timeStart || null,
     time_end: timeEnd,
     expires_at: expiresAt,
@@ -444,7 +419,6 @@ export async function checkProactiveIntents() {
       sess._lastProactiveAt = sentAt;
       sess._lastAssistantAt = sentAt;
       appendVisibleHistory(sess, "assistant", decision.visibleReply, "proactive", sentAt);
-      if (decision.nextSceneState) setSceneStateFromText(sess, decision.nextSceneState);
       recordChatHistory({
         ai,
         userId,
@@ -453,7 +427,6 @@ export async function checkProactiveIntents() {
         kind: "proactive",
         text: decision.visibleReply,
         scenelet: decision.innerScenelet || intent.innerScenelet,
-        sceneState: decision.nextSceneState,
         proactiveIntentId: intent.id,
         toolUsage: decision.toolUsage,
         timestamp: sentAt,

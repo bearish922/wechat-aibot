@@ -19,7 +19,7 @@ export function registerPromptsRoutes() {
   addRoute("PUT", "/api/prompts", ({ body }) => {
     const current = loadPrompts();
     const updates = {};
-    const textFields = ["chatStyle", "hiddenWorldChatStyle", "expressionCapability", "chatRealityInstructions", "sceneletInstructions", "dailyShareSeedInstructions", "memoryWriterInstructions", "proactiveInstructions", "scheduleCreatorInstructions", "scheduleSpecialDates", "visionCaptionPrompt", "ragContextInstruction", "chatHistoryIntro", "innerSceneletIntro", "sceneletReplyBridgeInstruction", "memoryContextInstruction"];
+    const textFields = ["chatStyle", "hiddenWorldChatStyle", "expressionCapability", "chatRealityInstructions", "sceneletInstructions", "memoryCandidateInstructions", "memoryWriterInstructions", "proactiveInstructions", "scheduleCreatorInstructions", "scheduleSpecialDates", "visionCaptionPrompt", "ragContextInstruction", "chatHistoryIntro", "innerSceneletIntro", "sceneletReplyBridgeInstruction", "memoryContextInstruction"];
     const numFields = ["visibleContextTurns", "proactiveCheckIntervalMs", "proactiveCooldownMs", "proactiveDailyMax", "dailyShareSeedIntervalMs", "dailyShareMinIdleMs", "scheduleCheckIntervalMs", "scheduleMaxActive", "ragTopK", "ragMinScore", "ragResultMaxChars", "ragTimeoutMs"];
     for (const key of textFields) {
       if (body[key] !== undefined) updates[key] = String(body[key]);
