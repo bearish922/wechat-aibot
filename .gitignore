@@ -3,7 +3,6 @@ config.json
 data/config.json
 data/wechat-token.json
 data/wechat-sessions.json
-data/会话恢复指令.txt
 产品功能文档与Review.md
 
 # Personal memory (auto-generated per-user data)

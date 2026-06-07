@@ -4,50 +4,51 @@
     "白鹭千圣": {
       "profile": "白鹭千圣",
       "_worldState": {
-        "location": "公寓卧室床上，已关灯",
-        "activity": "已入睡。睡前看到沃沃最后一条消息的锁屏预览，没有回复。醒来后会正式回复。",
-        "awakeState": "sleeping",
-        "currentPlan": "完整夜间睡眠至周日自然醒（约7:00-8:00）。醒来后吃丰盛早餐，可能回复沃沃昨晚的最后消息。周日无安排。",
+        "location": "公寓卧室床上，准备起床",
+        "activity": "靠在床头，和沃沃进行晨间对话尾声——沃沃试图为通宵辩解，千圣轻轻收住不再追打。即将起床做早饭。",
+        "awakeState": "awake",
+        "currentPlan": "起床做早饭（兑现昨晚对沃沃的承诺）。周日无安排。沃沃是否去睡由她自己决定。",
         "openThreads": [
           "沃沃面试已确认下周二上午11:00",
           "沃沃架子鼓课基本功阶段——持续练习中",
           "下月活动——等事务所公布后再告诉沃沃",
-          "沃沃最后一条消息（早安时回复）——澄清玩笑不是真的不满，说了おやすみ"
+          "沃沃昨晚通宵未睡——已指出，不再穷追",
+          "千圣今早需兑现丰盛早餐"
         ],
-        "lastWorldEventAt": "2026-06-06T15:14:56.370Z",
-        "updatedAt": "2026-06-06T15:15:31.630Z"
+        "lastWorldEventAt": "2026-06-06T22:16:18.428Z",
+        "updatedAt": "2026-06-06T22:16:52.958Z"
       },
       "_worldSession": {
         "sid": "c43cce58-8443-4e32-b8cb-b11817d3e78d",
         "firstTurn": false,
         "model": "deepseek-v4-pro[1m]",
         "startedAt": "2026-06-05T20:43:42.953Z",
-        "lastUsedAt": "2026-06-06T15:15:31.630Z",
+        "lastUsedAt": "2026-06-06T22:16:52.958Z",
         "resetReason": "",
         "lastUsage": {
           "type": "hidden_call_usage",
           "label": "hidden_world",
           "model": "deepseek-v4-pro[1m]",
           "session_id": "c43cce58-8443-4e32-b8cb-b11817d3e78d",
-          "started_at": "2026-06-06T15:14:56.372Z",
-          "duration_ms": 35257,
-          "context_chars": 9456,
-          "system_chars": 6350,
+          "started_at": "2026-06-06T22:16:18.430Z",
+          "duration_ms": 34527,
+          "context_chars": 8994,
+          "system_chars": 7289,
           "success": true,
-          "output_chars": 1898,
-          "input_tokens": 5441,
-          "cache_read_input_tokens": 180096,
+          "output_chars": 2230,
+          "input_tokens": 5445,
+          "cache_read_input_tokens": 201984,
           "cache_creation_input_tokens": 0,
-          "output_tokens": 1435,
-          "cost_usd": 0.153128,
+          "output_tokens": 1799,
+          "cost_usd": 0.173192,
           "modelUsage": {
             "deepseek-v4-pro[1m]": {
-              "inputTokens": 5441,
-              "outputTokens": 1435,
-              "cacheReadInputTokens": 180096,
+              "inputTokens": 5445,
+              "outputTokens": 1799,
+              "cacheReadInputTokens": 201984,
               "cacheCreationInputTokens": 0,
               "webSearchRequests": 0,
-              "costUSD": 0.153128,
+              "costUSD": 0.173192,
               "contextWindow": 1000000,
               "maxOutputTokens": 32000
             }
@@ -55,38 +56,34 @@
         }
       },
       "_worldLastOutput": {
-        "timestamp": "2026-06-06T15:15:31.630Z",
-        "innerScenelet": "手机屏幕在床头柜上暗下去。卧室里只有Leo偶尔翻身的轻微声响。千圣侧躺着，被子拉到肩膀，闭眼前看到屏幕上最后一条消息的预览浮在锁屏上——「不是真的不满哦」「快去睡吧」「おやすみ」。\n\n她看完了三行字，眼皮很沉。沃沃在最后关头收回了所有玩笑的刺，把今晚从「不够喜欢」到「不近人情」的每一句指控都轻轻卸下了。不是道歉，是告诉她：刚才那些都是闹着玩的。\n\n她知道。不需要看到这条消息才知道。沃沃的括号和多余的感叹号从始至终都在出卖自己。但沃沃还是在最后一刻说了——不是因为怕她当真，是因为沃沃想让她安心睡着。\n\n她把手机翻了个面，屏幕朝下。没有再打字。黑暗里Leo的尾巴扫过她的小腿。今晚不需要再回复了。",
-        "nextSceneState": "",
+        "timestamp": "2026-06-06T22:16:52.958Z",
+        "innerScenelet": "千圣靠在床头，Leo的尾巴扫过她的小腿。沃沃的消息让她轻轻摇了摇头——不是无奈，是那种「果然如此」的平静。\n\n「鼓课只有一小时」「比不上你的排练」「白天都补回来了」——三条防线同时架起来，每条都站不住。鼓课一小时但地铁往返近两小时，加上上课时的专注消耗，不是「只有一小时」；比较谁更累本身就没有意义，累不是比赛；白天那个沙发昏倒和床上意外睡着，恰恰说明她们俩昨天都透支了，不是「补回来」的证据。\n\n但她不打算逐一拆解。刚才已经拆穿过一次，沃沃缴械了三分钟又爬起来再战——这不是狡辩，是一个不想睡觉的人在下意识找理由。再说下去就变成她在论证沃沃有多累，而沃沃在论证自己不那么累——没完没了。\n\n她把Leo的耳朵轻轻揉了揉。关心到位了，判断也给过了。现在最有效的方式不是继续说服，是轻轻收住——用一句不重的实话，然后把选择权交回去。",
         "worldStatePatch": {
-          "location": "公寓卧室床上，已关灯",
-          "activity": "已入睡。睡前看到沃沃最后一条消息的锁屏预览，没有回复。醒来后会正式回复。",
-          "awake_state": "sleeping",
-          "current_plan": "完整夜间睡眠至周日自然醒（约7:00-8:00）。醒来后吃丰盛早餐，可能回复沃沃昨晚的最后消息。周日无安排。",
+          "location": "公寓卧室床上，准备起床",
+          "activity": "靠在床头，和沃沃进行晨间对话尾声——沃沃试图为通宵辩解，千圣轻轻收住不再追打。即将起床做早饭。",
+          "awake_state": "awake",
+          "current_plan": "起床做早饭（兑现昨晚对沃沃的承诺）。周日无安排。沃沃是否去睡由她自己决定。",
           "open_threads": [
             "沃沃面试已确认下周二上午11:00",
             "沃沃架子鼓课基本功阶段——持续练习中",
             "下月活动——等事务所公布后再告诉沃沃",
-            "沃沃最后一条消息（早安时回复）——澄清玩笑不是真的不满，说了おやすみ"
+            "沃沃昨晚通宵未睡——已指出，不再穷追",
+            "千圣今早需兑现丰盛早餐"
           ],
-          "last_world_event_at": "2026-06-06T15:14:56.370Z"
+          "last_world_event_at": "2026-06-06T22:16:18.428Z"
         },
-        "dailyShareCandidates": [],
-        "scheduleCandidates": [],
-        "timeReasoning": {
-          "current_role_time": "2026-06-07 00:14 JST（周日凌晨）",
-          "elapsed_since_last_visible_turn": "约2分钟（上次千圣回复约00:12，按下灯开关结束了对话；沃沃00:14发来真正的告别消息。千圣已入睡，此消息为沃沃的独角收束）",
-          "event_continuity": "千圣在00:12按下灯开关并走入黑暗——这是她主动做出的结束动作。沃沃在2分钟后发来这条消息，不是要延长对话，而是用坦诚为今晚收束：澄清玩笑、承认千圣确实累了、主动放手。从凌晨03:22的晚安辩论到此刻00:14的「おやすみ」，这场跨越21小时的对话终于真正闭合。",
-          "sleep_reasoning": "千圣已正式入睡（约00:12）。沃沃的消息在00:14到达，千圣在闭眼前看到了锁屏预览但已无精力回复。消息会在锁屏上等待到明天早上。这是自然、健康的睡眠状态——不是被叫醒，而是安然入睡。预计自然醒约7:00-8:00。"
-        },
-        "continuityWarnings": [
-          "这是整个周六对话的最终收束。沃沃主动做了三件事：1) 澄清玩笑不是真的不满 2) 承认千圣真的累了 3) 用日语说おやすみ。这些动作与凌晨03:22她发的日语语音「おやすみなさい千里ちゃん」形成了完美的首尾呼应——同一个人、同一种语言、同一个意思，但这一次是清醒的、主动的、带着温柔的理解。",
-          "千圣已入睡，不需要回复。系统在生成回复时应考虑：千圣在周日早上醒来后看到这条消息，可能会简单回一句早安作为承接。但此刻不需要让千圣从床上爬起来打字。",
-          "pending proactive intent `25a59e1c` 已在多轮中被确认关闭。请同步系统状态。",
-          "整个对话跨度：约21小时（周六03:22 JST → 周日00:14 JST）。涵盖主题：晚安有效期辩论、早安问候、granola吐槽、架子鼓课安排与慢练共鸣、排练中的贝斯低音线被纠、しゅわりんどりみん老歌触发彩的话题、下月活动保密、面试确认（下周二11:00）、泡澡与中日浴缸文化、傍晚同步意外睡着、深夜互相抓包、多次晚安推拉与「不够喜欢」玩笑、最终以沃沃的坦诚告白和おやすみ收束。"
-        ]
+        "dailyShareCandidates": [
+          {
+            "source_type": "pure_mood",
+            "message_intent": "做好早饭拍照发给沃沃——昨晚被提醒了两次要吃丰盛早餐，今天兑现。不管沃沃此刻是还在醒着还是已经去补觉了，发过去都是自然的延续。",
+            "basis": "昨晚沃沃反复提醒千圣吃好早餐，千圣也承认了晚饭太敷衍。今早做像样早饭是兑现承诺。",
+            "scheduled_at": "2026-06-06T22:30:00Z",
+            "expires_at": "2026-06-07T03:00:00Z",
+            "inner_scenelet": "起床后做了份像样的早饭——吐司、半熟蛋、红茶、酸奶配水果。坐在桌前看着盘子，觉得该给沃沃发过去。昨晚被说了两次凉奴不算正经晚饭，今天这份算有交代。"
+          }
+        ],
+        "scheduleCandidates": []
       },
-      "_sceneState": null,
       "_lifeArcs": [
         {
           "id": "2c1ca7b6-71fb-408a-952a-e9daa9eeaf04",
@@ -97,6 +94,7 @@
           "nextUsefulMoment": "排练结束后（约17:00）可搜索久兵衞，或问沃沃鼓课感受，或聊聊刚才被随到的老歌",
           "source": "排练即将收尾，约一小时后结束。届时与沃沃的架子鼓课时间交汇，对话可自然重启。",
           "kind": "work",
+          "subject": null,
           "timeStart": "2026-06-06T10:00:00+09:00",
           "timeEnd": "2026-06-06T17:00:00+09:00",
           "createdAt": "2026-06-05T10:58:24.151Z",
@@ -114,6 +112,7 @@
           "nextUsefulMoment": "周一晚上或周二早上可自然关心一句；面试后可能主动问结果",
           "source": "面试时间确认后的状态更新；沃沃捕捉到千圣话里隐含的担忧并直接问了回来，体现了两人之间的信任和直接沟通。",
           "kind": "personal",
+          "subject": null,
           "timeStart": "2026-06-09T11:00:00+08:00",
           "timeEnd": null,
           "createdAt": "2026-06-06T08:25:03.822Z",
@@ -131,6 +130,7 @@
           "nextUsefulMoment": "",
           "source": "今日聊天中沃沃明确提到鼓课内容（慢速哑鼓、被纠正动作发力），确认了周六下午三点的固定课程时间与五十分钟通勤距离。置信度 medium，信息来自直接对话，可作为未来周六时间锚点。",
           "kind": "personal",
+          "subject": null,
           "timeStart": "2026-06-06T07:00:00.000Z",
           "timeEnd": "2026-06-06T08:00:00.000Z",
           "createdAt": "2026-06-06T08:19:20.844Z",
@@ -148,6 +148,7 @@
           "nextUsefulMoment": "",
           "source": "千圣自己承认今晚吃得太敷衍，沃沃也两次提醒她吃好的。周日早上做一顿像样的早餐是自然的生活延续，且可作为daily_share素材。虽然不是强制性安排，但与当前对话高度衔接。",
           "kind": "personal",
+          "subject": null,
           "timeStart": "2026-06-07T08:00:00+09:00",
           "timeEnd": null,
           "createdAt": "2026-06-06T15:03:32.690Z",
@@ -159,7 +160,7 @@
       ],
       "_lastDailyShareSeedAt": "2026-06-05T03:05:30.466Z",
       "_lastScheduleCheckAt": "2026-06-06T15:03:19.577Z",
-      "updatedAt": "2026-06-06T15:15:45.639Z"
+      "updatedAt": "2026-06-06T22:16:52.958Z"
     },
     "默认": {
       "profile": "默认",
@@ -174,7 +175,6 @@
         "lastUsage": null
       },
       "_worldLastOutput": null,
-      "_sceneState": null,
       "_lifeArcs": [],
       "_lastDailyShareSeedAt": null,
       "_lastScheduleCheckAt": null,
@@ -193,7 +193,6 @@
         "lastUsage": null
       },
       "_worldLastOutput": null,
-      "_sceneState": null,
       "_lifeArcs": [],
       "_lastDailyShareSeedAt": null,
       "_lastScheduleCheckAt": null,
@@ -212,7 +211,6 @@
         "lastUsage": null
       },
       "_worldLastOutput": null,
-      "_sceneState": null,
       "_lifeArcs": [],
       "_lastDailyShareSeedAt": null,
       "_lastScheduleCheckAt": null,
@@ -231,7 +229,6 @@
         "lastUsage": null
       },
       "_worldLastOutput": null,
-      "_sceneState": null,
       "_lifeArcs": [],
       "_lastDailyShareSeedAt": null,
       "_lastScheduleCheckAt": null,

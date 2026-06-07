@@ -82,7 +82,7 @@ function runModelSample({ profiles, config, pinnedRules, item }) {
   const result = spawnSync(claude, [
     "-p",
     "--output-format", "json",
-    "--model", config.models?.scenelet || "deepseek-v4-pro[1m]",
+    "--model", config.models?.claudeMain || "deepseek-v4-pro[1m]",
   ], {
     cwd: ROOT,
     input: prompt,

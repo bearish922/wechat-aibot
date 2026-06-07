@@ -20,7 +20,7 @@ export function registerPromptsRoutes() {
     const current = loadPrompts();
     const updates = {};
     const textFields = ["chatStyle", "hiddenWorldChatStyle", "expressionCapability", "chatRealityInstructions", "sceneletInstructions", "memoryCandidateInstructions", "memoryWriterInstructions", "proactiveInstructions", "scheduleCreatorInstructions", "scheduleSpecialDates", "visionCaptionPrompt", "ragContextInstruction", "chatHistoryIntro", "innerSceneletIntro", "sceneletReplyBridgeInstruction", "memoryContextInstruction"];
-    const numFields = ["visibleContextTurns", "proactiveCheckIntervalMs", "proactiveCooldownMs", "proactiveDailyMax", "dailyShareSeedIntervalMs", "dailyShareMinIdleMs", "scheduleCheckIntervalMs", "scheduleMaxActive", "ragTopK", "ragMinScore", "ragResultMaxChars", "ragTimeoutMs"];
+    const numFields = ["visibleContextTurns", "proactiveCheckIntervalMs", "proactiveCooldownMs", "proactiveDailyMax", "dailyShareSeedIntervalMs", "dailyShareMinIdleMs", "scheduleCheckIntervalMs", "scheduleMaxActive", "ragTopK", "ragMinScore", "ragResultMaxChars", "ragTimeoutMs", "hiddenWorldMaxPendingIntents", "maxFollowUpCandidatesPerTurn", "dailyShareDefaultScheduleOffsetMs", "dailyShareDefaultExpiryOffsetMs", "proactiveDefaultExpiryOffsetMs", "scheduleFinalizationTimeoutMs", "scheduleRecentKindsLimit", "schedulePromptProfileMaxChars", "scheduleBasisMaxLength", "scheduleArcTitleMaxLength", "scheduleArcSummaryMaxLength", "scheduleExpiryAfterEndBufferMs", "scheduleDefaultExpiryFromNowMs", "memoryCandidateTimeoutMs", "memoryMergeTimeoutMs", "sceneContextMaxLifeArcs", "chunkSendDelayMs", "maxCancelReasonLength"];
     for (const key of textFields) {
       if (body[key] !== undefined) updates[key] = String(body[key]);
     }
@@ -36,6 +36,11 @@ export function registerPromptsRoutes() {
     }
     if (body.seasonalMonthlyNotes !== undefined) {
       try { updates.seasonalMonthlyNotes = typeof body.seasonalMonthlyNotes === "string" ? JSON.parse(body.seasonalMonthlyNotes) : body.seasonalMonthlyNotes; } catch { updates.seasonalMonthlyNotes = current.seasonalMonthlyNotes || null; }
+    }
+    if (body.dailyShareDefaultCancelIf !== undefined) {
+      updates.dailyShareDefaultCancelIf = Array.isArray(body.dailyShareDefaultCancelIf)
+        ? body.dailyShareDefaultCancelIf.map(x => String(x).trim()).filter(Boolean)
+        : String(body.dailyShareDefaultCancelIf).split("\n").map(x => x.trim()).filter(Boolean);
     }
     const merged = { ...current, ...updates };
     savePrompts(merged);

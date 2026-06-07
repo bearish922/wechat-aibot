@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { addMemoryItem, clearMemory, parseMemoryWriterOutput, shouldRunMemoryWriter, memoryListText, MEMORY_FILE } from "../lib/memory.mjs";
+import { applyMemoryOps, clearMemory, shouldRunMemoryWriter, memoryListText, MEMORY_FILE } from "../lib/memory.mjs";
 
 const TEST_USER = "test_memory_user";
 const TEST_ROLE = "__default__";
@@ -34,15 +34,6 @@ describe("shouldRunMemoryWriter", () => {
   });
 });
 
-describe("parseMemoryWriterOutput", () => {
-  it("parses the first JSON object when stream-json duplicates result text", () => {
-    const raw = "{\"ops\":[{\"op\":\"add\",\"category\":\"trait\",\"text\":\"用户自认情绪稳定\",\"sensitive\":false}]}{\"ops\":[{\"op\":\"add\"}]}";
-    const ops = parseMemoryWriterOutput(raw);
-    assert.equal(ops.length, 1);
-    assert.equal(ops[0].text, "用户自认情绪稳定");
-  });
-});
-
 describe("per-role memory isolation", () => {
   it("stores and retrieves memory per role, isolated from other roles", () => {
     clearMemory(TEST_USER, TEST_ROLE);
@@ -50,12 +41,16 @@ describe("per-role memory isolation", () => {
     clearMemory(TEST_USER, ROLE_B);
 
     // add to role A
-    addMemoryItem(TEST_USER, ROLE_A, "偏好", "用户喜欢黄瓜味薯片");
-    addMemoryItem(TEST_USER, ROLE_A, "偏好", "用户喜欢晚上学习");
+    applyMemoryOps(TEST_USER, ROLE_A, [
+      { op: "add", category: "偏好", text: "用户喜欢黄瓜味薯片" },
+      { op: "add", category: "偏好", text: "用户喜欢晚上学习" },
+    ]);
 
     // add to role B
-    addMemoryItem(TEST_USER, ROLE_B, "偏好", "用户偏好短回复");
-    addMemoryItem(TEST_USER, ROLE_B, "偏好", "用户喜欢练习架子鼓");
+    applyMemoryOps(TEST_USER, ROLE_B, [
+      { op: "add", category: "偏好", text: "用户偏好短回复" },
+      { op: "add", category: "偏好", text: "用户喜欢练习架子鼓" },
+    ]);
 
     // role A sees only its own items
     const summaryA = memoryListText(TEST_USER, { profile: ROLE_A });
@@ -80,10 +75,12 @@ describe("per-role memory isolation", () => {
 describe("memoryListText", () => {
   it("limits the default view and shows the full view on request", () => {
     clearMemory(TEST_USER, TEST_ROLE);
-    addMemoryItem(TEST_USER, TEST_ROLE, "偏好", "用户喜欢黄瓜味薯片");
-    addMemoryItem(TEST_USER, TEST_ROLE, "偏好", "用户喜欢晚上学习");
-    addMemoryItem(TEST_USER, TEST_ROLE, "偏好", "用户偏好短回复");
-    addMemoryItem(TEST_USER, TEST_ROLE, "偏好", "用户喜欢练习架子鼓");
+    applyMemoryOps(TEST_USER, TEST_ROLE, [
+      { op: "add", category: "偏好", text: "用户喜欢黄瓜味薯片" },
+      { op: "add", category: "偏好", text: "用户喜欢晚上学习" },
+      { op: "add", category: "偏好", text: "用户偏好短回复" },
+      { op: "add", category: "偏好", text: "用户喜欢练习架子鼓" },
+    ]);
 
     const summary = memoryListText(TEST_USER, { profile: TEST_ROLE });
     assert.match(summary, /偏好: 4 条/u);

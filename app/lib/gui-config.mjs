@@ -18,7 +18,6 @@ const CONFIG_FIELDS = {
   "proxy.ragHttps": "string",
   "models.claudeFast": "string",
   "models.claudeFallback": "string",
-  "models.scenelet": "string",
   "timeouts.aiMs": "number",
   "scene.sceneletBare": "boolean",
   "vision.mode": "string",

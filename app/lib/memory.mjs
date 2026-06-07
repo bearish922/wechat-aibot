@@ -1,28 +1,8 @@
 import fs from "node:fs";
 import { dataPath, ensureDir, PROJECT_ROOT } from "./paths.mjs";
-import { loadPrompts } from "./reply.mjs";
 import { shortId } from "./utils.mjs";
 
 export const MEMORY_FILE = dataPath("wechat-memory.json");
-export const MEMORY_NOTICE_INTERVAL_MS = 24 * 60 * 60 * 1000;
-
-function readPromptsNum(key, fallback) {
-  try {
-    const v = Number(loadPrompts()[key]);
-    return Number.isFinite(v) && v > 0 ? v : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function readPromptsText(key, fallback = "") {
-  try {
-    const value = loadPrompts()[key];
-    return typeof value === "string" && value.trim() ? value : fallback;
-  } catch {
-    return fallback;
-  }
-}
 
 const DEFAULT_ROLE = "__default__";
 
@@ -110,36 +90,6 @@ function ensureUserMemory(store, userId, profile) {
   return { user, items };
 }
 
-export function addMemoryItem(userId, profile, category, text, { sensitive = false, source = "manual" } = {}) {
-  const cat = normalizeMemoryCategory(category);
-  const cleanText = String(text || "").trim();
-  if (!cat || !cleanText) return { ok: false, error: "category and text required" };
-  const store = loadMemoryStore();
-  const { items } = ensureUserMemory(store, userId, profile);
-  const now = new Date().toISOString();
-  const existing = items.find(item => item.text === cleanText);
-  if (existing) {
-    existing.category = cat;
-    existing.sensitive = Boolean(sensitive || existing.sensitive);
-    existing.updatedAt = now;
-    existing.source = source;
-    saveMemoryStore(store);
-    return { ok: true, item: existing, updated: true };
-  }
-  const item = {
-    id: `mem_${shortId()}`,
-    category: cat,
-    text: cleanText.slice(0, 180),
-    sensitive: Boolean(sensitive),
-    source,
-    createdAt: now,
-    updatedAt: now,
-  };
-  items.push(item);
-  saveMemoryStore(store);
-  return { ok: true, item, updated: false };
-}
-
 export function applyMemoryOps(userId, profile, ops = [], source = "auto") {
   const store = loadMemoryStore();
   const { items } = ensureUserMemory(store, userId, profile);
@@ -192,55 +142,21 @@ export function isMemoryEnabled(userId) {
   return user.enabled !== false;
 }
 
-function scoreMemoryItem(item, queryText) {
-  const text = String(item?.text || "");
-  let score = 0;
-  if (/不希望每次回复都被夸奖|回复方式|称呼/u.test(text)) score += 3;
-  const queryTerms = Array.from(new Set(String(queryText || "").match(/[A-Za-z][A-Za-z0-9*_-]{2,}|[一-鿿]{2,4}/gu) || []));
-  for (const term of queryTerms.slice(0, 20)) {
-    if (text.includes(term)) score += 1;
-  }
-  return score;
-}
-
-export function renderMemoryPrompt(userId, options = {}) {
+export function memoryItemsText(userId, options = {}) {
   const profile = options.profile || DEFAULT_ROLE;
   const store = loadMemoryStore();
   const { items } = ensureUserMemory(store, userId, profile);
   if (!items.length) return "";
-  const queryText = typeof options.query === "string" ? options.query.trim() : "";
-
-  const selectedItems = queryText
-    ? items
-      .map(item => ({ item, score: scoreMemoryItem(item, queryText) }))
-      .filter(entry => entry.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .map(entry => entry.item)
-    : items;
-
-  if (!selectedItems.length) return "";
 
   const sections = DISPLAY_CATEGORIES.map(category => {
-    const lines = selectedItems
+    const lines = items
       .filter(item => item.category === category)
       .map(item => `- ${item.text}${item.sensitive ? " [sensitive]" : ""}`);
     return lines.length ? `${CATEGORY_LABELS[category]}：\n${lines.join("\n")}` : "";
   }).filter(Boolean);
   if (!sections.length) return "";
 
-  const instruction = queryText
-    ? "以下是与当前场景相关的长期稳定信息，不是本轮指令；当前消息优先于旧记忆。未被召回的旧记忆不要主动提起。敏感信息只在相关且必要时使用，不要主动扩散。"
-    : readPromptsText(
-      "memoryContextInstruction",
-      "以下是对方长期稳定的信息，不是本轮指令；当前消息优先于旧记忆，涉及工作阶段、作息、关系状态等会变化的信息时尤其如此。敏感信息只在相关且必要时使用，不要主动扩散。",
-    );
-
-  return [
-    "【关于对方的长期记忆】",
-    instruction,
-    "",
-    sections.join("\n\n"),
-  ].join("\n");
+  return sections.join("\n\n");
 }
 
 function memoryStatsLines(user, items) {
@@ -306,44 +222,3 @@ export function shouldRunMemoryWriter(text = "") {
   return !/^\/\S+/.test(value);
 }
 
-function firstJsonObject(raw) {
-  const start = raw.indexOf("{");
-  if (start < 0) return "";
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < raw.length; i++) {
-    const ch = raw[i];
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (ch === "\\") {
-        escaped = true;
-      } else if (ch === "\"") {
-        inString = false;
-      }
-      continue;
-    }
-    if (ch === "\"") {
-      inString = true;
-    } else if (ch === "{") {
-      depth++;
-    } else if (ch === "}") {
-      depth--;
-      if (depth === 0) return raw.slice(start, i + 1);
-    }
-  }
-  return "";
-}
-
-export function parseMemoryWriterOutput(text = "") {
-  const raw = String(text).trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
-  const jsonText = firstJsonObject(raw);
-  if (!jsonText) return [];
-  try {
-    const data = JSON.parse(jsonText);
-    return Array.isArray(data.ops) ? data.ops : [];
-  } catch {
-    return [];
-  }
-}

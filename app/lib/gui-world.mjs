@@ -56,7 +56,6 @@ function safeWorld(profile) {
     worldState: world._worldState || null,
     worldSession: world._worldSession || null,
     lastOutput: world._worldLastOutput || null,
-    continuityWarnings: world._continuityWarnings || [],
     lifeArcs: world._lifeArcs || [],
     lastDailyShareSeedAt: world._lastDailyShareSeedAt || null,
     lastScheduleCheckAt: world._lastScheduleCheckAt || null,
@@ -96,7 +95,6 @@ function syncSessions(profile, world) {
         s._worldSession = world._worldSession || null;
         s._worldLastOutput = world._worldLastOutput || null;
         s._lifeArcs = Array.isArray(world._lifeArcs) ? world._lifeArcs : [];
-        s._continuityWarnings = world._continuityWarnings || [];
         s._lastDailyShareSeedAt = world._lastDailyShareSeedAt || null;
         s._lastScheduleCheckAt = world._lastScheduleCheckAt || null;
       }
@@ -141,7 +139,6 @@ export function registerWorldRoutes() {
       profile,
       _worldState: parseObject(body?.worldState, current._worldState || null),
       _lifeArcs: parseObject(body?.lifeArcs, current._lifeArcs || []),
-      _continuityWarnings: parseObject(body?.continuityWarnings, current._continuityWarnings || []),
       _worldLastOutput: parseObject(body?.lastOutput, current._worldLastOutput || null),
       _lastDailyShareSeedAt: body?.lastDailyShareSeedAt ?? current._lastDailyShareSeedAt ?? null,
       _lastScheduleCheckAt: body?.lastScheduleCheckAt ?? current._lastScheduleCheckAt ?? null,

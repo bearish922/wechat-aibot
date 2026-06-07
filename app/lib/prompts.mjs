@@ -189,6 +189,30 @@ function buildProactivePrompt({ userId, sessionName, profile, intent, memoryProm
   ].filter(Boolean).join("\n");
 }
 
+function buildScheduleFinalizationPrompt({
+  profileSnippet,
+  candidates,
+  activeSchedules,
+  recentKindsHint,
+}) {
+  const cfg = loadPrompts();
+  const instr = cfg.scheduleCreatorInstructions || "";
+  return [
+    instr,
+    "",
+    "角色 prompt（截取关键身份信息）：",
+    profileSnippet || "",
+    "",
+    "Hidden-world 提出的 schedule candidates：",
+    JSON.stringify(candidates, null, 2),
+    "",
+    "当前活跃日程：",
+    activeSchedules || "(无)",
+    "",
+    recentKindsHint,
+  ].filter(Boolean).join("\n");
+}
+
 export {
   buildRagContextBlock,
   buildTurnBody,
@@ -200,4 +224,5 @@ export {
   buildMemoryCandidatePrompt,
   buildMemoryMergePrompt,
   buildProactivePrompt,
+  buildScheduleFinalizationPrompt,
 };

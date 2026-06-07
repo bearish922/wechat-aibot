@@ -9,7 +9,7 @@ import {
   getChatStyle,
   loadPrompts,
 } from "../app/lib/reply.mjs";
-import { renderMemoryPrompt } from "../app/lib/memory.mjs";
+import { memoryItemsText } from "../app/lib/memory.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = path.join(ROOT, "data", "runtime", "history-search-architecture-eval", new Date().toISOString().replace(/[:.]/g, "-"));
@@ -458,7 +458,7 @@ function runArchitecturesForItem({ item, config, prompts, profiles, memoryPrompt
     label: `${item.case.id}:flag-scenelet`,
     bare: true,
     tools: "WebSearch,WebFetch",
-    model: config.models?.scenelet || config.models?.claudeMain,
+    model: config.models?.claudeMain,
   });
   const mainSelf = runClaude(buildMainPrompt({
     prompts,
@@ -509,7 +509,7 @@ function runArchitecturesForItem({ item, config, prompts, profiles, memoryPrompt
     label: `${item.case.id}:searchable-scenelet`,
     bare: false,
     tools: "WebSearch,WebFetch",
-    model: config.models?.scenelet || config.models?.claudeMain,
+    model: config.models?.claudeMain,
     systemPrompt,
   });
   const searchableMain = runClaude(buildMainPrompt({
@@ -672,7 +672,12 @@ function main() {
   const profiles = readJson(PROFILE_PATH);
   const config = readJson(CONFIG_PATH);
   const prompts = loadPrompts();
-  const memoryPrompt = renderMemoryPrompt(USER_ID, { profile: PROFILE });
+  const memoryPrompt = (() => {
+    const items = memoryItemsText(USER_ID, { profile: PROFILE });
+    if (!items) return "";
+    const instruction = prompts.memoryContextInstruction || "";
+    return instruction ? `${instruction}\n\n${items}` : items;
+  })();
   const items = prepareItems(history.map((event, index) => ({ ...event, eventIndex: index })));
   fs.writeFileSync(path.join(OUT_DIR, "cases.json"), JSON.stringify(items.map(item => ({
     id: item.case.id,

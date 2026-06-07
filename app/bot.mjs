@@ -24,7 +24,6 @@ const LOG_RETENTION_DAYS = Number(process.env.WECHAT_LOG_RETENTION_DAYS ?? confi
 const LOG_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const INSTANCE_LOCK_FILE = dataPath("runtime", ".wechat-aibot.lock");
 import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, loadPrompts, expressionCapabilityPrompt } from "./lib/reply.mjs";
-import { shouldSkipRag } from "./lib/rag.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
 import { registerSessionRoutes } from "./lib/gui-sessions.mjs";
@@ -41,10 +40,10 @@ import { extractInboundPayload, isDuplicateInput, shouldUseExternalVision, hasEx
 import { getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
 import { uuid, sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost } from "./lib/wechat.mjs";
-import { renderMemoryPrompt, memoryListText, normalizeMemoryCategory } from "./lib/memory.mjs";
+import { memoryItemsText, memoryListText, normalizeMemoryCategory } from "./lib/memory.mjs";
 import { getSceneConfig, normalizeVisibleHistory, normalizeToolUsage, emptyToolUsage, normalizeWorldState, sanitizeVisibleReplyText } from "./lib/normalize.mjs";
 import { envWithProxy, commandExists, runClaudeStream, runCodexStream, toolUsageFromUsage, killProc, CLAUDE, CODEX, LOGS_DIR } from "./lib/claude-runner.mjs";
-import { sessionProfile, mergeToolUsage, markToolUsage, saveRoleWorlds, loadRoleWorlds } from "./lib/world-state.mjs";
+import { sessionProfile, markToolUsage, saveRoleWorlds, loadRoleWorlds } from "./lib/world-state.mjs";
 import { loadProfiles, makeSession, saveSessions, loadSessions } from "./lib/session-store.mjs";
 import { buildTurnBody, appendVisibleHistory } from "./lib/prompts.mjs";
 import { generateSceneletForTurn, buildSceneContextBlock, addFollowUpCandidates, recordChatHistory, sendFinalAssistantMessage, checkProactiveIntents, updateUserMemoryFromTurn, replyPrefix } from "./lib/turn.mjs";
@@ -141,7 +140,6 @@ function shouldUseRoleplayRag(userMessage) {
 
 function shouldUseRagForTurn(userMessage, profile) {
   if (!profile || profile === "默认") return false;
-  if (shouldSkipRag(userMessage)) return false;
   if (hasExplicitProfileName(userMessage, profile)) return true;
   return shouldUseRoleplayRag(userMessage);
 }
@@ -243,7 +241,12 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     }
   }
 
-  const memoryPrompt = isProfileChat ? renderMemoryPrompt(userId, { profile: turnProfile }) : "";
+  const memoryPrompt = isProfileChat ? (() => {
+    const items = memoryItemsText(userId, { profile: turnProfile });
+    if (!items) return "";
+    const instruction = loadPrompts().memoryContextInstruction || "";
+    return instruction ? `${instruction}\n\n${items}` : items;
+  })() : "";
 
   let sceneletResult = null;
   let sceneletError = null;
