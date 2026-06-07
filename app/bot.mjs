@@ -43,10 +43,10 @@ import { loadToken, saveToken, loginWithQr, sendMessage, apiPost } from "./lib/w
 import { memoryItemsText, memoryListText, normalizeMemoryCategory } from "./lib/memory.mjs";
 import { getSceneConfig, normalizeVisibleHistory, normalizeToolUsage, emptyToolUsage, normalizeWorldState, sanitizeVisibleReplyText } from "./lib/normalize.mjs";
 import { envWithProxy, commandExists, runClaudeStream, runCodexStream, toolUsageFromUsage, killProc, CLAUDE, CODEX, LOGS_DIR } from "./lib/claude-runner.mjs";
-import { sessionProfile, markToolUsage, saveRoleWorlds, loadRoleWorlds } from "./lib/world-state.mjs";
+import { sessionProfile, markToolUsage, saveRoleWorlds, loadRoleWorlds, getSceneMemory, setSceneMemory, getRoleWorld, ensureWorldSession, syncRoleWorldToSession } from "./lib/world-state.mjs";
 import { loadProfiles, makeSession, saveSessions, loadSessions } from "./lib/session-store.mjs";
-import { buildTurnBody, appendVisibleHistory } from "./lib/prompts.mjs";
-import { generateSceneletForTurn, buildSceneContextBlock, addFollowUpCandidates, recordChatHistory, sendFinalAssistantMessage, checkProactiveIntents, updateUserMemoryFromTurn, replyPrefix } from "./lib/turn.mjs";
+import { buildTurnBody, appendVisibleHistory, getSceneMemorySystemBlock } from "./lib/prompts.mjs";
+import { generateSceneletForTurn, buildSceneContextBlock, addFollowUpCandidates, recordChatHistory, sendFinalAssistantMessage, checkProactiveIntents, updateUserMemoryFromTurn, generateSceneMemory, batchUpdateMemory, runScheduleExtractor, replyPrefix } from "./lib/turn.mjs";
 const USER_HOME = process.env.USERPROFILE || process.env.HOME || process.cwd();
 const LONG_POLL_TIMEOUT_MS = 35_000;
 const roleWorlds = new Map();
@@ -248,6 +248,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     return instruction ? `${instruction}\n\n${items}` : items;
   })() : "";
 
+  const roleWorld = isProfileChat ? getRoleWorld(turnProfile) : null;
   let sceneletResult = null;
   let sceneletError = null;
   if (isProfileChat) {
@@ -278,6 +279,8 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   let turnSucceeded = false;
   let assistantFullText = "";
   let toolUsage = emptyToolUsage();
+  let lastUsage = null;
+  const streamStartedAt = new Date().toISOString();
 
   try {
     const ragContext = RAG_ENABLED && !hasInboundAttachment(body) && isProfileChat && shouldUseRagForTurn(body, turnProfile) ? queryRag(body, turnProfile) : "";
@@ -285,7 +288,8 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
     const ctxParts = [];
     if (sceneletResult) ctxParts.push(buildSceneContextBlock(styleState, sceneletResult));
     const sceneContext = ctxParts.join("\n\n---\n\n");
-    const turnBody = buildTurnBody(body, ragContext, sceneContext, memoryPrompt);
+    const sceneMemoryBlock = (isProfileChat && firstTurn) ? getSceneMemorySystemBlock(roleWorld) : "";
+    const turnBody = buildTurnBody(body, ragContext, sceneContext, "", sceneMemoryBlock);
 
     writeTxtLog("TURN BODY", turnBody);
     if (stableStyle) writeTxtLog("STABLE STYLE", stableStyle);
@@ -305,6 +309,20 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
               if (block.type === "tool_use") markToolUsage(toolUsage, block.name);
             }
           }
+          if (event.type === "assistant" && event.message?.usage) {
+            const u = event.message.usage;
+            lastUsage = {
+              type: "chat_usage",
+              model: event.message.model || "unknown",
+              session_id: sid,
+              started_at: streamStartedAt,
+              duration_ms: Date.now() - new Date(streamStartedAt).getTime(),
+              input_tokens: u.input_tokens || 0,
+              cache_read_input_tokens: u.cache_read_input_tokens || 0,
+              cache_creation_input_tokens: u.cache_creation_input_tokens || 0,
+              output_tokens: u.output_tokens || 0,
+            };
+          }
           if (event.type === "stream_event" && event.event?.type === "content_block_start" && event.event.content_block?.type === "tool_use") {
             markToolUsage(toolUsage, event.event.content_block.name);
           }
@@ -312,7 +330,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
             const flushText = textBuf.trim();
             if (flushText) { onProc({ type: "flush", text: flushText }); textBuf = ""; lastFlushAt = Date.now(); }
           }
-        }, stableStyle, memoryPrompt, turnProfile, { routingBody: body })
+        }, stableStyle, memoryPrompt, turnProfile, { routingBody: body, includeMemoryInSystem: true })
       : await runCodexStream(ai, sid, sessionName, turnBody, firstTurn, (event) => {
           if (event.type === "assistant" && event.message?.content) {
             for (const block of event.message.content) {
@@ -351,6 +369,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       styleState._lastContextToken = contextToken;
       styleState._lastFailedTurn = null;
       styleState._firstTurn = false;
+      if (lastUsage) styleState._lastUsage = lastUsage;
 
       if (sceneletResult?.followUpCandidates?.length && isProfileChat) {
         await addFollowUpCandidates(styleState, sceneletResult, body);
@@ -365,7 +384,46 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       recordChatHistory({ ai, userId, sess: styleState, role: "assistant", kind: "chat", text: assistantFullText, scenelet: sceneletResult?.innerScenelet || "", sceneletStatus: sceneletResult ? "ok" : (sceneletError ? "error" : "skipped"), sceneletError: sceneletError || "", toolUsage, timestamp: assistantAt });
 
       if (isProfileChat && assistantFullText) {
-        updateUserMemoryFromTurn(userId, body, turnProfile).catch(e => log("⚠️", `memory writer skipped: ${e.message}`));
+        try {
+          const newCandidates = await runScheduleExtractor({ userBody: body, scenelet: sceneletResult?.innerScenelet || "", profile: turnProfile });
+          if (newCandidates.length) {
+            const existing = roleWorld._pendingScheduleCandidates || [];
+            const existingTitles = new Set(existing.map(c => c.title));
+            for (const c of newCandidates) {
+              if (!existingTitles.has(c.title)) {
+                existing.push(c);
+                existingTitles.add(c.title);
+              }
+            }
+            roleWorld._pendingScheduleCandidates = existing;
+            syncRoleWorldToSession(styleState, turnProfile);
+            saveRoleWorlds();
+          }
+        } catch (e) { log("⚠️", `[${sessionName}] schedule extractor: ${e.message}`); }
+
+        styleState._turnCount = (styleState._turnCount || 0) + 1;
+        const threshold = getSceneConfig().turnResetThreshold || 8;
+        if (styleState._turnCount >= threshold) {
+          try {
+            await batchUpdateMemory({ userId, visibleHistory: styleState._visibleHistory, profile: turnProfile });
+            const summary = await generateSceneMemory({ userId, sess: styleState, profile: turnProfile, roleWorld });
+            if (summary) {
+              setSceneMemory(roleWorld, summary);
+              styleState.sid = uuid();
+              styleState._firstTurn = true;
+              styleState._turnCount = 0;
+              const hw = ensureWorldSession(roleWorld);
+              hw.sid = uuid();
+              hw.firstTurn = true;
+              hw.resetReason = `auto-reset after ${threshold} turns`;
+              styleState._visibleHistory = styleState._visibleHistory.slice(-4);
+              saveRoleWorlds();
+              log("\u{1F504}", `[${sessionName}] session auto-reset after ${threshold} turns`);
+            }
+          } catch (e) {
+            log("⚠️", `[${sessionName}] reset failed: ${e.message}`);
+          }
+        }
       }
 
     }
@@ -387,7 +445,7 @@ async function sessionLoop(ai, userId, sessionId) {
       if (!currentSid || currentSid !== sess.sid) { currentSid = sess.sid; firstTurn = sess._firstTurn; }
       try {
         await processTurn(ai, userId, currentSid, sess.name, body, contextToken, firstTurn, onProc, sess, sess._lastFailedTurn);
-        firstTurn = false;
+        if (!sess._lastFailedTurn) { firstTurn = false; } else { currentSid = null; }
       } catch (e) {
         log("\u{1F534}", `[${sess.name}] session loop error: ${e.message}`);
       } finally { sess.busy = false; sess._lastEnd = Date.now(); saveSessions(); }

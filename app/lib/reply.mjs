@@ -418,6 +418,11 @@ export function loadPrompts() {
       sceneletReplyBridgeInstruction: data.sceneletReplyBridgeInstruction || DEFAULT_SCENELET_REPLY_BRIDGE_INSTRUCTION,
       memoryContextInstruction: data.memoryContextInstruction || DEFAULT_MEMORY_CONTEXT_INSTRUCTION,
       ragKeywords: normalizeRagKeywords(data.ragKeywords),
+      turnResetThreshold: Number.isFinite(data.turnResetThreshold) ? data.turnResetThreshold : 16,
+      sceneMemorySystemBlockIntro: data.sceneMemorySystemBlockIntro || "",
+      sceneMemoryPromptInstructions: data.sceneMemoryPromptInstructions || "",
+      dailyShareSeedPrompt: data.dailyShareSeedPrompt || "",
+      scheduleExtractorPrompt: data.scheduleExtractorPrompt || "",
     };
   } catch {
     return {
@@ -469,6 +474,11 @@ export function loadPrompts() {
       sceneletReplyBridgeInstruction: DEFAULT_SCENELET_REPLY_BRIDGE_INSTRUCTION,
       memoryContextInstruction: DEFAULT_MEMORY_CONTEXT_INSTRUCTION,
       ragKeywords: normalizeRagKeywords(DEFAULT_RAG_KEYWORDS),
+      turnResetThreshold: 16,
+      sceneMemorySystemBlockIntro: "",
+      sceneMemoryPromptInstructions: "",
+      dailyShareSeedPrompt: "",
+      scheduleExtractorPrompt: "",
     };
   }
 }

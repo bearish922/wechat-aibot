@@ -13,9 +13,12 @@ function buildRagContextBlock(ragContext) {
   ].filter(Boolean).join("\n");
 }
 
-function buildTurnBody(userBody, ragContext = "", sceneContext = "", memoryPrompt = "") {
+function buildTurnBody(userBody, ragContext = "", sceneContext = "", memoryPrompt = "", sceneMemory = "") {
   const sections = [];
   const now = new Date();
+  if (sceneMemory) {
+    sections.push("【本轮之前的对话摘要】\n" + sceneMemory);
+  }
   if (memoryPrompt) {
     sections.push(memoryPrompt);
   }
@@ -75,11 +78,49 @@ function appendVisibleHistory(sess, role, text, kind = "chat", timestamp = new D
   ]);
 }
 
-function buildHiddenWorldSystemPrompt(profile) {
+function getSceneMemorySystemBlock(roleWorld) {
+  const text = roleWorld?._sceneMemory || roleWorld?.sceneMemory || "";
+  if (!text) return "";
   const cfg = loadPrompts();
+  const intro = cfg.sceneMemorySystemBlockIntro || "【情景记忆】";
+  return `${intro}\n\n${text}`;
+}
+
+function buildSceneMemorySummaryPrompt({ visibleHistory, recentScenelets, worldState, lifeArcs, memoryPrompt, profile }) {
+  const cfg = loadPrompts();
+  const instructions = cfg.sceneMemoryPromptInstructions || "";
+  const now = new Date();
+  const input = {
+    profile,
+    visible_history: visibleHistory,
+    world_state: worldState,
+    life_arcs: lifeArcs,
+    memory_snapshot: memoryPrompt || "",
+  };
+  if (recentScenelets && recentScenelets.length) {
+    input.recent_inner_scenelets = recentScenelets.map((s, i) => `[第${i + 1}条] ${s}`);
+  }
   return [
+    instructions,
+    "",
+    "当前时间：",
+    JSON.stringify(currentTimeContext(now), null, 2),
+    "",
+    "输入：",
+    JSON.stringify(input, null, 2),
+  ].join("\n");
+}
+
+function buildHiddenWorldSystemPrompt(profile, sceneMemory = "") {
+  const cfg = loadPrompts();
+  const parts = [
     "角色 prompt：",
     profile && profileTemplates[profile] ? profileTemplates[profile] : "",
+  ];
+  if (sceneMemory) {
+    parts.push("", sceneMemory);
+  }
+  parts.push(
     "",
     "【角色世界特殊日期】",
     cfg.scheduleSpecialDates || "",
@@ -90,7 +131,8 @@ function buildHiddenWorldSystemPrompt(profile) {
       : "",
     "",
     cfg.sceneletInstructions,
-  ].filter(Boolean).join("\n");
+  );
+  return parts.filter(Boolean).join("\n");
 }
 
 function buildHiddenWorldPrompt({ userId, sessionName, profile, userBody, lifeArcs = [], visibleContext, memoryPrompt, worldState = null, proactiveIntents = [], worldSession = null }) {
@@ -219,6 +261,8 @@ export {
   currentTimeContext,
   recentVisibleContext,
   appendVisibleHistory,
+  getSceneMemorySystemBlock,
+  buildSceneMemorySummaryPrompt,
   buildHiddenWorldSystemPrompt,
   buildHiddenWorldPrompt,
   buildMemoryCandidatePrompt,

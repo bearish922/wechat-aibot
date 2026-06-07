@@ -57,6 +57,8 @@ function normalizeRoleWorld(raw = {}, profile = "默认") {
     _lifeArcs: normalizeLifeArcs(raw._lifeArcs || raw.lifeArcs, { includeClosed: true }),
     _lastDailyShareSeedAt: raw._lastDailyShareSeedAt ? String(raw._lastDailyShareSeedAt) : null,
     _lastScheduleCheckAt: raw._lastScheduleCheckAt ? String(raw._lastScheduleCheckAt) : null,
+    _pendingScheduleCandidates: Array.isArray(raw._pendingScheduleCandidates) ? raw._pendingScheduleCandidates : [],
+    _sceneMemory: typeof raw._sceneMemory === "string" ? raw._sceneMemory.slice(0, 8000) : "",
     updatedAt: raw.updatedAt ? String(raw.updatedAt) : nowIso,
   };
 }
@@ -70,6 +72,8 @@ function roleWorldSnapshot(world) {
     _lifeArcs: normalizeLifeArcs(world?._lifeArcs, { includeClosed: true }),
     _lastDailyShareSeedAt: world?._lastDailyShareSeedAt || null,
     _lastScheduleCheckAt: world?._lastScheduleCheckAt || null,
+    _pendingScheduleCandidates: Array.isArray(world?._pendingScheduleCandidates) ? world._pendingScheduleCandidates : [],
+    _sceneMemory: world?._sceneMemory || "",
     updatedAt: world?.updatedAt || new Date().toISOString(),
   };
 }
@@ -111,6 +115,16 @@ export function getRoleWorld(profile) {
     worlds.set(key, normalizeRoleWorld({ profile: key }, key));
   }
   return worlds.get(key);
+}
+
+export function getSceneMemory(roleWorld) {
+  return roleWorld?._sceneMemory || "";
+}
+
+export function setSceneMemory(roleWorld, text) {
+  if (!roleWorld) return;
+  roleWorld._sceneMemory = typeof text === "string" ? text.slice(0, 8000) : "";
+  roleWorld.updatedAt = new Date().toISOString();
 }
 
 export function saveRoleWorlds() {
@@ -183,6 +197,7 @@ export function syncRoleWorldToSession(sess, profile) {
   sess._lifeArcs = normalizeLifeArcs(world._lifeArcs, { includeClosed: true });
   sess._lastDailyShareSeedAt = world._lastDailyShareSeedAt || sess._lastDailyShareSeedAt || null;
   sess._lastScheduleCheckAt = world._lastScheduleCheckAt || sess._lastScheduleCheckAt || null;
+  sess._pendingScheduleCandidates = Array.isArray(world._pendingScheduleCandidates) ? world._pendingScheduleCandidates : [];
 }
 
 export async function checkIntentDuplicateFlash(candidate, existingPending) {

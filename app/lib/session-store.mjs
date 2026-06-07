@@ -44,6 +44,8 @@ export function makeSession(name, profile = null) {
     _lastDailyShareSeedAt: null,
     _lastScheduleCheckAt: null,
     _lastContextToken: null,
+    _lastUsage: null,
+    _pendingScheduleCandidates: [],
   };
 }
 
@@ -71,6 +73,9 @@ export function hydrateSession(ai, raw = {}) {
     _lastDailyShareSeedAt: raw._lastDailyShareSeedAt ? String(raw._lastDailyShareSeedAt) : null,
     _lastScheduleCheckAt: raw._lastScheduleCheckAt ? String(raw._lastScheduleCheckAt) : null,
     _lastContextToken: raw._lastContextToken ? String(raw._lastContextToken) : null,
+    _turnCount: typeof raw._turnCount === "number" ? raw._turnCount : 0,
+    _lastUsage: raw._lastUsage && typeof raw._lastUsage === "object" ? { ...raw._lastUsage } : null,
+    _pendingScheduleCandidates: Array.isArray(raw._pendingScheduleCandidates) ? raw._pendingScheduleCandidates : [],
   };
 }
 
@@ -101,6 +106,9 @@ export function saveSessions() {
           _lastDailyShareSeedAt: s._lastDailyShareSeedAt || null,
           _lastScheduleCheckAt: s._lastScheduleCheckAt || null,
           _lastContextToken: s._lastContextToken || null,
+          _turnCount: typeof s._turnCount === "number" ? s._turnCount : 0,
+          _lastUsage: s._lastUsage && typeof s._lastUsage === "object" ? { ...s._lastUsage } : null,
+          _pendingScheduleCandidates: Array.isArray(s._pendingScheduleCandidates) ? s._pendingScheduleCandidates : [],
         })),
       };
     }

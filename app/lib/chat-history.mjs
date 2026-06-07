@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { dataPath, ensureDir, DATA_DIR } from "./paths.mjs";
 
 const CHAT_HISTORY_FILE = dataPath("chat-history.json");
-function loadAllEvents() {
+export function loadAllEvents() {
   try {
     if (!fs.existsSync(CHAT_HISTORY_FILE)) return [];
     const data = JSON.parse(fs.readFileSync(CHAT_HISTORY_FILE, "utf-8"));

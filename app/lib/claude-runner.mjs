@@ -267,7 +267,12 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
   try {
     const outer = parseHiddenJson(stdout);
     const content = outer.result || outer.message || outer.text || stdout;
-    const parsed = typeof content === "string" ? parseHiddenJson(content) : outer;
+    let parsed;
+    try {
+      parsed = typeof content === "string" ? parseHiddenJson(content) : outer;
+    } catch {
+      parsed = content;
+    }
     if (parsed && typeof parsed === "object") {
       parsed._toolUsage = toolUsageFromUsage(outer);
       parsed._hiddenUsage = usageSummary(outer, outer.modelUsage);
@@ -299,6 +304,7 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
   const profile = profileOverride;
   const systemPromptParts = [];
   if (profile && profileTemplates[profile]) systemPromptParts.push(profileTemplates[profile]);
+  if (options.sceneMemoryPrompt) systemPromptParts.push(options.sceneMemoryPrompt);
   if (memoryPrompt && options.includeMemoryInSystem === true) systemPromptParts.push(memoryPrompt);
   if (stylePrompt && options.includeStyleInSystem !== false) systemPromptParts.push(stylePrompt);
   const systemPromptFile = systemPromptParts.length

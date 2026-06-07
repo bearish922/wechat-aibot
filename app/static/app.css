@@ -1368,6 +1368,23 @@ pre {
 .proactive-group-dot.done    { background: #9aa4b2; }
 .proactive-group-dot.pending { background: var(--primary); }
 .proactive-group-dot.closed  { background: #64748b; }
+.proactive-group-dot.candidate { background: #f59e0b; }
+
+.schedule-candidates-list {
+  display: flex; flex-direction: column; gap: 10px; padding: 4px 0;
+}
+.schedule-candidate-item {
+  background: rgba(245,158,11,0.06); border: 1px solid rgba(245,158,11,0.15);
+  border-radius: 6px; padding: 10px 12px;
+}
+.schedule-candidate-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.schedule-candidate-summary { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.schedule-candidate-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--muted); }
+.schedule-candidate-meta .tag {
+  background: rgba(245,158,11,0.15); color: #f59e0b; padding: 1px 6px;
+  border-radius: 3px; font-size: 10px; text-transform: uppercase;
+}
+.schedule-candidate-basis { font-size: 11px; color: var(--muted); margin-top: 4px; font-style: italic; }
 
 .proactive-group-count {
   display: inline-flex;

@@ -404,21 +404,21 @@ function renderPromptsPipeline(p, profileRows) {
             ${renderTextPreview("expressionCapability", p.expressionCapability)}
           `,
         })}
+        ${renderPipelineStep({
+          n: 3,
+          title: "长期记忆 (System Prompt)",
+          desc: "通过 --append-system-prompt-file 注入 system prompt，Claude 自动缓存，不占 turn body。",
+          body: `
+            <label class="pipeline-sub-label">记忆上下文指令</label>
+            ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
+          `,
+        })}
       </div>
     </div>
 
     <div class="panel">
       <div class="pipeline-phase-box">
         <div class="pipeline-phase-label phase-body"><span>阶段 2 — 动态上下文</span></div>
-        ${renderPipelineStep({
-          n: 3,
-          title: "长期记忆",
-          desc: "",
-          body: `
-            <label class="pipeline-sub-label">记忆快照引导说明</label>
-            ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
-          `,
-        })}
         ${renderPipelineStep({
           n: 4,
           title: "Hidden-world 输出",
@@ -721,12 +721,11 @@ function renderWorldPipeline(role, p) {
         })}
         ${renderPipelineStep({
           n: 2,
-          title: "Inner Scenelet",
-          desc: "",
+          title: "Scenelet 指令",
+          desc: "驱动 inner_scenelet 叙事 + world_state 更新 + follow_up 候选。daily_share 已解耦给 Seed，schedule 已解耦给 Extractor。",
           body: `
             <label class="pipeline-sub-label">Scenelet 生成指令</label>
             ${renderTextPreview("sceneletInstructions", p.sceneletInstructions)}
-            <p style="color:var(--muted);font-size:13px;margin:8px 0 0">此指令同时驱动 inner_scenelet 场景叙事、world_state 状态更新，以及 follow_up / daily_share / schedule 三类候选的生成。</p>
           `,
         })}
         ${renderPipelineStep({
@@ -740,21 +739,21 @@ function renderWorldPipeline(role, p) {
             ${renderSeasonalEditor(p)}
           `,
         })}
+        ${renderPipelineStep({
+          n: 4,
+          title: "长期记忆 (System Prompt)",
+          desc: "通过 --append-system-prompt-file 注入 system prompt，自动缓存。",
+          body: `
+            <label class="pipeline-sub-label">记忆上下文指令</label>
+            ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
+          `,
+        })}
       </div>
     </div>
 
     <div class="panel">
       <div class="pipeline-phase-box">
         <div class="pipeline-phase-label phase-body"><span>阶段 2 — 动态上下文</span></div>
-        ${renderPipelineStep({
-          n: 4,
-          title: "长期记忆",
-          desc: "",
-          body: `
-            <label class="pipeline-sub-label">记忆上下文指令</label>
-            ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
-          `,
-        })}
         ${renderPipelineStep({
           n: 5,
           title: "最近可见聊天窗口",
@@ -796,10 +795,10 @@ function renderWorldPipeline(role, p) {
         })}
         ${renderPipelineStep({
           n: 9,
-          title: "Follow-up / Daily-share / Life-arc Candidates",
+          title: "Follow-up Candidates",
           desc: "",
           body: `
-            <p style="color:var(--muted);font-size:13px;margin:0 0 8px">每轮产出三类候选：一次性 follow_up（对话牵挂）、daily_share（沉默期主动分享）、schedule_candidates（由 schedule creator 审批为 life_arc）。</p>
+            <p style="color:var(--muted);font-size:13px;margin:0 0 8px">每轮从对话中生长出的主动意图候选（如面试前关心、未完成话题的自然延续等）。daily_share 已解耦给独立 Seed 模块，schedule 已解耦给 Extractor 模块。</p>
             ${renderControlGrid([
               renderNumberControl("hiddenWorldMaxPendingIntents", "最大待处理意图展示", p.hiddenWorldMaxPendingIntents || 8, 1, 20, "条"),
               renderNumberControl("maxFollowUpCandidatesPerTurn", "每轮最大候选数", p.maxFollowUpCandidatesPerTurn || 3, 0, 10, "条"),
@@ -817,45 +816,57 @@ function renderWorldPipeline(role, p) {
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-post"><span>阶段 4 — 其他独立模块</span></div>
+        <div class="pipeline-phase-label phase-post"><span>阶段 4 — 后台主动子系统</span></div>
         ${renderPipelineStep({
           n: 11,
-          title: "Life Arc 审批",
-          desc: "",
+          title: "Schedule Extractor",
+          desc: "每轮从本轮消息 + inner_scenelet 中提取新的周期性/持续性候选，去重后累积到待审批队列。",
           body: `
-            <label class="pipeline-sub-label">审批prompt</label>
-            ${renderTextPreview("scheduleCreatorInstructions", p.scheduleCreatorInstructions)}
-            <label class="pipeline-sub-label">Schedule 调度参数</label>
-            ${renderControlGrid([
-              renderNumberControl("scheduleCheckIntervalMs", "日程检查间隔", p.scheduleCheckIntervalMs, 600, 604800, "s", { ms: true }),
-              renderNumberControl("scheduleMaxActive", "最大活跃日程", p.scheduleMaxActive || 2, 1, 5, "条"),
-              renderNumberControl("scheduleFinalizationTimeoutMs", "审批超时", p.scheduleFinalizationTimeoutMs, 10, 300, "s", { ms: true }),
-              renderNumberControl("scheduleRecentKindsLimit", "最近类型回溯", p.scheduleRecentKindsLimit || 5, 1, 20, "条"),
-              renderNumberControl("schedulePromptProfileMaxChars", "Profile截取长度", p.schedulePromptProfileMaxChars || 800, 200, 3000, "字符"),
-              renderNumberControl("scheduleBasisMaxLength", "审批理由上限", p.scheduleBasisMaxLength || 300, 50, 1000, "字符"),
-              renderNumberControl("scheduleArcTitleMaxLength", "日程标题上限", p.scheduleArcTitleMaxLength || 80, 20, 200, "字符"),
-              renderNumberControl("scheduleArcSummaryMaxLength", "日程摘要上限", p.scheduleArcSummaryMaxLength || 500, 100, 2000, "字符"),
-              renderNumberControl("scheduleExpiryAfterEndBufferMs", "结束后缓冲", p.scheduleExpiryAfterEndBufferMs, 1, 24, "h", { ms: 'h' }),
-              renderNumberControl("scheduleDefaultExpiryFromNowMs", "默认到期天数", p.scheduleDefaultExpiryFromNowMs, 1, 7, "d", { ms: 'd' }),
-            ])}
+            <label class="pipeline-sub-label">Extractor Prompt</label>
+            ${renderTextPreview("scheduleExtractorPrompt", p.scheduleExtractorPrompt)}
           `,
         })}
         ${renderPipelineStep({
           n: 12,
-          title: "Daily Share Seed",
-          desc: "",
+          title: "Life Arc 审批 (Schedule Creator)",
+          desc: "定期审批 Extractor 积累的候选队列。审批标准：不从单次推断周期性、null time 不批。处理后清空队列。",
           body: `
+            <label class="pipeline-sub-label">审批 Prompt</label>
+            ${renderTextPreview("scheduleCreatorInstructions", p.scheduleCreatorInstructions)}
+            <label class="pipeline-sub-label">调度参数</label>
             ${renderControlGrid([
-              renderNumberControl("dailyShareSeedIntervalMs", "Seed 检查间隔", p.dailyShareSeedIntervalMs, 60, 86400, "s", { ms: true }),
-              renderNumberControl("dailyShareMinIdleMs", "沉默期阈值", p.dailyShareMinIdleMs, 60, 86400, "s", { ms: true }),
-              renderNumberControl("dailyShareDefaultScheduleOffsetMs", "默认排程偏移", p.dailyShareDefaultScheduleOffsetMs, 60, 1800, "s", { ms: true }),
-              renderNumberControl("dailyShareDefaultExpiryOffsetMs", "默认过期偏移", p.dailyShareDefaultExpiryOffsetMs, 300, 7200, "s", { ms: true }),
+              renderNumberControl("scheduleCheckIntervalMs", "审批间隔", p.scheduleCheckIntervalMs, 600, 604800, "s", { ms: true }),
+              renderNumberControl("scheduleMaxActive", "最大活跃 arc", p.scheduleMaxActive || 2, 1, 5, "条"),
+              renderNumberControl("scheduleFinalizationTimeoutMs", "审批超时", p.scheduleFinalizationTimeoutMs, 10, 300, "s", { ms: true }),
+              renderNumberControl("scheduleRecentKindsLimit", "最近类型回溯", p.scheduleRecentKindsLimit || 5, 1, 20, "条"),
+              renderNumberControl("schedulePromptProfileMaxChars", "Profile 截取", p.schedulePromptProfileMaxChars || 800, 200, 3000, "字符"),
+              renderNumberControl("scheduleBasisMaxLength", "理由上限", p.scheduleBasisMaxLength || 300, 50, 1000, "字符"),
+              renderNumberControl("scheduleArcTitleMaxLength", "标题上限", p.scheduleArcTitleMaxLength || 80, 20, 200, "字符"),
+              renderNumberControl("scheduleArcSummaryMaxLength", "摘要上限", p.scheduleArcSummaryMaxLength || 500, 100, 2000, "字符"),
+              renderNumberControl("scheduleExpiryAfterEndBufferMs", "结束后缓冲", p.scheduleExpiryAfterEndBufferMs, 1, 24, "h", { ms: 'h' }),
+              renderNumberControl("scheduleDefaultExpiryFromNowMs", "默认到期", p.scheduleDefaultExpiryFromNowMs, 1, 7, "d", { ms: 'd' }),
+            ])}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 13,
+          title: "Daily Share Seed",
+          desc: "沉默期独立创意种子。完全解耦对话上下文，只用时间/天气/位置/活动作为素材。Pro 模型运行。",
+          body: `
+            <label class="pipeline-sub-label">Seed Prompt</label>
+            ${renderTextPreview("dailyShareSeedPrompt", p.dailyShareSeedPrompt)}
+            <label class="pipeline-sub-label">调度参数</label>
+            ${renderControlGrid([
+              renderNumberControl("dailyShareSeedIntervalMs", "Seed 间隔", p.dailyShareSeedIntervalMs, 600, 86400, "s", { ms: true }),
+              renderNumberControl("dailyShareMinIdleMs", "最小沉默时间", p.dailyShareMinIdleMs, 300, 86400, "s", { ms: true }),
+              renderNumberControl("dailyShareDefaultScheduleOffsetMs", "默认延迟", p.dailyShareDefaultScheduleOffsetMs, 60, 1800, "s", { ms: true }),
+              renderNumberControl("dailyShareDefaultExpiryOffsetMs", "默认过期", p.dailyShareDefaultExpiryOffsetMs, 300, 7200, "s", { ms: true }),
             ])}
             ${renderArrayTextarea("dailyShareDefaultCancelIf", "默认取消条件（每行一条）", p.dailyShareDefaultCancelIf)}
           `,
         })}
         ${renderPipelineStep({
-          n: 13,
+          n: 14,
           title: "Proactive 二次判断",
           desc: "",
           body: `
@@ -1813,7 +1824,8 @@ function formatTime(iso) {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return iso;
     const pad = n => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    const bj = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Shanghai" }));
+    return `${bj.getFullYear()}-${pad(bj.getMonth()+1)}-${pad(bj.getDate())} ${pad(bj.getHours())}:${pad(bj.getMinutes())}`;
   } catch { return iso; }
 }
 
@@ -1930,6 +1942,19 @@ function renderProactiveSession(session, now) {
   const doneVisible = cancelled.length;
 
   const total = pending.length + sent.length + cancelled.length;
+  const candidates = session.scheduleCandidates || [];
+  const candidatesHtml = candidates.length ? `
+    <details class="proactive-group">
+      <summary class="proactive-group-summary">
+        <span class="proactive-group-dot candidate"></span>
+        <span class="proactive-group-label">Candidates</span>
+        <span class="proactive-group-count">${candidates.length}</span>
+      </summary>
+      <div class="proactive-group-body">
+        ${renderScheduleCandidatesList(candidates)}
+      </div>
+    </details>
+  ` : "";
   const closedHtml = closedArcs.length ? `
     <details class="proactive-group">
       <summary class="proactive-group-summary">
@@ -1954,6 +1979,7 @@ function renderProactiveSession(session, now) {
         <span style="font-size:12px;color:var(--muted)">${total} intent${total !== 1 ? 's' : ''} · ${lifeArcs.length} life line${lifeArcs.length !== 1 ? 's' : ''}</span>
       </div>
       ${activeArcs.length ? renderLifeArcList(activeArcs, now) : ""}
+      ${candidatesHtml}
       ${closedHtml}
       <div class="proactive-intent-list">
         ${pendingItems.length
@@ -1970,6 +1996,26 @@ function renderLifeArcList(lifeArcs, now) {
   return `
     <div class="life-arc-list">
       ${lifeArcs.map(a => renderLifeArc(a, now)).join("")}
+    </div>
+  `;
+}
+
+function renderScheduleCandidatesList(candidates) {
+  return `
+    <div class="schedule-candidates-list">
+      ${candidates.map(c => `
+        <div class="schedule-candidate-item">
+          <div class="schedule-candidate-title">${escHtml(c.title || "(untitled)")}</div>
+          <div class="schedule-candidate-summary">${escHtml(c.summary || "")}</div>
+          <div class="schedule-candidate-meta">
+            ${c.kind ? `<span class="tag">${escHtml(c.kind)}</span>` : ""}
+            ${c.subject ? `<span class="tag">${escHtml(c.subject)}</span>` : ""}
+            ${c.timeStart ? `<span>start: ${escHtml(c.timeStart)}</span>` : ""}
+            ${c.timeEnd ? `<span>end: ${escHtml(c.timeEnd)}</span>` : ""}
+          </div>
+          ${c.basis ? `<div class="schedule-candidate-basis">${escHtml(c.basis)}</div>` : ""}
+        </div>
+      `).join("")}
     </div>
   `;
 }

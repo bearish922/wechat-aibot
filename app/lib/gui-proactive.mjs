@@ -39,6 +39,15 @@ export function registerProactiveRoutes() {
           const intents = uniqueIntents(s._proactiveIntents || []);
           const lifeArcs = allLifeArcs(s._lifeArcs || []);
           if (!intents.length && !lifeArcs.length) continue;
+          const scheduleCandidates = (s._pendingScheduleCandidates || []).map(c => ({
+            title: c.title || "",
+            summary: c.summary || "",
+            kind: c.kind || null,
+            subject: c.subject || null,
+            timeStart: c.time_start || null,
+            timeEnd: c.time_end || null,
+            basis: c.basis || "",
+          }));
           result.push({
             sessionId: s.id,
             sessionName: s.name,
@@ -47,6 +56,7 @@ export function registerProactiveRoutes() {
             active: s.id === u.activeId,
             busy: s.busy || false,
             lifeArcs,
+            scheduleCandidates,
             intents: intents.map(i => ({
               id: i.id,
               status: i.status,

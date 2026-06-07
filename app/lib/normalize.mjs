@@ -16,10 +16,11 @@ function getSceneConfig() {
   const c = loadConfig();
   return {
     visibleContextTurns: p.visibleContextTurns || 8,
+    turnResetThreshold: p.turnResetThreshold || 8,
     proactiveCheckIntervalMs: p.proactiveCheckIntervalMs || 20000,
     proactiveCooldownMs: p.proactiveCooldownMs || 1800000,
     proactiveDailyMax: p.proactiveDailyMax || 8,
-    dailyShareSeedIntervalMs: p.dailyShareSeedIntervalMs || 2700000,
+    dailyShareSeedIntervalMs: p.dailyShareSeedIntervalMs || 3600000,
     dailyShareMinIdleMs: p.dailyShareMinIdleMs || 1800000,
     scheduleCheckIntervalMs: p.scheduleCheckIntervalMs || 86400000,
     scheduleMaxActive: p.scheduleMaxActive || 2,
@@ -162,6 +163,10 @@ function applyWorldStatePatch(sess, rawPatch = null) {
     })),
     updatedAt: new Date().toISOString(),
   });
+}
+
+function normalizeSceneMemory(raw) {
+  return typeof raw === "string" ? raw.slice(0, 8000) : "";
 }
 
 function normalizeWorldSession(raw = null) {
@@ -426,6 +431,7 @@ export {
   normalizeMemoryOps,
   sanitizeVisibleReplyText,
   normalizeProactiveDecision,
+  normalizeSceneMemory,
   proactiveSentToday,
   unansweredProactiveSummary,
   lastConversationActivityMs,
