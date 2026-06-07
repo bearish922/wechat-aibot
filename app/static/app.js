@@ -188,14 +188,33 @@ function fromH(h) { return (h || 0) * 3600000; }
 function toD(ms) { return +((ms || 0) / 86400000).toFixed(1); }
 function fromD(d) { return (d || 0) * 86400000; }
 
+function debounce(fn, ms) {
+  let timer;
+  return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
+}
+
+async function savePromptField(key, value, silent = false) {
+  try {
+    const body = { [key]: value };
+    const r = await api("PUT", "/api/prompts", body);
+    if (!r.ok) {
+      toast(r.error || `保存失败: ${key}`, false);
+    } else if (!silent) {
+      toast(`已保存: ${key}`);
+    }
+    return r.ok;
+  } catch (e) {
+    toast(`保存 ${key} 失败: ${e.message}`, false);
+    return false;
+  }
+}
+
 async function renderPrompts() {
   const [pd, pf] = await Promise.all([get("/api/prompts"), get("/api/profiles")]);
   const p = pd.prompts || {};
   const profiles = pf.profiles || [];
-  // Initialize RAG keyword edits from server data (if no pending local edits)
-  if (!window._ragKwEdits || Object.keys(window._ragKwEdits).length === 0) {
-    window._ragKwEdits = JSON.parse(JSON.stringify(p.ragKeywords || {}));
-  }
+  // Always initialize RAG keyword edits from fresh server data
+  window._ragKwEdits = JSON.parse(JSON.stringify(p.ragKeywords || {}));
 
   const profileRows = profiles.map(pr => `
     <tr>
@@ -218,19 +237,30 @@ async function renderPrompts() {
     btn.addEventListener("click", () => deleteProfile(btn.dataset.profile));
   });
 
+  // Number inputs: auto-save on change with debounce
+  const debouncedSaveNum = debounce(async (el) => {
+    const key = el.dataset.key;
+    if (!key) return;
+    let val = Number(el.value);
+    if (el.dataset.ms === 'h') val = fromH(val);
+    else if (el.dataset.ms === 'd') val = fromD(val);
+    else if (el.dataset.ms === '1') val = fromS(val);
+    await savePromptField(key, val, true);
+  }, 300);
+
   content.querySelectorAll('.prompts-editable').forEach(el => {
-    el.addEventListener('input', () => {
-      if (el.tagName === "TEXTAREA" && el.dataset.key) {
-        promptDrafts[el.dataset.key] = el.value;
-      }
-      showSaveBar();
-    });
-    el.addEventListener('change', () => {
-      if (el.tagName === "TEXTAREA" && el.dataset.key) {
-        promptDrafts[el.dataset.key] = el.value;
-      }
-      showSaveBar();
-    });
+    if (el.classList.contains('prompts-num')) {
+      el.addEventListener('change', () => debouncedSaveNum(el));
+    } else if (el.tagName === 'TEXTAREA' && !el.classList.contains('prompts-textarea')) {
+      // Array textarea (e.g. dailyShareDefaultCancelIf) — auto-save on change
+      const debouncedSaveArr = debounce(async (ta) => {
+        const key = ta.dataset.key;
+        if (!key) return;
+        const lines = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
+        await savePromptField(key, lines, true);
+      }, 300);
+      el.addEventListener('change', () => debouncedSaveArr(el));
+    }
   });
   content.querySelectorAll('[data-action="edit-text"]').forEach(btn => {
     btn.addEventListener("click", () => {
@@ -240,7 +270,6 @@ async function renderPrompts() {
   });
   content.querySelectorAll('[data-action="cancel-text"]').forEach(btn => {
     btn.addEventListener("click", () => {
-      delete promptDrafts[btn.dataset.key];
       promptsEditing[btn.dataset.key] = false;
       renderPrompts();
     });
@@ -249,17 +278,12 @@ async function renderPrompts() {
     btn.addEventListener("click", async () => {
       const key = btn.dataset.key;
       const el = content.querySelector(`#prompt_${key}`);
-      if (el) {
-        promptDrafts[key] = el.value;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        showSaveBar();
-      }
+      const val = el ? el.value : '';
       promptsEditing[key] = false;
-      await savePrompts();
+      await savePromptField(key, val);
       renderPrompts();
     });
   });
-  content.querySelector("#promptsSaveBtn")?.addEventListener("click", savePrompts);
 
   // RAG keyword tab switching
   content.querySelectorAll('[data-kwgroup]').forEach(btn => {
@@ -269,15 +293,15 @@ async function renderPrompts() {
       renderPrompts();
     });
   });
-  // RAG keyword chip: delete
+  // RAG keyword chip: delete — save immediately
   content.querySelectorAll('[data-action="kw-delete"]').forEach(btn => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", async () => {
       const idx = Number(btn.dataset.kwidx);
       const activeGroup = window._ragKwActiveGroup || "lore";
       const current = getRagKw(activeGroup);
       current.splice(idx, 1);
       setRagKw(activeGroup, current);
-      showSaveBar();
+      await savePromptField("ragKeywords", JSON.parse(JSON.stringify(window._ragKwEdits)));
       renderPrompts();
     });
   });
@@ -288,9 +312,9 @@ async function renderPrompts() {
       renderPrompts();
     });
   });
-  // RAG keyword: save inline edit (Enter key or OK button)
+  // RAG keyword: save inline edit (Enter key or OK button) — save immediately
   content.querySelectorAll('[data-action="kw-save-inline"]').forEach(el => {
-    const handler = () => {
+    const handler = async () => {
       const idx = Number(el.dataset.kwidx);
       const activeGroup = window._ragKwActiveGroup || "lore";
       const input = content.querySelector(`.rag-kw-chip-input[data-kwidx="${idx}"]`);
@@ -299,7 +323,7 @@ async function renderPrompts() {
         const current = getRagKw(activeGroup);
         current[idx] = newVal;
         setRagKw(activeGroup, current);
-        showSaveBar();
+        await savePromptField("ragKeywords", JSON.parse(JSON.stringify(window._ragKwEdits)));
       }
       window._ragKwEditingIdx = undefined;
       renderPrompts();
@@ -310,9 +334,9 @@ async function renderPrompts() {
       el.addEventListener("click", handler);
     }
   });
-  // RAG keyword: add new
+  // RAG keyword: add new — save immediately
   content.querySelectorAll('[data-action="kw-add"]').forEach(input => {
-    input.addEventListener("keydown", e => {
+    input.addEventListener("keydown", async (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
         const val = input.value.trim();
@@ -321,7 +345,7 @@ async function renderPrompts() {
         const current = getRagKw(activeGroup);
         current.push(val);
         setRagKw(activeGroup, current);
-        showSaveBar();
+        await savePromptField("ragKeywords", JSON.parse(JSON.stringify(window._ragKwEdits)));
         input.value = "";
         renderPrompts();
       }
@@ -329,10 +353,6 @@ async function renderPrompts() {
   });
 }
 
-function showSaveBar() {
-  const bar = content.querySelector("#promptsSaveBar");
-  if (bar) bar.style.display = "flex";
-}
 
 function switchTab(name) {
   tabs.forEach(b => b.classList.remove("active"));
@@ -343,7 +363,6 @@ function switchTab(name) {
 }
 
 let promptsEditing = {};
-let promptDrafts = {};
 
 function renderPromptsPipeline(p, profileRows) {
   const profileTable = `
@@ -364,61 +383,22 @@ function renderPromptsPipeline(p, profileRows) {
         <h2>运行时 Prompt Pipeline</h2>
         <span class="status-pill online">实时配置</span>
       </div>
-      <div class="pipeline-summary">
-        <span>按真实执行顺序展示：从微信入站消息，到模型回复后的本地状态写回。</span>
-        <span>可编辑控件会写入 <code>data/prompts.json</code>、profile 模板，或引导你到 Memory / History 等对应观察面。</span>
-      </div>
     </div>
-
-    <div class="panel">
-      <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-input"><span>阶段 0 — 入站消息、会话、附件</span></div>
-        ${renderPipelineStep({
-          n: 1,
-          title: "WeChat 入站轮询",
-          desc: "iLink 收到新消息后，消息进入当前会话队列，再由 sessionLoop() 调用 processTurn()。",
-          body: renderPipelineMeta(["本环节只读", "失败/测试轮次不会进入已完成的可见上下文", "新消息可以取消过期的 proactive intent"]),
-        })}
-        ${renderPipelineStep({
-          n: 2,
-          title: "会话 Profile 绑定",
-          desc: "当前会话绑定的 profile 会决定使用哪个角色模板，以及是否启用角色聊天专属上下文层。",
-          wide: true,
-          body: profileTable,
-        })}
-        ${renderPipelineStep({
-          n: 3,
-          title: "入站附件 / Vision Caption",
-          desc: "如果用户发送图片，Vision 会先生成图片描述；带附件的轮次不会触发 RAG 检索。",
-          body: `
-            <label class="pipeline-sub-label">Vision Caption Prompt</label>
-            ${renderTextPreview("visionCaptionPrompt", p.visionCaptionPrompt)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 4,
-          title: "失败轮次保护",
-          desc: "只有成功完成的轮次才会推进会话状态；失败轮次单独保留为重试上下文，不写入普通聊天历史。",
-          body: renderPipelineMeta(["本环节只读", "只有成功后才会更新 visible history、proactive candidates 和 memory writer"]),
-        })}
-      </div>
-    </div>
-
-    ${renderPipelineArrow("processTurn() 开始：读取 profile、style prompt、memory prompt，并创建本轮日志")}
 
     <div class="panel">
       <div class="pipeline-phase-box">
         <div class="pipeline-phase-label phase-sys"><span>阶段 1 — 稳定 System Context</span></div>
         ${renderPipelineStep({
-          n: 5,
-          title: "Profile Template",
-          desc: "当当前会话不是默认 profile 时，角色模板会作为稳定角色底座注入；角色基本事实和核心关系应集中维护在 profile 中。",
-          body: renderPipelineMeta(["Profile 模板在上方表格编辑", "固定规则文件已不再作为 GUI 流程层展示", "默认 profile 会跳过角色聊天专属上下文层"]),
+          n: 1,
+          title: "Profile",
+          desc: "",
+          wide: true,
+          body: profileTable,
         })}
         ${renderPipelineStep({
-          n: 6,
-          title: "稳定表达能力",
-          desc: "expressionCapabilityPrompt() 只把表情和表达能力规则加入稳定 system 层；聊天写法会在主模型轮次里靠近用户消息注入。",
+          n: 2,
+          title: "表达能力",
+          desc: "",
           body: `
             <label class="pipeline-sub-label">表达能力</label>
             ${renderTextPreview("expressionCapability", p.expressionCapability)}
@@ -427,45 +407,37 @@ function renderPromptsPipeline(p, profileRows) {
       </div>
     </div>
 
-    ${renderPipelineArrow("稳定 system context 到这里结束；接下来组装主回复动态 turn body")}
-
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-body"><span>阶段 2 — 主回复动态 Turn Body</span></div>
+        <div class="pipeline-phase-label phase-body"><span>阶段 2 — 动态上下文</span></div>
         ${renderPipelineStep({
-          n: 7,
-          title: "长期记忆注入",
-          desc: "主回复路径会把当前 userId + profile 下的完整 memory snapshot 放在 turn body 最前面；不再进入稳定 system prompt。",
+          n: 3,
+          title: "长期记忆",
+          desc: "",
           body: `
-            <label class="pipeline-sub-label">记忆上下文指令</label>
+            <label class="pipeline-sub-label">记忆快照引导说明</label>
             ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
-            ${renderPipelineMeta(["memoryDefaultLimit 默认值是 6；当前只作为带 query 相关召回的 fallback，主回复路径没有使用", "memory snapshot 变化只影响本轮动态 body，不再打断稳定 system prompt cache"])}
           `,
         })}
         ${renderPipelineStep({
-          n: 8,
-          title: "Hidden-world 输出注入",
-          desc: "主回复接收本轮 hidden-world 产出的结构化状态和 scenelet，辅助生成自然回复。",
+          n: 4,
+          title: "Hidden-world 输出",
+          desc: "",
           body: `
-            ${renderPipelineMeta([
-              "life_arc 简述：title / current_state / next_useful_moment / kind / time（最多 3 条）",
-              "worldState.currentPlan：角色当前计划（含用户侧时间锚点）",
-              "worldState.openThreads：用户相关轻量线程（过滤后）",
-              "inner_scenelet：本轮隐藏中间层叙事文本",
-              "innerSceneletIntro + sceneletReplyBridgeInstruction：引导如何阅读和使用以上内容",
-            ])}
+            <p style="color:var(--muted);font-size:13px;margin:0 0 8px">注入了 worldState（currentPlan、openThreads）、inner_scenelet 场景叙事、以及全部 life_arc 简述（title / kind / current_state / next_useful_moment）。</p>
             <label class="pipeline-sub-label">Inner Scenelet 引导说明</label>
             ${renderTextPreview("innerSceneletIntro", p.innerSceneletIntro)}
+            <label class="pipeline-sub-label">Inner Scenelet 正文</label>
+            <button class="btn" onclick="switchTab('world')" style="margin:8px 0">前往 Hidden World 页配置 →</button>
             <label class="pipeline-sub-label">Scenelet 到回复桥接指令</label>
             ${renderTextPreview("sceneletReplyBridgeInstruction", p.sceneletReplyBridgeInstruction)}
           `,
         })}
         ${renderPipelineStep({
-          n: 9,
-          title: "RAG Eligibility Gate",
-          desc: "只有在 RAG 已启用、消息无附件、profile 非默认，并且命中显式 profile / names / lore 条件时，才会检索。",
+          n: 5,
+          title: "RAG",
+          desc: "",
           body: `
-            ${renderPipelineMeta(["显式提到其他 profile 名称：自动触发", "无效 keyword regex 会记录日志并跳过"])}
             ${renderRagKeywordChips(p)}
             <label class="pipeline-sub-label">RAG 上下文说明</label>
             ${renderTextPreview("ragContextInstruction", p.ragContextInstruction)}
@@ -473,81 +445,59 @@ function renderPromptsPipeline(p, profileRows) {
               renderNumberControl("ragTopK", "Top-K", p.ragTopK || 6, 1, 20, "docs"),
               renderNumberControl("ragMinScore", "最低分数", p.ragMinScore || 0.48, 0, 1, "score", { step: "0.01" }),
               renderNumberControl("ragResultMaxChars", "最大字符数", p.ragResultMaxChars || 3600, 500, 10000, "chars"),
-              renderNumberControl("ragTimeoutMs", "超时", toS(p.ragTimeoutMs), 5, 120, "s", { ms: true }),
+              renderNumberControl("ragTimeoutMs", "超时", p.ragTimeoutMs, 5, 120, "s", { ms: true }),
             ])}
           `,
         })}
         ${renderPipelineStep({
-          n: 10,
-          title: "聊天写法 / 聊天现实 + 用户消息",
-          desc: "buildTurnBody() 在用户消息前加入聊天写法和当前聊天现实，明确用户侧北京时间与角色侧东京时间，再把带北京时间标记的用户原始消息放到最后。",
+          n: 6,
+          title: "聊天风格及现实",
+          desc: "",
           body: `
-            <label class="pipeline-sub-label">聊天写法</label>
+            <label class="pipeline-sub-label">聊天风格</label>
             ${renderTextPreview("chatStyle", p.chatStyle)}
-            <label class="pipeline-sub-label">聊天现实规则 / 时间戳描述</label>
+            <label class="pipeline-sub-label">聊天现实</label>
             ${renderTextPreview("chatRealityInstructions", p.chatRealityInstructions)}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 7,
+          title: "用户消息",
+          desc: "",
+          body: `
+            <label class="pipeline-sub-label">Vision Caption Prompt</label>
+            ${renderTextPreview("visionCaptionPrompt", p.visionCaptionPrompt)}
           `,
         })}
       </div>
     </div>
 
-    ${renderPipelineArrow("Turn Body 按真实顺序组装：memory snapshot → inner_scenelet → RAG context → 聊天写法/聊天现实规则 → 带时间戳的用户消息")}
-
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-model"><span>阶段 3 — 主模型轮次</span></div>
+        <div class="pipeline-phase-label phase-model"><span>阶段 3 — 输出及memory维护</span></div>
         ${renderPipelineStep({
-          n: 11,
-          title: "后端 Prompt 组装",
-          desc: "Claude 只把 profile 和稳定表达能力写入 --append-system-prompt-file；memory snapshot、inner_scenelet 和 RAG 从 stdin body 进入，不属于稳定 system prompt。",
-          body: renderPipelineMeta(["本环节只读", "由上游控件共同决定最终 prompt 组成", "主回复不直接读取完整 active life_arcs", "Claude 在 stdin body 中接收 memory、inner_scenelet 和 RAG", "Codex 在组合 prompt 前接收 RAG；memory 仍随 turn body 注入", "Claude profile 聊天默认走可 resume 的缓存路径；Codex profile 聊天仍使用 no-session-persistence"]),
+          n: 8,
+          title: "模型调用与输出",
+          desc: "",
+          body: `<p style="color:var(--muted);font-size:13px;margin:0">由上游控件组合最终 prompt，经模型生成回复后流式切分发送；成功轮次触发 memory 候选抽取与合并写入。</p>`,
         })}
         ${renderPipelineStep({
-          n: 12,
-          title: "流式输出、切分、发送",
-          desc: "assistant 文本先进入缓冲区；遇到工具调用或长输出会中途 flush，最终角色聊天会被切成更自然的微信消息。",
-          body: renderPipelineMeta(["本环节只读", "splitText() 强制执行 MAX_REPLY_LEN", "成功的角色聊天最终片段会附加 /"]),
-        })}
-      </div>
-    </div>
-
-    ${renderPipelineArrow("只有成功轮次会推进本地持久状态；失败轮次在这里停止")}
-
-    <div class="panel">
-      <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-post"><span>阶段 4 — 回复后持久化</span></div>
-        ${renderPipelineStep({
-          n: 13,
-          title: "成功后状态写回",
-          desc: "轮次成功后，系统会更新时间戳、可见历史、proactive candidates，以及追加式聊天历史。",
-          body: renderPipelineMeta(["本环节只读", "在 History 页检查和审计", "user 和 assistant 事件都会记录", "scenelet 和 schedule_candidates 会随成功轮次写入本地状态"]),
-        })}
-        ${renderPipelineStep({
-          n: 14,
+          n: 9,
           title: "Memory Writer",
-          desc: "成功轮次之后，updateUserMemoryFromTurn() 先抽取长期记忆候选，再用完整 memory items 做 add / update / noop 合并规划。",
+          desc: "",
           body: `
             <label class="pipeline-sub-label">候选抽取指令</label>
             ${renderTextPreview("memoryCandidateInstructions", p.memoryCandidateInstructions)}
             <label class="pipeline-sub-label" style="margin-top:12px">合并规划指令</label>
             ${renderTextPreview("memoryWriterInstructions", p.memoryWriterInstructions)}
-            ${renderPipelineMeta(["候选抽取使用 fast model", "合并规划读取带 id 的正式 memory items", "两个重要环节都会写入 hidden usage 日志"])}
+            <label class="pipeline-sub-label" style="margin-top:12px">记忆处理超时</label>
+            ${renderControlGrid([
+              renderNumberControl("memoryCandidateTimeoutMs", "候选抽取超时", p.memoryCandidateTimeoutMs, 10, 180, "s", { ms: true }),
+              renderNumberControl("memoryMergeTimeoutMs", "合并决策超时", p.memoryMergeTimeoutMs, 30, 300, "s", { ms: true }),
+            ])}
           `,
         })}
-        ${renderPipelineStep({
-          n: 15,
-          title: "Hidden-world 后续工序",
-          desc: "proactive candidate queue、daily share seed、schedule finalization 和 proactive evaluation 都在 Hidden World 页配置；主回复页只保留这一条总览。",
-          body: `<p>候选生成、proactive、daily share、schedule 等后续工序的配置和观测在 Hidden World 页进行。</p>
-        <button class="btn" onclick="switchTab('world')">前往 Hidden World 页配置 →</button>`,
-        })}
       </div>
-    </div>
-
-    ${renderPipelineArrow("Bot 回到轮询状态，等待下一条入站消息")}
-    <div id="promptsSaveBar" class="prompts-savebar" style="display:flex">
-      <span>有未保存的修改</span>
-      <button class="btn btn-primary" id="promptsSaveBtn">全部保存</button>
     </div>
   `;
 }
@@ -559,7 +509,6 @@ function renderPipelineStep({ n, title, desc, body = "", wide = false }) {
         <div class="pipeline-field">
           <div class="pipeline-field-head">
             <span class="pipeline-field-label">${String(n).padStart(2, "0")} ${escHtml(title)}</span>
-            <span class="pipeline-field-desc">${escHtml(desc)}</span>
           </div>
           ${body}
         </div>
@@ -569,7 +518,7 @@ function renderPipelineStep({ n, title, desc, body = "", wide = false }) {
 }
 
 function renderPipelineMeta(items = []) {
-  return `<div class="pipeline-meta-text">${items.map(item => escHtml(item)).join("；")}</div>`;
+  return "";
 }
 
 function renderControlGrid(items = []) {
@@ -616,16 +565,15 @@ function renderNumberControl(key, label, value, min, max, unit, options = {}) {
 
 function renderTextPreview(key, value) {
   const isOpen = promptsEditing[key];
-  const draft = Object.prototype.hasOwnProperty.call(promptDrafts, key) ? promptDrafts[key] : value;
   if (isOpen) {
     const h = key === 'sceneletInstructions' || key === 'proactiveInstructions' || key === 'memoryCandidateInstructions' || key === 'memoryWriterInstructions' || key === 'scheduleCreatorInstructions' ? '220px' : '110px';
-    return `<textarea id="prompt_${key}" class="prompts-editable prompts-textarea" data-key="${key}" style="min-height:${h}">${escHtml(draft || '')}</textarea>
+    return `<textarea id="prompt_${key}" class="prompts-editable prompts-textarea" data-key="${key}" style="min-height:${h}">${escHtml(value || '')}</textarea>
       <div class="editor-actions" style="margin-top:4px">
         <button class="btn btn-primary" data-action="save-text" data-key="${key}">保存</button>
         <button class="btn" data-action="cancel-text" data-key="${key}">取消</button>
       </div>`;
   }
-  const preview = draft || '(empty)';
+  const preview = value || '(empty)';
   return `<div class="pipeline-preview"><span class="pipeline-preview-text">${escHtml(preview)}</span><button class="btn" data-action="edit-text" data-key="${key}" style="min-height:26px;padding:2px 10px;font-size:11px;flex-shrink:0">编辑</button></div>`;
 }
 
@@ -669,48 +617,7 @@ function renderRagKeywordChips(p) {
 }
 
 function renderPipelineArrow(text) {
-  return `
-    <div class="pipeline-arrow-row">
-      <span class="pipeline-arrow-down">▼</span>
-      <span class="pipeline-arrow-text">${escHtml(text)}</span>
-      <span class="pipeline-arrow-down">▼</span>
-    </div>
-  `;
-}
-
-async function savePrompts() {
-  const updates = {};
-  content.querySelectorAll('.prompts-editable').forEach(el => {
-    const key = el.dataset.key;
-    if (!key) return;
-    let val;
-    if (el.type === 'number') {
-      val = Number(el.value);
-      if (el.dataset.ms === 'h') val = fromH(val);
-      else if (el.dataset.ms === 'd') val = fromD(val);
-      else if (el.dataset.ms === '1') val = fromS(val);
-    } else {
-      val = el.value;
-    }
-    updates[key] = val;
-  });
-  for (const [key, value] of Object.entries(promptDrafts)) {
-    updates[key] = value;
-  }
-  // RAG keyword edits — send the full ragKeywords object
-  if (window._ragKwEdits && Object.keys(window._ragKwEdits).length) {
-    updates.ragKeywords = JSON.parse(JSON.stringify(window._ragKwEdits));
-    window._ragKwEdits = {};
-  }
-  const r = await api("PUT", "/api/prompts", updates);
-  if (r.ok) {
-    promptDrafts = {};
-    toast("已保存：文本改动会在下一轮生效，数值参数实时生效。");
-    const bar = content.querySelector("#promptsSaveBar");
-    if (bar) bar.style.display = "none";
-  } else {
-    toast(r.error, false);
-  }
+  return "";
 }
 
 window.editProfile = async (name) => {
@@ -789,22 +696,10 @@ async function renderWorld() {
           <button class="btn" data-action="open-world-reset">Reset / Edit Snapshot</button>
         </div>
       </div>
-      <div class="pipeline-summary">
-        <span>Hidden world 以 profile 为单位持久化；多个微信线程共享同一个角色世界线和 hidden-world sid。</span>
-        <span>本页只调整 hidden-world 的提示词、判断器和状态参数；主回复写法留在 Prompts 页。</span>
-      </div>
-    </div>
+	    </div>
 
     ${renderWorldPipeline(role, p)}
 
-    <div style="margin: 16px 0; text-align: center;">
-      <button class="btn" onclick="switchTab('prompts')">前往 Prompts 页编辑 →</button>
-    </div>
-
-    <div id="promptsSaveBar" class="prompts-savebar" style="display:flex">
-      <span>有未保存的 hidden-world prompt 修改</span>
-      <button class="btn btn-primary" id="promptsSaveBtn">全部保存</button>
-    </div>
   `;
   bindWorldEvents();
   bindSeasonalEditorEvents();
@@ -817,30 +712,31 @@ function renderWorldPipeline(role, p) {
   return `
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-sys"><span>阶段 1 — Hidden World System Prompt</span></div>
+        <div class="pipeline-phase-label phase-sys"><span>阶段 1 — System Prompt</span></div>
         ${renderPipelineStep({
           n: 1,
-          title: "Role Profile",
-          desc: "hidden-world 读取 profile template 和固定角色信息，构建角色底座。",
-          body: renderPipelineMeta(["只读；profile template 在 Profiles 表维护", "hidden-world 的目标是世界连续性，不承担最终措辞"]),
+          title: "Profile",
+          desc: "",
+          body: `<p style="color:var(--muted);font-size:13px;margin:0">读取 profile template 构建角色底座，目标是世界连续性而非最终措辞。</p>`,
         })}
         ${renderPipelineStep({
           n: 2,
-          title: "Scenelet 生成指令",
-          desc: "定义 hidden-world 每轮的行为规则——inner_scenelet 写法、角色生活感、事实边界、候选生成标准、输出 JSON 格式。",
+          title: "Inner Scenelet",
+          desc: "",
           body: `
             <label class="pipeline-sub-label">Scenelet 生成指令</label>
             ${renderTextPreview("sceneletInstructions", p.sceneletInstructions)}
+            <p style="color:var(--muted);font-size:13px;margin:8px 0 0">此指令同时驱动 inner_scenelet 场景叙事、world_state 状态更新，以及 follow_up / daily_share / schedule 三类候选的生成。</p>
           `,
         })}
         ${renderPipelineStep({
           n: 3,
-          title: "世界背景（特殊日期 + 月度行事）",
-          desc: "scheduleSpecialDates 固定注入 system prompt；seasonalMonthlyNotes 按当前日期计算季节上下文，注入 turn prompt 和所有独立模块。",
+          title: "背景补充",
+          desc: "",
           body: `
-            <label class="pipeline-sub-label">特殊日期（固定背景，注入 system prompt + 所有独立模块）</label>
-            ${renderScheduleCalendar(Object.prototype.hasOwnProperty.call(promptDrafts, 'scheduleSpecialDates') ? promptDrafts['scheduleSpecialDates'] : (p.scheduleSpecialDates || ''))}
-            <label class="pipeline-sub-label">月度行事（季节/祭典/活动，按月编辑）</label>
+            <label class="pipeline-sub-label">特殊日期</label>
+            ${renderScheduleCalendar(p.scheduleSpecialDates || '')}
+            <label class="pipeline-sub-label">月度行事</label>
             ${renderSeasonalEditor(p)}
           `,
         })}
@@ -849,70 +745,61 @@ function renderWorldPipeline(role, p) {
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-body"><span>阶段 2 — Dynamic Context</span></div>
+        <div class="pipeline-phase-label phase-body"><span>阶段 2 — 动态上下文</span></div>
         ${renderPipelineStep({
           n: 4,
-          title: "长期记忆注入",
-          desc: "hidden-world 每轮读取当前 userId+profile 下的完整 memory snapshot，放在动态上下文最前面。",
+          title: "长期记忆",
+          desc: "",
           body: `
             <label class="pipeline-sub-label">记忆上下文指令</label>
             ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
-            ${renderPipelineMeta(["Memory 保留在 hidden-world 是因为 scenelet 需要知道用户长期偏好和关系事实", "memoryDefaultLimit 默认值 6，当前只作为带 query 相关召回的 fallback"])}
-            <label class="pipeline-sub-label" style="margin-top:8px">记忆处理超时</label>
-            ${renderControlGrid([
-              renderNumberControl("memoryCandidateTimeoutMs", "候选抽取超时", toS(p.memoryCandidateTimeoutMs), 10, 180, "s", { ms: true }),
-              renderNumberControl("memoryMergeTimeoutMs", "合并决策超时", toS(p.memoryMergeTimeoutMs), 30, 300, "s", { ms: true }),
-            ])}
           `,
         })}
         ${renderPipelineStep({
           n: 5,
           title: "最近可见聊天窗口",
-          desc: "hidden-world 读取最近可见聊天记录作为对话上下文；主回复不读取这个窗口，只依赖自身 session 历史。",
+          desc: "",
           body: `
             <label class="pipeline-sub-label">聊天历史引导说明</label>
             ${renderTextPreview("chatHistoryIntro", p.chatHistoryIntro)}
             ${renderControlGrid([
               renderNumberControl("visibleContextTurns", "可见轮次数", p.visibleContextTurns || 8, 1, 30, "turns"),
-              renderNumberControl("sceneContextMaxLifeArcs", "主回复life_arc条数", p.sceneContextMaxLifeArcs || 3, 0, 10, "条"),
             ])}
-            ${renderPipelineMeta(["RAG context 当前不进 hidden-world；只允许 WebSearch/WebFetch guard 控制需要时搜索"])}
           `,
         })}
         ${renderPipelineStep({
           n: 6,
-          title: "聊天写法注入",
-          desc: "每轮新鲜注入以降低 scenelet 的 AI 味。独立于主回复模型的聊天写法，可单独调校。",
+          title: "语言风格约束",
+          desc: "",
           body: `
-            <label class="pipeline-sub-label">聊天写法参考（Hidden World 专用）</label>
+            <label class="pipeline-sub-label">语言风格约束</label>
             ${renderTextPreview("hiddenWorldChatStyle", p.hiddenWorldChatStyle)}
           `,
         })}
         ${renderPipelineStep({
           n: 7,
-          title: "当前时间",
-          desc: "hidden-world 每轮拿到双时区当前时间，由 currentTimeContext() 生成；只读。",
-          body: renderPipelineMeta(["时间戳 JSON 只读，由 currentTimeContext() 生成", "用户侧北京时间 + 角色侧东京时间，含星期和时段"]),
-        })}
-        ${renderPipelineStep({
-          n: 8,
-          title: "Web/Search Guard",
-          desc: "控制 hidden-world 的 WebSearch/WebFetch 权限。RAG 检索上下文当前只传主回复，不传 hidden-world。",
-          body: renderPipelineMeta(["WebSearch/WebFetch 规则已在 sceneletInstructions 中定义", "RAG 检索上下文当前只传主回复，不传 hidden-world"]),
+          title: "时间戳 + Web/Search Guard",
+          desc: "",
+          body: `<p style="color:var(--muted);font-size:13px;margin:0">currentTimeContext() 提供双时区时间戳；WebSearch/WebFetch 权限规则在 sceneletInstructions 中定义。</p>`,
         })}
       </div>
     </div>
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-model"><span>阶段 3 — Generated Hidden Outputs</span></div>
+        <div class="pipeline-phase-label phase-model"><span>阶段 3 — 输出</span></div>
+        ${renderPipelineStep({
+          n: 8,
+          title: "Inner Scenelet",
+          desc: "",
+          body: `<p style="color:var(--muted);font-size:13px;margin:0">hidden-world 每轮输出的角色内在叙事文本，供主回复读取以保持角色一致性和生活连续性。</p>`,
+        })}
         ${renderPipelineStep({
           n: 9,
-          title: "Inner Scenelet / Proactive Candidates",
-          desc: "hidden-world 每轮输出 inner_scenelet 和 proactive_candidates（follow_up）；均由 sceneletInstructions 控制。life_arc 由 schedule creator 统一审批管理。",
+          title: "Follow-up / Daily-share / Life-arc Candidates",
+          desc: "",
           body: `
-            ${renderPipelineMeta(["本环节只读", "life_arc 由 schedule creator 审批，hidden-world 只提 schedule_candidates", "主回复只拿简版，避免自行扩写日程", "hidden-world 在每轮还可生成一次性 follow_up 候选，来自当前对话自然形成的牵挂、承诺或未完成话题。"])}
-            <label class="pipeline-sub-label" style="margin-top:8px">意图数量限制</label>
+            <p style="color:var(--muted);font-size:13px;margin:0 0 8px">每轮产出三类候选：一次性 follow_up（对话牵挂）、daily_share（沉默期主动分享）、schedule_candidates（由 schedule creator 审批为 life_arc）。</p>
             ${renderControlGrid([
               renderNumberControl("hiddenWorldMaxPendingIntents", "最大待处理意图展示", p.hiddenWorldMaxPendingIntents || 8, 1, 20, "条"),
               renderNumberControl("maxFollowUpCandidatesPerTurn", "每轮最大候选数", p.maxFollowUpCandidatesPerTurn || 3, 0, 10, "条"),
@@ -922,90 +809,63 @@ function renderWorldPipeline(role, p) {
         ${renderPipelineStep({
           n: 10,
           title: "World State Patch",
-          desc: "结构化记录当前地点、活动、清醒状态、近几小时计划和未闭合线索。",
-          body: renderPipelineMeta(["字段：location / activity / awake_state / current_plan / open_threads / last_world_event_at", "具体内容在 reset 快照页编辑，本环节只读"]),
-        })}
-        ${renderPipelineStep({
-          n: 11,
-          title: "Daily Share Seed（沉默期独立分享）",
-          desc: "HW 产出 daily_share_candidates，在用户沉默期由定时器转换为 proactive intent，到期由 evaluateProactiveIntent 二次判断。",
-          body: `
-            <label class="pipeline-sub-label" style="margin-top:8px">触发机制</label>
-            ${renderPipelineMeta([
-              "触发条件（两个条件同时满足）：",
-              "  1. 距上次用户消息 ≥ dailyShareMinIdleMs（沉默期阈值）",
-              "  2. 距上次 seed 检查 ≥ dailyShareSeedIntervalMs（检查间隔）",
-              "使用 HW 最近产出的 daily_share_candidates；无候选时跳过",
-              "生成后排队为 proactive intent，到期由 evaluateProactiveIntent 二次判断",
-            ])}
-            <label class="pipeline-sub-label" style="margin-top:8px">调度参数</label>
-            ${renderControlGrid([
-              renderNumberControl("dailyShareSeedIntervalMs", "Seed 检查间隔", toS(p.dailyShareSeedIntervalMs), 60, 86400, "s", { ms: true }),
-              renderNumberControl("dailyShareMinIdleMs", "沉默期阈值", toS(p.dailyShareMinIdleMs), 60, 86400, "s", { ms: true }),
-              renderNumberControl("dailyShareDefaultScheduleOffsetMs", "默认排程偏移", toS(p.dailyShareDefaultScheduleOffsetMs), 60, 1800, "s", { ms: true }),
-              renderNumberControl("dailyShareDefaultExpiryOffsetMs", "默认过期偏移", toS(p.dailyShareDefaultExpiryOffsetMs), 300, 7200, "s", { ms: true }),
-            ])}
-            ${renderArrayTextarea("dailyShareDefaultCancelIf", "默认取消条件（每行一条）", p.dailyShareDefaultCancelIf)}
-          `,
+          desc: "",
+          body: `<p style="color:var(--muted);font-size:13px;margin:0">结构化快照：location / activity / awake_state / current_plan / open_threads / last_world_event_at。具体内容在 Reset 快照页编辑。</p>`,
         })}
       </div>
     </div>
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-post"><span>阶段 4 — Independent Finalizers（独立二次确认）</span></div>
-
+        <div class="pipeline-phase-label phase-post"><span>阶段 4 — 其他独立模块</span></div>
         ${renderPipelineStep({
-          n: 12,
-          title: "Schedule 候选确认（Life Arc 审批）",
-          desc: "schedule creator 接收 Hidden World 的 schedule_candidates，按准入标准审批。与 proactive 同为到点独立二次确认。",
+          n: 11,
+          title: "Life Arc 审批",
+          desc: "",
           body: `
-            <label class="pipeline-sub-label">Schedule Creator 生成与确认指令</label>
+            <label class="pipeline-sub-label">审批prompt</label>
             ${renderTextPreview("scheduleCreatorInstructions", p.scheduleCreatorInstructions)}
-            ${renderPipelineMeta(["审批标准见指令中的准入标准（持续性/周期性）", "schedule_candidates 由 Hidden World 生成，schedule creator 负责审批"])}
             <label class="pipeline-sub-label">Schedule 调度参数</label>
             ${renderControlGrid([
-              renderNumberControl("scheduleCheckIntervalMs", "日程检查间隔", toS(p.scheduleCheckIntervalMs), 600, 604800, "s", { ms: true }),
+              renderNumberControl("scheduleCheckIntervalMs", "日程检查间隔", p.scheduleCheckIntervalMs, 600, 604800, "s", { ms: true }),
               renderNumberControl("scheduleMaxActive", "最大活跃日程", p.scheduleMaxActive || 2, 1, 5, "条"),
-              renderNumberControl("scheduleFinalizationTimeoutMs", "审批超时", toS(p.scheduleFinalizationTimeoutMs), 10, 300, "s", { ms: true }),
+              renderNumberControl("scheduleFinalizationTimeoutMs", "审批超时", p.scheduleFinalizationTimeoutMs, 10, 300, "s", { ms: true }),
               renderNumberControl("scheduleRecentKindsLimit", "最近类型回溯", p.scheduleRecentKindsLimit || 5, 1, 20, "条"),
               renderNumberControl("schedulePromptProfileMaxChars", "Profile截取长度", p.schedulePromptProfileMaxChars || 800, 200, 3000, "字符"),
               renderNumberControl("scheduleBasisMaxLength", "审批理由上限", p.scheduleBasisMaxLength || 300, 50, 1000, "字符"),
               renderNumberControl("scheduleArcTitleMaxLength", "日程标题上限", p.scheduleArcTitleMaxLength || 80, 20, 200, "字符"),
               renderNumberControl("scheduleArcSummaryMaxLength", "日程摘要上限", p.scheduleArcSummaryMaxLength || 500, 100, 2000, "字符"),
-              renderNumberControl("scheduleExpiryAfterEndBufferMs", "结束后缓冲", toH(p.scheduleExpiryAfterEndBufferMs), 1, 24, "h", { ms: 'h' }),
-              renderNumberControl("scheduleDefaultExpiryFromNowMs", "默认到期天数", toD(p.scheduleDefaultExpiryFromNowMs), 1, 7, "d", { ms: 'd' }),
+              renderNumberControl("scheduleExpiryAfterEndBufferMs", "结束后缓冲", p.scheduleExpiryAfterEndBufferMs, 1, 24, "h", { ms: 'h' }),
+              renderNumberControl("scheduleDefaultExpiryFromNowMs", "默认到期天数", p.scheduleDefaultExpiryFromNowMs, 1, 7, "d", { ms: 'd' }),
             ])}
           `,
         })}
-      </div>
-    </div>
-
+        ${renderPipelineStep({
+          n: 12,
+          title: "Daily Share Seed",
+          desc: "",
+          body: `
+            ${renderControlGrid([
+              renderNumberControl("dailyShareSeedIntervalMs", "Seed 检查间隔", p.dailyShareSeedIntervalMs, 60, 86400, "s", { ms: true }),
+              renderNumberControl("dailyShareMinIdleMs", "沉默期阈值", p.dailyShareMinIdleMs, 60, 86400, "s", { ms: true }),
+              renderNumberControl("dailyShareDefaultScheduleOffsetMs", "默认排程偏移", p.dailyShareDefaultScheduleOffsetMs, 60, 1800, "s", { ms: true }),
+              renderNumberControl("dailyShareDefaultExpiryOffsetMs", "默认过期偏移", p.dailyShareDefaultExpiryOffsetMs, 300, 7200, "s", { ms: true }),
+            ])}
+            ${renderArrayTextarea("dailyShareDefaultCancelIf", "默认取消条件（每行一条）", p.dailyShareDefaultCancelIf)}
+          `,
+        })}
         ${renderPipelineStep({
           n: 13,
           title: "Proactive 二次判断",
-          desc: "evaluateProactiveIntent 对到点的 follow_up 和 daily_share 候选进行二次判断（共用 proactiveInstructions）。判断是否发送、生成 visible_reply。",
+          desc: "",
           body: `
             <label class="pipeline-sub-label">Proactive 二次判断指令</label>
             ${renderTextPreview("proactiveInstructions", p.proactiveInstructions)}
-            ${renderPipelineMeta(["该指令同时用于 follow_up 和 daily_share 的二次判断"])}
             ${renderControlGrid([
-              renderNumberControl("proactiveCheckIntervalMs", "检查间隔", toS(p.proactiveCheckIntervalMs), 5, 300, "s", { ms: true }),
-              renderNumberControl("proactiveCooldownMs", "冷却时间", toS(p.proactiveCooldownMs), 60, 86400, "s", { ms: true }),
+              renderNumberControl("proactiveCheckIntervalMs", "检查间隔", p.proactiveCheckIntervalMs, 5, 300, "s", { ms: true }),
+              renderNumberControl("proactiveCooldownMs", "冷却时间", p.proactiveCooldownMs, 60, 86400, "s", { ms: true }),
               renderNumberControl("proactiveDailyMax", "每日上限", p.proactiveDailyMax || 8, 1, 24, "条"),
-              renderNumberControl("proactiveDefaultExpiryOffsetMs", "默认过期偏移", toS(p.proactiveDefaultExpiryOffsetMs), 300, 7200, "s", { ms: true }),
-            ])}
-          `,
-        })}
-
-        ${renderPipelineStep({
-          n: 14,
-          title: "发送与截断限制",
-          desc: "消息发送速率和文本截断长度控制。",
-          body: `
-            ${renderControlGrid([
-              renderNumberControl("chunkSendDelayMs", "分片发送间隔", p.chunkSendDelayMs || 450, 100, 3000, "ms"),
-              renderNumberControl("maxCancelReasonLength", "取消原因上限", p.maxCancelReasonLength || 500, 100, 1000, "字符"),
+              renderNumberControl("proactiveDefaultExpiryOffsetMs", "默认过期偏移", p.proactiveDefaultExpiryOffsetMs, 300, 7200, "s", { ms: true }),
             ])}
           `,
         })}
@@ -1138,23 +998,20 @@ function bindSeasonalEditorEvents() {
   openBtn.addEventListener('click', () => { overlay.style.display = 'flex'; });
   closeBtn.addEventListener('click', () => { overlay.style.display = 'none'; });
   cancelBtn.addEventListener('click', () => { overlay.style.display = 'none'; });
-  saveBtn.addEventListener('click', () => {
+  saveBtn.addEventListener('click', async () => {
     const data = {};
     for (let i = 1; i <= 12; i++) {
       const ta = overlay.querySelector('.seasonal-month-ta[data-month=\"' + i + '\"]');
       const lines = (ta?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
       if (lines.length) data[String(i)] = lines;
     }
-    hiddenTa.value = JSON.stringify(data, null, 2);
-    promptDrafts['seasonalMonthlyNotes'] = hiddenTa.value;
     overlay.style.display = 'none';
-    showSaveBar();
+    await savePromptField('seasonalMonthlyNotes', data);
   });
 }
 
 function renderScheduleCalendar(currentValue) {
   const val = currentValue || '';
-  delete promptDrafts['scheduleSpecialDates'];
   const parsed = parseSpecialDates(val);
   const n = parsed.fixed.length + parsed.floating.length;
 
@@ -1463,9 +1320,8 @@ async function scSaveCalendar() {
   scSyncToTextarea();
   const ta = document.getElementById('snap_scheduleSpecialDates');
   if (ta) {
-    promptDrafts['scheduleSpecialDates'] = ta.value;
+    await savePromptField('scheduleSpecialDates', ta.value);
   }
-  await savePrompts();
   scUpdateButtonCount();
   const overlay = document.getElementById('scheduleCalendarOverlay');
   if (overlay) overlay.style.display = 'none';
@@ -1591,9 +1447,6 @@ function renderWorldReset(role) {
         <h2>Reset Hidden World — ${escHtml(role.profile || worldState.resetProfile)}</h2>
         <button class="btn" data-action="cancel-world-reset">Back</button>
       </div>
-      <div class="pipeline-summary">
-        <span>这里编辑的是权威快照。保存后会重置 hidden-world sid，下一轮用这些静态状态冷启动。</span>
-      </div>
       <div class="form-grid one">
         <fieldset class="snap-fieldset">
           <legend>world_state</legend>
@@ -1631,7 +1484,7 @@ function renderWorldReset(role) {
 }
 
 function renderLifeArcsEditor(arcs) {
-  const list = Array.isArray(arcs) ? arcs : [];
+  const list = (Array.isArray(arcs) ? arcs : []).filter(a => a.status !== "closed");
   if (!list.length) return `<div class="snap-fieldset"><legend>active life_arcs</legend><p class="muted">暂无活跃 life_arc</p></div>`;
   const kinds = ["travel","work","school","personal","special_date"];
   const cards = list.map((a, i) => `
@@ -1712,22 +1565,35 @@ async function saveWorldReset() {
 }
 
 function bindPromptEditorEvents(afterSave = render) {
+  // Number inputs: auto-save on change with debounce
+  const debouncedSaveNum = debounce(async (el) => {
+    const key = el.dataset.key;
+    if (!key) return;
+    let val = Number(el.value);
+    if (el.dataset.ms === 'h') val = fromH(val);
+    else if (el.dataset.ms === 'd') val = fromD(val);
+    else if (el.dataset.ms === '1') val = fromS(val);
+    await savePromptField(key, val, true);
+  }, 300);
+
   content.querySelectorAll('.prompts-editable').forEach(el => {
-    el.addEventListener('input', () => {
-      if (el.tagName === "TEXTAREA" && el.dataset.key) promptDrafts[el.dataset.key] = el.value;
-      showSaveBar();
-    });
-    el.addEventListener('change', () => {
-      if (el.tagName === "TEXTAREA" && el.dataset.key) promptDrafts[el.dataset.key] = el.value;
-      showSaveBar();
-    });
+    if (el.classList.contains('prompts-num')) {
+      el.addEventListener('change', () => debouncedSaveNum(el));
+    } else if (el.tagName === 'TEXTAREA' && !el.classList.contains('prompts-textarea')) {
+      const debouncedSaveArr = debounce(async (ta) => {
+        const key = ta.dataset.key;
+        if (!key) return;
+        const lines = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
+        await savePromptField(key, lines, true);
+      }, 300);
+      el.addEventListener('change', () => debouncedSaveArr(el));
+    }
   });
   content.querySelectorAll('[data-action="edit-text"]').forEach(btn => {
     btn.addEventListener("click", () => { promptsEditing[btn.dataset.key] = true; afterSave(); });
   });
   content.querySelectorAll('[data-action="cancel-text"]').forEach(btn => {
     btn.addEventListener("click", () => {
-      delete promptDrafts[btn.dataset.key];
       promptsEditing[btn.dataset.key] = false;
       afterSave();
     });
@@ -1736,15 +1602,11 @@ function bindPromptEditorEvents(afterSave = render) {
     btn.addEventListener("click", async () => {
       const key = btn.dataset.key;
       const el = content.querySelector(`#prompt_${key}`);
-      if (el) promptDrafts[key] = el.value;
+      const val = el ? el.value : '';
       promptsEditing[key] = false;
-      await savePrompts();
+      await savePromptField(key, val);
       afterSave();
     });
-  });
-  content.querySelector("#promptsSaveBtn")?.addEventListener("click", async () => {
-    await savePrompts();
-    afterSave();
   });
 }
 
@@ -1856,7 +1718,7 @@ function bindHistoryEvents() {
   });
 }
 
-function renderPagination(total, page, totalPages) {
+function renderPagination(total, page, totalPages, prefix = "history", label = "messages") {
   if (totalPages <= 1) return "";
   const pages = [];
   const maxButtons = 7;
@@ -1864,22 +1726,23 @@ function renderPagination(total, page, totalPages) {
   let end = Math.min(totalPages, start + maxButtons - 1);
   if (end - start < maxButtons - 1) start = Math.max(1, end - maxButtons + 1);
 
-  if (page > 1) pages.push(`<button class="page-btn" data-history-page="${page - 1}" title="Previous">Prev</button>`);
+  const attr = `data-${prefix}-page`;
+  if (page > 1) pages.push(`<button class="page-btn" ${attr}="${page - 1}" title="Previous">Prev</button>`);
   if (start > 1) {
-    pages.push(`<button class="page-btn" data-history-page="1">1</button>`);
+    pages.push(`<button class="page-btn" ${attr}="1">1</button>`);
     if (start > 2) pages.push(`<span class="page-ellipsis">...</span>`);
   }
   for (let i = start; i <= end; i++) {
-    pages.push(`<button class="page-btn${i === page ? " active" : ""}" data-history-page="${i}">${i}</button>`);
+    pages.push(`<button class="page-btn${i === page ? " active" : ""}" ${attr}="${i}">${i}</button>`);
   }
   if (end < totalPages) {
     if (end < totalPages - 1) pages.push(`<span class="page-ellipsis">...</span>`);
-    pages.push(`<button class="page-btn" data-history-page="${totalPages}">${totalPages}</button>`);
+    pages.push(`<button class="page-btn" ${attr}="${totalPages}">${totalPages}</button>`);
   }
-  if (page < totalPages) pages.push(`<button class="page-btn" data-history-page="${page + 1}" title="Next">Next</button>`);
-  pages.push(`<span class="page-jump"><input id="historyPageJumpInput" type="number" min="1" max="${totalPages}" value="${page}" data-total-pages="${totalPages}" title="Jump to page"><button id="historyPageJumpBtn" class="page-btn" title="Go">Go</button></span>`);
+  if (page < totalPages) pages.push(`<button class="page-btn" ${attr}="${page + 1}" title="Next">Next</button>`);
+  pages.push(`<span class="page-jump"><input id="${prefix}PageJumpInput" type="number" min="1" max="${totalPages}" value="${page}" data-total-pages="${totalPages}" title="Jump to page"><button id="${prefix}PageJumpBtn" class="page-btn" title="Go">Go</button></span>`);
 
-  return `<div class="pagination"><span class="page-info">${total} messages</span><div class="page-btns">${pages.join("")}</div></div>`;
+  return `<div class="pagination"><span class="page-info">${total} ${label}</span><div class="page-btns">${pages.join("")}</div></div>`;
 }
 
 function renderHistoryConversations(conversations) {
@@ -2024,6 +1887,8 @@ async function renderProactive() {
 function renderProactiveSession(session, now) {
   const intents = session.intents || [];
   const lifeArcs = session.lifeArcs || [];
+  const activeArcs = lifeArcs.filter(a => a.status !== "closed");
+  const closedArcs = lifeArcs.filter(a => a.status === "closed");
   const pending = intents.filter(i => i.status === "pending").reverse();
   const sent = intents.filter(i => i.status === "sent").reverse();
   const cancelled = intents.filter(i => i.status === "cancelled").reverse();
@@ -2065,6 +1930,18 @@ function renderProactiveSession(session, now) {
   const doneVisible = cancelled.length;
 
   const total = pending.length + sent.length + cancelled.length;
+  const closedHtml = closedArcs.length ? `
+    <details class="proactive-group">
+      <summary class="proactive-group-summary">
+        <span class="proactive-group-dot closed"></span>
+        <span class="proactive-group-label">Closed</span>
+        <span class="proactive-group-count">${closedArcs.length}</span>
+      </summary>
+      <div class="proactive-group-body">
+        ${renderLifeArcList(closedArcs, now)}
+      </div>
+    </details>
+  ` : "";
   return `
     <div class="proactive-session-card">
       <div class="proactive-session-head">
@@ -2076,7 +1953,8 @@ function renderProactiveSession(session, now) {
         </div>
         <span style="font-size:12px;color:var(--muted)">${total} intent${total !== 1 ? 's' : ''} · ${lifeArcs.length} life line${lifeArcs.length !== 1 ? 's' : ''}</span>
       </div>
-      ${lifeArcs.length ? renderLifeArcList(lifeArcs, now) : ""}
+      ${activeArcs.length ? renderLifeArcList(activeArcs, now) : ""}
+      ${closedHtml}
       <div class="proactive-intent-list">
         ${pendingItems.length
           ? pendingItems.join("")
@@ -2212,7 +2090,8 @@ function renderProactiveIntent(intent, now, mergedCount = 0) {
 }
 
 // Memory
-let memoryState = { role: "", category: "", editingId: null, renameUid: null, allEntries: [], allUsers: [] };
+let memoryState = { role: "", category: "", editingId: null, renameUid: null, allEntries: [], allUsers: [], page: 1 };
+const MEM_PAGE_SIZE = 12;
 
 const CAT_LABELS = { trait: "Trait", preference: "Preference", fact: "Fact" };
 const CAT_ORDER = ["trait", "preference", "fact"];
@@ -2246,6 +2125,10 @@ async function renderMemory() {
   }
 
   const filtered = filterMemoryEntries();
+  const totalPages = Math.ceil(filtered.length / MEM_PAGE_SIZE) || 1;
+  if (memoryState.page > totalPages) memoryState.page = totalPages;
+  const start = (memoryState.page - 1) * MEM_PAGE_SIZE;
+  const paged = filtered.slice(start, start + MEM_PAGE_SIZE);
   const counts = { trait: 0, preference: 0, fact: 0 };
   for (const e of filtered) { if (counts[e.category] !== undefined) counts[e.category]++; }
 
@@ -2259,7 +2142,8 @@ async function renderMemory() {
       ${renderMemorySummary(filtered.length, counts)}
       ${renderMemoryToolbar(roles)}
       ${renderMemoryFilterChips(counts)}
-      ${renderMemoryCards(filtered)}
+      ${renderMemoryCards(paged)}
+      ${renderPagination(filtered.length, memoryState.page, totalPages, "mem")}
     </div>
     <div id="memoryEditorMount"></div>
   `;
@@ -2320,27 +2204,11 @@ function renderMemoryFilterChips(counts) {
 
 function renderMemoryCards(entries) {
   if (!entries.length) return '<div class="memory-empty">No memory entries found. Click "+ Add Memory" to create one.</div>';
-
-  // Group by role only (single user)
-  const groups = new Map();
-  for (const e of entries) {
-    if (!groups.has(e.role)) groups.set(e.role, []);
-    groups.get(e.role).push(e);
+  let html = '<div class="memory-section-cards">';
+  for (const item of entries) {
+    html += renderMemoryCard(item);
   }
-
-  let html = "";
-  for (const [role, items] of groups) {
-    html += `<div class="memory-role-section">
-      <div class="memory-user-head">
-        <span class="memory-role-badge">${escHtml(role)}</span>
-        <span style="color:var(--muted);font-size:11px">${items.length} entries</span>
-      </div>
-      <div class="memory-section-cards">`;
-    for (const item of items) {
-      html += renderMemoryCard(item);
-    }
-    html += `</div></div>`;
-  }
+  html += '</div>';
   return html;
 }
 
@@ -2352,6 +2220,7 @@ function renderMemoryCard(item) {
     <div class="memory-card" data-mem-id="${escAttr(item.id)}">
       <div class="memory-card-top">
         <span class="memory-card-category ${item.category}">${CAT_LABELS[item.category] || item.category}</span>
+        <span class="memory-card-role">${escHtml(item.role || "")}</span>
         <div class="memory-card-actions">
           <button class="btn" data-action="edit-memory" data-id="${escAttr(item.id)}">Edit</button>
           <button class="btn btn-danger" data-action="delete-memory" data-id="${escAttr(item.id)}">Del</button>
@@ -2403,6 +2272,7 @@ function bindMemoryEvents() {
     memoryState.role = e.target.value;
     memoryState.editingId = null;
     memoryState.renameUid = null;
+    memoryState.page = 1;
     renderMemory();
   });
 
@@ -2411,9 +2281,30 @@ function bindMemoryEvents() {
       memoryState.category = btn.dataset.cat;
       memoryState.editingId = null;
       memoryState.renameUid = null;
+      memoryState.page = 1;
       renderMemory();
     });
   });
+
+  // Memory pagination
+  content.querySelectorAll('[data-mem-page]').forEach(btn => {
+    btn.addEventListener("click", () => {
+      memoryState.page = Number(btn.dataset.memPage);
+      renderMemory();
+    });
+  });
+  const memJumpInput = content.querySelector("#memPageJumpInput");
+  const memJumpBtn = content.querySelector("#memPageJumpBtn");
+  if (memJumpInput && memJumpBtn) {
+    memJumpBtn.addEventListener("click", () => {
+      const p = Number(memJumpInput.value);
+      const max = Number(memJumpInput.dataset.totalPages) || 1;
+      if (p >= 1 && p <= max) { memoryState.page = p; renderMemory(); }
+    });
+    memJumpInput.addEventListener("keydown", e => {
+      if (e.key === "Enter") { e.preventDefault(); memJumpBtn.click(); }
+    });
+  }
 
   content.querySelectorAll('[data-action="edit-memory"]').forEach(btn => {
     btn.addEventListener("click", () => {
@@ -2595,6 +2486,7 @@ async function renderConfig() {
     S("Timeouts", F("timeouts.aiMs", "AI Timeout (ms)", c.timeouts?.aiMs, "number")),
     S("Vision", Select("vision.mode", "Mode", c.vision?.mode || "auto", [["auto", "Auto"], ["external", "External API"], ["native", "Native backend"], ["off", "Off"]]) + F("vision.baseUrl", "API Base URL", c.vision?.baseUrl, "text", "Default SiliconFlow") + F("vision.apiKey", "API Key", c.vision?.apiKey, "password", "Only for External API") + F("vision.model", "Model Name", c.vision?.model, "text", "Default Qwen/Qwen3-VL-32B-Instruct") + F("vision.detail", "Detail Level", c.vision?.detail) + F("vision.timeoutMs", "Timeout (ms)", c.vision?.timeoutMs, "number")),
     S("RAG", F("rag.knowledgeDir", "Knowledge Directory", c.rag?.knowledgeDir) + F("rag.collectionName", "Collection Name", c.rag?.collectionName) + F("rag.embedModel", "Embedding Model", c.rag?.embedModel) + F("rag.storeDir", "Vector Store Dir", c.rag?.storeDir) + F("rag.modelCacheDir", "Model Cache Dir", c.rag?.modelCacheDir) + F("rag.scoreMargin", "Score Margin", c.rag?.scoreMargin, "number") + F("rag.chunkMaxChars", "Chunk Max Chars", c.rag?.chunkMaxChars, "number") + F("rag.batchSize", "Batch Size", c.rag?.batchSize, "number") + F("rag.enabled", "Enabled (true/false)", c.rag?.enabled)),
+    S("Send", F("send.chunkSendDelayMs", "Chunk Send Delay (ms)", c.send?.chunkSendDelayMs, "number") + F("send.maxCancelReasonLength", "Max Cancel Reason Length", c.send?.maxCancelReasonLength, "number")),
     S("Logs", F("logs.retentionDays", "Retention (days, 0=never)", c.logs?.retentionDays, "number")),
   ].join("");
 
@@ -2626,7 +2518,7 @@ function buildNested(fd) {
     const last = parts[parts.length - 1];
     if (val === "true") cur[last] = true;
     else if (val === "false") cur[last] = false;
-    else if (["aiMs", "timeoutMs", "topK", "minScore", "scoreMargin", "chunkMaxChars", "resultMaxChars", "batchSize", "retentionDays"].includes(last)) cur[last] = Number(val);
+    else if (["aiMs", "timeoutMs", "topK", "minScore", "scoreMargin", "chunkMaxChars", "resultMaxChars", "batchSize", "retentionDays", "chunkSendDelayMs", "maxCancelReasonLength"].includes(last)) cur[last] = Number(val);
     else cur[last] = val;
   }
   return obj;

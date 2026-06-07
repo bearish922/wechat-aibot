@@ -138,24 +138,6 @@
           "expiresAt": "2026-06-06T14:26:16.580Z",
           "closedAt": "2026-06-06T14:26:16.580Z",
           "closeReason": "今日课程已完成，life_arc 中的具体课程实例（time_start/time_end为UTC，对应今日课程）已过期。架子鼓的持续性可通过 schedule_candidates 中的周期性安排来跟踪，无需保留此 arc。"
-        },
-        {
-          "id": "4ea9f1fa-4ed0-4eeb-b1cb-d1e3b9086c88",
-          "status": "closed",
-          "title": "周日丰盛早餐",
-          "summary": "千圣今晚凉奴加即食味噌汤太敷衍，被沃沃提醒明早要吃丰盛早餐。千圣自己也承认该提前备点什么。周日早上好好做一顿早餐，可能成为daily_share素材。",
-          "currentState": "",
-          "nextUsefulMoment": "",
-          "source": "千圣自己承认今晚吃得太敷衍，沃沃也两次提醒她吃好的。周日早上做一顿像样的早餐是自然的生活延续，且可作为daily_share素材。虽然不是强制性安排，但与当前对话高度衔接。",
-          "kind": "personal",
-          "subject": null,
-          "timeStart": "2026-06-07T08:00:00+09:00",
-          "timeEnd": null,
-          "createdAt": "2026-06-06T15:03:32.690Z",
-          "updatedAt": "2026-06-06T15:08:43.227Z",
-          "expiresAt": "2026-06-06T15:08:43.227Z",
-          "closedAt": "2026-06-06T15:08:43.227Z",
-          "closeReason": "转为低 confidence 的事项或自然融入明天生活。不必以 life_arc 形式跟踪——周日早上吃好早餐是千圣自己会做的事情。"
         }
       ],
       "_lastDailyShareSeedAt": "2026-06-05T03:05:30.466Z",
