@@ -11,7 +11,6 @@ describe("Hidden World pipeline UI", () => {
   it("exposes hidden-world prompts and parameters outside the main reply page", () => {
     for (const key of [
       "sceneletInstructions",
-      "dailyShareSeedInstructions",
       "proactiveInstructions",
       "scheduleCreatorInstructions",
       "chatHistoryIntro",
@@ -26,14 +25,33 @@ describe("Hidden World pipeline UI", () => {
       "visibleContextTurns",
       "dailyShareSeedIntervalMs",
       "dailyShareMinIdleMs",
+      "dailyShareDefaultScheduleOffsetMs",
+      "dailyShareDefaultExpiryOffsetMs",
       "scheduleCheckIntervalMs",
       "scheduleMaxActive",
+      "scheduleFinalizationTimeoutMs",
+      "scheduleRecentKindsLimit",
+      "schedulePromptProfileMaxChars",
+      "scheduleBasisMaxLength",
+      "scheduleArcTitleMaxLength",
+      "scheduleArcSummaryMaxLength",
+      "scheduleExpiryAfterEndBufferMs",
+      "scheduleDefaultExpiryFromNowMs",
       "proactiveCheckIntervalMs",
       "proactiveCooldownMs",
       "proactiveDailyMax",
+      "proactiveDefaultExpiryOffsetMs",
+      "hiddenWorldMaxPendingIntents",
+      "maxFollowUpCandidatesPerTurn",
+      "memoryCandidateTimeoutMs",
+      "memoryMergeTimeoutMs",
+      "sceneContextMaxLifeArcs",
+      "chunkSendDelayMs",
+      "maxCancelReasonLength",
     ]) {
       assert.match(appJs, new RegExp(`renderNumberControl\\("${key}"`), `${key} should be editable in Hidden World`);
     }
+    assert.match(appJs, /renderArrayTextarea\("dailyShareDefaultCancelIf"/, "dailyShareDefaultCancelIf should be editable");
   });
 
   it("uses a role-level hidden-world session with a system prompt", () => {

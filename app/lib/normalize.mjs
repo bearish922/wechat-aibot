@@ -1,9 +1,7 @@
 import crypto from "node:crypto";
 import { loadPrompts } from "./reply.mjs";
-import { envOrConfig } from "./config.mjs";
 import { normalizeMemoryCategory } from "./memory.mjs";
-
-const SCENELET_MODEL = envOrConfig("WECHAT_SCENELET_MODEL", "models.scenelet", "deepseek-v4-pro[1m]");
+import { CLAUDE_MAIN_MODEL } from "./claude-runner.mjs";
 
 function getSceneConfig() {
   const p = loadPrompts();
@@ -20,6 +18,25 @@ function getSceneConfig() {
     ragMinScore: p.ragMinScore || 0.48,
     ragResultMaxChars: p.ragResultMaxChars || 3600,
     ragTimeoutMs: p.ragTimeoutMs || 45000,
+    hiddenWorldMaxPendingIntents: p.hiddenWorldMaxPendingIntents || 8,
+    maxFollowUpCandidatesPerTurn: p.maxFollowUpCandidatesPerTurn || 3,
+    dailyShareDefaultScheduleOffsetMs: p.dailyShareDefaultScheduleOffsetMs || 300000,
+    dailyShareDefaultExpiryOffsetMs: p.dailyShareDefaultExpiryOffsetMs || 1800000,
+    dailyShareDefaultCancelIf: p.dailyShareDefaultCancelIf || ["用户已经开启新话题", "用户正在忙或没有回应上一条主动消息"],
+    proactiveDefaultExpiryOffsetMs: p.proactiveDefaultExpiryOffsetMs || 1800000,
+    scheduleFinalizationTimeoutMs: p.scheduleFinalizationTimeoutMs || 60000,
+    scheduleRecentKindsLimit: p.scheduleRecentKindsLimit || 5,
+    schedulePromptProfileMaxChars: p.schedulePromptProfileMaxChars || 800,
+    scheduleBasisMaxLength: p.scheduleBasisMaxLength || 300,
+    scheduleArcTitleMaxLength: p.scheduleArcTitleMaxLength || 80,
+    scheduleArcSummaryMaxLength: p.scheduleArcSummaryMaxLength || 500,
+    scheduleExpiryAfterEndBufferMs: p.scheduleExpiryAfterEndBufferMs || 43200000,
+    scheduleDefaultExpiryFromNowMs: p.scheduleDefaultExpiryFromNowMs || 259200000,
+    memoryCandidateTimeoutMs: p.memoryCandidateTimeoutMs || 45000,
+    memoryMergeTimeoutMs: p.memoryMergeTimeoutMs || 90000,
+    sceneContextMaxLifeArcs: p.sceneContextMaxLifeArcs || 3,
+    chunkSendDelayMs: p.chunkSendDelayMs || 450,
+    maxCancelReasonLength: p.maxCancelReasonLength || 500,
   };
 }
 
@@ -144,7 +161,7 @@ function normalizeWorldSession(raw = null) {
   return {
     sid: raw.sid ? String(raw.sid) : null,
     firstTurn: raw.firstTurn === true || raw._firstTurn === true,
-    model: raw.model ? String(raw.model) : SCENELET_MODEL,
+    model: raw.model ? String(raw.model) : CLAUDE_MAIN_MODEL,
     startedAt: raw.startedAt ? String(raw.startedAt) : null,
     lastUsedAt: raw.lastUsedAt ? String(raw.lastUsedAt) : null,
     resetReason: raw.resetReason ? String(raw.resetReason).slice(0, 300) : "",
@@ -174,7 +191,7 @@ function normalizeLifeArc(raw) {
   const status = ["active", "closed"].includes(raw.status) ? raw.status : "active";
   const createdAt = raw.createdAt || raw.created_at ? String(raw.createdAt || raw.created_at) : nowIso;
   const updatedAt = raw.updatedAt || raw.updated_at ? String(raw.updatedAt || raw.updated_at) : createdAt;
-  const defaultExpiresAt = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+  const defaultExpiresAt = new Date(Date.now() + getSceneConfig().scheduleDefaultExpiryFromNowMs).toISOString();
   const rawExpiresAt = raw.expiresAt || raw.expires_at ? String(raw.expiresAt || raw.expires_at) : defaultExpiresAt;
   const expiresAt = Number.isFinite(Date.parse(rawExpiresAt)) ? rawExpiresAt : defaultExpiresAt;
   const lifeArcKinds = ["travel", "work", "school", "personal", "special_date"];
@@ -234,13 +251,13 @@ function normalizeSceneletResult(raw) {
 function normalizeRawProactiveCandidate(raw, { nowIso = new Date().toISOString(), sourceUserText = "", defaultKind = "follow_up" } = {}) {
   const scheduled = raw?.scheduled_at ? new Date(raw.scheduled_at) : null;
   if (!scheduled || Number.isNaN(scheduled.getTime())) return null;
-  const expires = raw.expires_at ? new Date(raw.expires_at) : new Date(scheduled.getTime() + 30 * 60 * 1000);
+  const expires = raw.expires_at ? new Date(raw.expires_at) : new Date(scheduled.getTime() + getSceneConfig().proactiveDefaultExpiryOffsetMs);
   return normalizeProactiveIntent({
     id: crypto.randomUUID(),
     status: "pending",
     createdAt: nowIso,
     scheduledAt: scheduled.toISOString(),
-    expiresAt: Number.isNaN(expires.getTime()) ? new Date(scheduled.getTime() + 30 * 60 * 1000).toISOString() : expires.toISOString(),
+    expiresAt: Number.isNaN(expires.getTime()) ? new Date(scheduled.getTime() + getSceneConfig().proactiveDefaultExpiryOffsetMs).toISOString() : expires.toISOString(),
     sourceTurnAt: nowIso,
     sourceUserText,
     basis: raw.basis || "",
@@ -389,12 +406,10 @@ export {
   normalizeProactiveIntents,
   emptyToolUsage,
   normalizeToolUsage,
-  emptyWorldState,
   normalizeWorldState,
   applyWorldStatePatch,
   normalizeWorldSession,
   normalizeWorldLastOutput,
-  normalizeLifeArc,
   normalizeLifeArcs,
   normalizeSceneletResult,
   normalizeRawProactiveCandidate,
@@ -403,8 +418,6 @@ export {
   normalizeMemoryOps,
   sanitizeVisibleReplyText,
   normalizeProactiveDecision,
-  localDayKey,
-  sameLocalDay,
   proactiveSentToday,
   unansweredProactiveSummary,
   lastConversationActivityMs,

@@ -354,7 +354,7 @@ function runSearchArchitectures({ config, prompts, profiles }) {
       label: `${user.id}:baseline-scenelet`,
       bare: true,
       tools: "WebSearch,WebFetch",
-      model: config.models?.scenelet || config.models?.claudeMain,
+      model: config.models?.claudeMain,
     });
     const baselineMain = runClaude(buildMainPrompt({
       prompts,
@@ -407,7 +407,7 @@ function runSearchArchitectures({ config, prompts, profiles }) {
       label: `${user.id}:searchable-scenelet`,
       bare: false,
       tools: "WebSearch,WebFetch",
-      model: config.models?.scenelet || config.models?.claudeMain,
+      model: config.models?.claudeMain,
     });
     const searchableMain = runClaude(buildMainPrompt({
       prompts,

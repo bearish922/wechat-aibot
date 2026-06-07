@@ -5,7 +5,6 @@ import { spawn, execSync } from "node:child_process";
 import { configValue, envOrConfig, configBool, configNumber } from "./config.mjs";
 import { DATA_DIR, RUNTIME_DIR, appPath, dataPath, ensureDir, rootPath } from "./paths.mjs";
 import { log } from "./utils.mjs";
-import { shouldSkipRag } from "./rag.mjs";
 import { loadPrompts } from "./reply.mjs";
 import { profileTemplates } from "./state.mjs";
 
@@ -98,7 +97,6 @@ const CODEX_HTTPS_PROXY = envOrConfig("WECHAT_CODEX_HTTPS_PROXY", "proxy.codexHt
 const CLAUDE_MAIN_MODEL = envOrConfig("WECHAT_CLAUDE_MAIN_MODEL", "models.claudeMain", "deepseek-v4-pro[1m]");
 const CLAUDE_FAST_MODEL = envOrConfig("WECHAT_CLAUDE_FAST_MODEL", "models.claudeFast", "deepseek-v4-flash[1m]");
 const CLAUDE_FALLBACK_MODEL = envOrConfig("WECHAT_CLAUDE_FALLBACK_MODEL", "models.claudeFallback", "deepseek-v4-pro[1m]");
-const SCENELET_MODEL = envOrConfig("WECHAT_SCENELET_MODEL", "models.scenelet", "deepseek-v4-pro[1m]");
 const SCENELET_BARE = configBool("scene.sceneletBare", false);
 const CLAUDE_TIMEOUT_MS = configNumber("timeouts.aiMs", 600_000);
 const LOGS_DIR = dataPath("logs");
@@ -203,7 +201,7 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
   if (!commandExists(CLAUDE)) return null;
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
-  const selectedModel = model || SCENELET_MODEL;
+  const selectedModel = model || CLAUDE_MAIN_MODEL;
   const systemPromptFile = systemPrompt
     ? path.join(RUNTIME_DIR, `.hidden_system_${label}_${crypto.randomUUID()}.txt`)
     : null;
@@ -299,7 +297,6 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
 
 function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePrompt, memoryPrompt = "", profileOverride = null, options = {}) {
   const profile = profileOverride;
-  const fastCasual = shouldSkipRag(options.routingBody || body);
   const systemPromptParts = [];
   if (profile && profileTemplates[profile]) systemPromptParts.push(profileTemplates[profile]);
   if (memoryPrompt && options.includeMemoryInSystem === true) systemPromptParts.push(memoryPrompt);
@@ -329,7 +326,6 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
   if (CLAUDE_FALLBACK_MODEL && CLAUDE_FALLBACK_MODEL !== CLAUDE_MAIN_MODEL) {
     args.push("--fallback-model", CLAUDE_FALLBACK_MODEL);
   }
-  if (fastCasual) args.push("--effort", "low");
   if (systemPromptFile) {
     ensureDir(RUNTIME_DIR);
     fs.writeFileSync(systemPromptFile, systemPromptParts.join("\n\n---\n\n"), "utf-8");
@@ -347,7 +343,6 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
   proc.stdin.end(body, "utf8");
 
   log("\u{1F7E2}", `[${sessionName}] CC pid=${proc.pid}`);
-  if (fastCasual) log("\u{26A1}", `[${sessionName}] CC low effort visible reply`);
 
   let buf = "";
   let stderrOut = "";
@@ -528,7 +523,6 @@ export {
   CLAUDE_MAIN_MODEL,
   CLAUDE_FAST_MODEL,
   CLAUDE_FALLBACK_MODEL,
-  SCENELET_MODEL,
   SCENELET_BARE,
   CLAUDE_HTTPS_PROXY,
   CODEX_HTTPS_PROXY,

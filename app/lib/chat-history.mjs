@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { dataPath, ensureDir, DATA_DIR } from "./paths.mjs";
 
-export const CHAT_HISTORY_FILE = dataPath("chat-history.json");
+const CHAT_HISTORY_FILE = dataPath("chat-history.json");
 function loadAllEvents() {
   try {
     if (!fs.existsSync(CHAT_HISTORY_FILE)) return [];
@@ -53,7 +53,6 @@ export function appendChatEvent(event) {
     kind: event.kind || "chat",
     text: String(event.text || ""),
     scenelet: event.scenelet ? String(event.scenelet) : "",
-    sceneState: event.sceneState ? String(event.sceneState) : "",
     sceneletStatus: event.sceneletStatus ? String(event.sceneletStatus) : "",
     sceneletError: event.sceneletError ? String(event.sceneletError) : "",
     proactiveIntentId: event.proactiveIntentId || "",
@@ -90,7 +89,6 @@ export function listChatEvents(options = {}) {
     events = events.filter(e => [
       e.text,
       e.scenelet,
-      e.sceneState,
       e.sceneletStatus,
       e.sceneletError,
       e.sessionName,

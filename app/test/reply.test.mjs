@@ -5,7 +5,6 @@ import {
   hasInboundAttachment,
   isStructuredReply,
   splitSocialReply,
-  localTimePeriod,
   formatZonedTimeParts,
   formatLocalChatReality,
   expressionCapabilityPrompt,
@@ -33,11 +32,6 @@ describe("hasInboundAttachment", () => {
 });
 
 describe("local chat reality", () => {
-  it("classifies deep night periods", () => {
-    assert.equal(localTimePeriod(new Date(2026, 4, 28, 2, 13)), "凌晨");
-    assert.equal(localTimePeriod(new Date(2026, 4, 28, 23, 13)), "深夜");
-  });
-
   it("formats local time and action guidance", () => {
     const text = formatLocalChatReality(new Date(2026, 4, 28, 2, 13));
     assert.match(text, /当前用户侧时间：2026-05-28 02:13，星期四，凌晨（北京时间，Asia\/Shanghai）。/u);

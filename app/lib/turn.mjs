@@ -1,22 +1,17 @@
 import { uuid, log, sleep } from "./utils.mjs";
 import { sessions, profileTemplates, pendingInputs } from "./state.mjs";
-import { SCENELET_BARE, SCENELET_MODEL, CLAUDE_FAST_MODEL, CLAUDE_MAIN_MODEL, runHiddenJson } from "./claude-runner.mjs";
+import { SCENELET_BARE, CLAUDE_FAST_MODEL, CLAUDE_MAIN_MODEL, runHiddenJson } from "./claude-runner.mjs";
 import { loadPrompts, MAX_REPLY_LEN, splitText, splitSocialReply } from "./reply.mjs";
-import { getSceneConfig, normalizeFailedTurn, normalizeVisibleHistory, normalizeProactiveIntent, normalizeProactiveIntents, normalizeToolUsage, normalizeWorldState, applyWorldStatePatch, normalizeLifeArcs, normalizeSceneletResult, normalizeRawProactiveCandidate, normalizeScheduleCandidates, normalizeMemoryCandidates, normalizeMemoryOps, normalizeProactiveDecision, sanitizeVisibleReplyText } from "./normalize.mjs";
+import { getSceneConfig, normalizeProactiveIntents, normalizeToolUsage, normalizeWorldState, applyWorldStatePatch, normalizeLifeArcs, normalizeSceneletResult, normalizeRawProactiveCandidate, normalizeScheduleCandidates, normalizeMemoryCandidates, normalizeMemoryOps, normalizeProactiveDecision, sanitizeVisibleReplyText, proactiveSentToday, lastConversationActivityMs } from "./normalize.mjs";
 import { sessionProfile, roleWorldKey, ensureWorldSession, getRoleWorld, saveRoleWorlds, syncRoleWorldToSession, checkIntentDuplicateFlash, applyLifeArcOps, lifeArcPromptItems } from "./world-state.mjs";
 import { saveSessions } from "./session-store.mjs";
-import { buildHiddenWorldSystemPrompt, buildHiddenWorldPrompt, buildProactivePrompt, recentVisibleContext, buildMemoryCandidatePrompt, buildMemoryMergePrompt, appendVisibleHistory } from "./prompts.mjs";
-import { renderMemoryPrompt, isMemoryEnabled, shouldRunMemoryWriter, listMemoryItems, applyMemoryOps } from "./memory.mjs";
+import { buildHiddenWorldSystemPrompt, buildHiddenWorldPrompt, buildProactivePrompt, buildScheduleFinalizationPrompt, recentVisibleContext, buildMemoryCandidatePrompt, buildMemoryMergePrompt, appendVisibleHistory } from "./prompts.mjs";
+import { memoryItemsText, isMemoryEnabled, shouldRunMemoryWriter, listMemoryItems, applyMemoryOps } from "./memory.mjs";
 import { appendChatEvent } from "./chat-history.mjs";
 import { sendMessage } from "./wechat.mjs";
-import { proactiveSentToday, lastConversationActivityMs } from "./normalize.mjs";
 
 // ─── proactive timer ─────────────────────────────────────────
 let lastProactiveCheckAt = 0;
-
-export function setLastProactiveCheckAt(ts) {
-  lastProactiveCheckAt = ts;
-}
 
 // ─── orchestration ───────────────────────────────────────────
 
@@ -33,7 +28,7 @@ export async function generateSceneletForTurn({ userId, sess, profile, userBody,
     visibleContext: recentVisibleContext(sess),
     memoryPrompt,
     worldState: normalizeWorldState(roleWorld._worldState),
-    proactiveIntents: normalizeProactiveIntents(sess._proactiveIntents).filter(i => i.status === "pending").slice(-8),
+    proactiveIntents: normalizeProactiveIntents(sess._proactiveIntents).filter(i => i.status === "pending").slice(-getSceneConfig().hiddenWorldMaxPendingIntents),
     worldSession: world,
   });
   let raw = await runHiddenJson(prompt, {
@@ -43,14 +38,14 @@ export async function generateSceneletForTurn({ userId, sess, profile, userBody,
     sessionName: `hidden-world-${roleWorldKey(profile)}`,
     sessionId: world.sid,
     firstTurn: world.firstTurn,
-    model: world.model || SCENELET_MODEL,
+    model: world.model || CLAUDE_MAIN_MODEL,
     systemPrompt: buildHiddenWorldSystemPrompt(profile),
   });
-  if (!raw && !world.firstTurn) {
+  if (!raw) {
     world.sid = uuid();
     world.firstTurn = true;
     world.startedAt = new Date().toISOString();
-    world.resetReason = "hidden world retry after failed resume";
+    world.resetReason = "hidden world retry after failed attempt";
     raw = await runHiddenJson(prompt, {
       label: "hidden_world_retry",
       bare: SCENELET_BARE,
@@ -58,7 +53,7 @@ export async function generateSceneletForTurn({ userId, sess, profile, userBody,
       sessionName: `hidden-world-${roleWorldKey(profile)}`,
       sessionId: world.sid,
       firstTurn: true,
-      model: world.model || SCENELET_MODEL,
+      model: world.model || CLAUDE_MAIN_MODEL,
       systemPrompt: buildHiddenWorldSystemPrompt(profile),
     });
   }
@@ -82,7 +77,7 @@ export async function generateSceneletForTurn({ userId, sess, profile, userBody,
   return result;
 }
 
-export function buildSceneContextBlock(sess, sceneletResult, carriedState) {
+export function buildSceneContextBlock(sess, sceneletResult) {
   const cfg = loadPrompts();
   const profile = sessionProfile(sess);
   const lifeArcSummary = profile ? lifeArcPromptItems(getRoleWorld(profile)).map(arc => ({
@@ -92,7 +87,7 @@ export function buildSceneContextBlock(sess, sceneletResult, carriedState) {
     kind: arc.kind,
     time_start: arc.time_start,
     time_end: arc.time_end,
-  })).slice(-3) : [];
+  })).slice(-getSceneConfig().sceneContextMaxLifeArcs) : [];
   const parts = [
     lifeArcSummary.length ? [
       "【短期 life_arc 简述】",
@@ -116,7 +111,7 @@ export async function addFollowUpCandidates(sess, sceneletResult, userBody) {
   if (!sess || !sceneletResult?.followUpCandidates?.length) return;
   const nowIso = new Date().toISOString();
   const existing = normalizeProactiveIntents(sess._proactiveIntents);
-  for (const raw of sceneletResult.followUpCandidates.slice(0, 3)) {
+  for (const raw of sceneletResult.followUpCandidates.slice(0, getSceneConfig().maxFollowUpCandidatesPerTurn)) {
     const candidate = normalizeRawProactiveCandidate(raw, {
       nowIso,
       sourceUserText: userBody,
@@ -171,12 +166,12 @@ export async function sendFinalAssistantMessage(userId, text, contextToken, pref
   let ok = true;
   for (const chunk of messages) {
     if (!await sendMessage(userId, chunk, contextToken)) ok = false;
-    if (messages.length > 1) await sleep(450);
+    if (messages.length > 1) await sleep(getSceneConfig().chunkSendDelayMs);
   }
   return ok;
 }
 
-export function activeProfileSessionEntries() {
+function activeProfileSessionEntries() {
   const entries = [];
   for (const [ai, map] of Object.entries(sessions)) {
     for (const [userId, userData] of map) {
@@ -188,15 +183,20 @@ export function activeProfileSessionEntries() {
   return entries;
 }
 
-export function markProactiveIntent(intent, status, reason = "") {
+function markProactiveIntent(intent, status, reason = "") {
   intent.status = status;
   if (status === "sent") intent.sentAt = new Date().toISOString();
   if (status === "cancelled") intent.cancelledAt = new Date().toISOString();
-  if (reason) intent.cancelReason = String(reason).slice(0, 500);
+  if (reason) intent.cancelReason = String(reason).slice(0, getSceneConfig().maxCancelReasonLength);
 }
 
-export async function evaluateProactiveIntent({ ai, userId, sess, profile, intent }) {
-  const memoryPrompt = renderMemoryPrompt(userId, { profile });
+async function evaluateProactiveIntent({ ai, userId, sess, profile, intent }) {
+  const memoryPrompt = (() => {
+    const items = memoryItemsText(userId, { profile });
+    if (!items) return "";
+    const instruction = loadPrompts().memoryContextInstruction || "";
+    return instruction ? `${instruction}\n\n${items}` : items;
+  })();
   const prompt = buildProactivePrompt({
     userId,
     sessionName: sess.name,
@@ -210,7 +210,7 @@ export async function evaluateProactiveIntent({ ai, userId, sess, profile, inten
   return normalizeProactiveDecision(raw);
 }
 
-export async function maybeSeedDailyShareIntent({ ai, userId, sess, profile, pending }) {
+async function maybeSeedDailyShareIntent({ ai, userId, sess, profile, pending }) {
   const cfg = getSceneConfig();
   const roleWorld = getRoleWorld(profile);
   if (pending.length) return { changed: false, intent: null };
@@ -235,22 +235,22 @@ export async function maybeSeedDailyShareIntent({ ai, userId, sess, profile, pen
 
   const candidate = candidates.find(x => x && typeof x === "object" && x.message_intent);
   if (!candidate) return { changed: true, intent: null };
-  const rawScheduledAt = candidate.scheduled_at || new Date(nowMs + 5 * 60 * 1000).toISOString();
+  const rawScheduledAt = candidate.scheduled_at || new Date(nowMs + cfg.dailyShareDefaultScheduleOffsetMs).toISOString();
   const parsedScheduledAt = Date.parse(rawScheduledAt || "");
-  const scheduledAt = Number.isFinite(parsedScheduledAt) ? rawScheduledAt : new Date(nowMs + 5 * 60 * 1000).toISOString();
+  const scheduledAt = Number.isFinite(parsedScheduledAt) ? rawScheduledAt : new Date(nowMs + cfg.dailyShareDefaultScheduleOffsetMs).toISOString();
   const parsedFinalScheduledAt = Date.parse(scheduledAt);
   const rawExpiresAt = candidate.expires_at || "";
   const parsedExpiresAt = Date.parse(rawExpiresAt);
   const expiresAt = Number.isFinite(parsedExpiresAt)
     ? rawExpiresAt
-    : new Date(parsedFinalScheduledAt + 30 * 60 * 1000).toISOString();
+    : new Date(parsedFinalScheduledAt + cfg.dailyShareDefaultExpiryOffsetMs).toISOString();
   const intent = normalizeRawProactiveCandidate({
     kind: "daily_share",
     scheduled_at: scheduledAt,
     expires_at: expiresAt,
     message_intent: candidate.message_intent,
     basis: candidate.basis || "",
-    cancel_if: candidate.cancel_if || ["用户已经开启新话题", "用户正在忙或没有回应上一条主动消息"],
+    cancel_if: candidate.cancel_if || cfg.dailyShareDefaultCancelIf,
     inner_scenelet: candidate.inner_scenelet || "",
   }, {
     nowIso,
@@ -260,11 +260,10 @@ export async function maybeSeedDailyShareIntent({ ai, userId, sess, profile, pen
   return { changed: true, intent };
 }
 
-export async function maybeCreateScheduleEntry({ sess, profile }) {
+async function maybeCreateScheduleEntry({ sess, profile }) {
   const cfg = getSceneConfig();
   const roleWorld = getRoleWorld(profile);
   const activeSchedules = normalizeLifeArcs(roleWorld._lifeArcs).filter(a => a.kind);
-  if (activeSchedules.length >= cfg.scheduleMaxActive) return false;
   const candidates = normalizeScheduleCandidates(roleWorld._worldLastOutput?.scheduleCandidates || []);
   if (!candidates.length) return false;
 
@@ -279,71 +278,65 @@ export async function maybeCreateScheduleEntry({ sess, profile }) {
 
   const recentKinds = normalizeLifeArcs(roleWorld._lifeArcs, { includeClosed: true })
     .filter(a => a.kind)
-    .slice(-5)
+    .slice(-cfg.scheduleRecentKindsLimit)
     .map(a => a.kind);
 
-  const prompt = [
-    (loadPrompts().scheduleCreatorInstructions || ""),
-    "",
-    "角色 prompt（截取关键身份信息）：",
-    profile && profileTemplates[profile] ? profileTemplates[profile].slice(0, 800) : "",
-    "",
-    "Hidden-world 提出的 schedule candidates：",
-    JSON.stringify(candidates, null, 2),
-    "",
-    "当前活跃日程：",
-    activeLifeArcs.length
-      ? activeLifeArcs.map(a => `- [${a.kind}] ${a.title || ""} (${a.timeStart || "?"} ~ ${a.timeEnd || "?"})`).join("\n")
-      : "(无)",
-    "",
-    recentKinds.length ? `最近曾创建过的日程类型：${[...new Set(recentKinds)].join("、")}。请避免短期内重复同类安排。` : "",
-    "",
-    "只输出 JSON，不要解释：",
-    JSON.stringify({
-      selected_index: -1,
-      basis: "简短说明",
-      life_arc: {
-        title: "string",
-        summary: "string",
-        kind: "travel|work|school|personal|special_date",
-        subject: "role|user|shared",
-        time_start: "ISO string|null",
-        time_end: "ISO string|null"
-      }
-    }, null, 2),
-  ].filter(Boolean).join("\n");
+  const prompt = buildScheduleFinalizationPrompt({
+    profileSnippet: profile && profileTemplates[profile] ? profileTemplates[profile].slice(0, cfg.schedulePromptProfileMaxChars) : "",
+    candidates,
+    activeSchedules: activeSchedules.length
+      ? activeSchedules.map(a => `- [${a.kind}] ${a.title || ""} (${a.timeStart || "?"} ~ ${a.timeEnd || "?"}) id:${a.id}`).join("\n")
+      : "",
+    recentKindsHint: recentKinds.length ? `最近曾创建过的日程类型：${[...new Set(recentKinds)].join("、")}。请避免短期内重复同类安排。` : "",
+  });
 
   const result = await runHiddenJson(prompt, {
     label: "schedule_finalization",
     bare: false,
     model: CLAUDE_FAST_MODEL,
-    timeoutMs: 60_000,
+    timeoutMs: cfg.scheduleFinalizationTimeoutMs,
   });
 
-  if (!result || result.selected === "none" || Number(result.selected_index ?? -1) < 0 || !result.life_arc) return true;
+  if (!result || result.selected === "none" || Number(result.selected_index ?? -1) < 0) return true;
+  const op = ["create", "update", "close"].includes(result.op) ? result.op : "create";
   const arc = result.life_arc;
-  if (!arc.title || !arc.kind) return true;
-  const timeEnd = arc.time_end || arc.timeEnd || null;
-  const parsedEnd = Date.parse(timeEnd || "");
-  const expiresAt = Number.isFinite(parsedEnd)
-    ? new Date(parsedEnd + 12 * 60 * 60 * 1000).toISOString()
-    : new Date(nowMs + 3 * 24 * 60 * 60 * 1000).toISOString();
+  if (!arc) return true;
+  if (op === "create") {
+    if (!arc.title || !arc.kind) return true;
+    if (activeSchedules.length >= cfg.scheduleMaxActive) return true;
+  }
+  if ((op === "update" || op === "close") && !arc.id) return true;
 
-  applyLifeArcOps(roleWorld, [{
-    op: "create",
-    title: String(arc.title).slice(0, 80),
-    summary: String(arc.summary || "").slice(0, 500),
-    kind: arc.kind,
-    subject: arc.subject || null,
-    time_start: arc.time_start || arc.timeStart || null,
-    time_end: timeEnd,
-    expires_at: expiresAt,
-    reason: result.basis ? String(result.basis).slice(0, 300) : "schedule creator",
-  }]);
+  const reason = result.basis ? String(result.basis).slice(0, cfg.scheduleBasisMaxLength) : "schedule creator";
+
+  if (op === "close") {
+    applyLifeArcOps(roleWorld, [{ op, id: arc.id, reason }]);
+  } else {
+    const timeEnd = arc.time_end || arc.timeEnd || null;
+    const parsedEnd = Date.parse(timeEnd || "");
+    const expiresAt = Number.isFinite(parsedEnd)
+      ? new Date(parsedEnd + cfg.scheduleExpiryAfterEndBufferMs).toISOString()
+      : new Date(nowMs + cfg.scheduleDefaultExpiryFromNowMs).toISOString();
+
+    applyLifeArcOps(roleWorld, [{
+      op,
+      id: op === "update" ? arc.id : undefined,
+      title: String(arc.title || "").slice(0, cfg.scheduleArcTitleMaxLength),
+      summary: String(arc.summary || "").slice(0, cfg.scheduleArcSummaryMaxLength),
+      kind: arc.kind,
+      subject: arc.subject || null,
+      time_start: arc.time_start || arc.timeStart || null,
+      time_end: timeEnd,
+      expires_at: expiresAt,
+      reason,
+    }]);
+  }
+
   roleWorld.updatedAt = new Date().toISOString();
   syncRoleWorldToSession(sess, profile);
   saveRoleWorlds();
-  log("\u{1F4C5}", `[${sess.name}] schedule created: [${arc.kind}] ${arc.title}`);
+  const opLabel = op === "close" ? "closed" : op === "update" ? "updated" : "created";
+  log("\u{1F4C5}", `[${sess.name}] schedule ${opLabel}: [${arc.kind || "?"}] ${arc.title || arc.id || ""}`);
   return true;
 }
 
@@ -380,7 +373,7 @@ export async function checkProactiveIntents() {
 
     for (const intent of pending) {
       const scheduled = Date.parse(intent.scheduledAt);
-      const expires = intent.expiresAt ? Date.parse(intent.expiresAt) : scheduled + 30 * 60 * 1000;
+      const expires = intent.expiresAt ? Date.parse(intent.expiresAt) : scheduled + getSceneConfig().proactiveDefaultExpiryOffsetMs;
       if (!Number.isFinite(scheduled)) {
         markProactiveIntent(intent, "cancelled", "invalid scheduled_at");
         changed = true;
@@ -409,7 +402,7 @@ export async function checkProactiveIntents() {
 
       const sent = await sendFinalAssistantMessage(userId, decision.visibleReply, sess._lastContextToken, replyPrefix(sess.name, ai), true);
       if (!sent) {
-        intent.cancelReason = "send failed";
+        markProactiveIntent(intent, "cancelled", "send failed");
         changed = true;
         continue;
       }
@@ -448,7 +441,7 @@ export async function updateUserMemoryFromTurn(userId, userBody, profile) {
     label: "memory_candidate_extractor",
     bare: true,
     model: CLAUDE_FAST_MODEL,
-    timeoutMs: 45_000,
+    timeoutMs: getSceneConfig().memoryCandidateTimeoutMs,
   });
   const candidates = normalizeMemoryCandidates(candidatesRaw?.candidates || candidatesRaw?.memory_candidates || []);
   if (!candidates.length) return [];
@@ -458,7 +451,7 @@ export async function updateUserMemoryFromTurn(userId, userBody, profile) {
     label: "memory_merge_planner",
     bare: true,
     model: CLAUDE_MAIN_MODEL,
-    timeoutMs: 90_000,
+    timeoutMs: getSceneConfig().memoryMergeTimeoutMs,
   });
   const ops = normalizeMemoryOps(planRaw?.ops || []);
   if (!ops.length) log("⚠️", `memory planner returned no ops for ${candidates.length} candidates`);

@@ -183,6 +183,10 @@ function copyTextFallback(text) {
 // Prompts
 function toS(ms) { return Math.round((ms || 0) / 1000); }
 function fromS(s) { return (s || 0) * 1000; }
+function toH(ms) { return +((ms || 0) / 3600000).toFixed(1); }
+function fromH(h) { return (h || 0) * 3600000; }
+function toD(ms) { return +((ms || 0) / 86400000).toFixed(1); }
+function fromD(d) { return (d || 0) * 86400000; }
 
 async function renderPrompts() {
   const [pd, pf] = await Promise.all([get("/api/prompts"), get("/api/profiles")]);
@@ -459,9 +463,9 @@ function renderPromptsPipeline(p, profileRows) {
         ${renderPipelineStep({
           n: 9,
           title: "RAG Eligibility Gate",
-          desc: "只有在 RAG 已启用、消息无附件、profile 非默认、没有被 casual-skip 跳过，并且命中显式 profile / names / lore 条件时，才会检索。",
+          desc: "只有在 RAG 已启用、消息无附件、profile 非默认，并且命中显式 profile / names / lore 条件时，才会检索。",
           body: `
-            ${renderPipelineMeta(["shouldSkipRag() 的寒暄跳过规则：本页只读", "显式提到其他 profile 名称：自动触发", "无效 keyword regex 会记录日志并跳过"])}
+            ${renderPipelineMeta(["显式提到其他 profile 名称：自动触发", "无效 keyword regex 会记录日志并跳过"])}
             ${renderRagKeywordChips(p)}
             <label class="pipeline-sub-label">RAG 上下文说明</label>
             ${renderTextPreview("ragContextInstruction", p.ragContextInstruction)}
@@ -572,7 +576,25 @@ function renderControlGrid(items = []) {
   return `<div class="pipeline-control-grid">${items.join("")}</div>`;
 }
 
+function renderArrayTextarea(key, label, value) {
+  const text = Array.isArray(value) ? value.join("\n") : String(value || "");
+  return `
+    <label class="pipeline-control pipeline-control-wide">
+      <span>${escHtml(label)}</span>
+      <textarea id="prompt_${key}" class="prompts-editable" data-key="${key}" rows="3" style="width:100%;min-height:50px;font-size:12px" placeholder="每行一条">${escHtml(text)}</textarea>
+    </label>
+  `;
+}
+
 function renderNumberControl(key, label, value, min, max, unit, options = {}) {
+  let displayValue = value ?? '';
+  if (typeof options.ms === 'string') {
+    if (options.ms === 'h') displayValue = toH(value);
+    else if (options.ms === 'd') displayValue = toD(value);
+  } else if (options.ms) {
+    displayValue = toS(value);
+  }
+  const msAttr = typeof options.ms === 'string' ? options.ms : (options.ms ? '1' : '');
   const attrs = [
     `id="prompt_${key}"`,
     `class="prompts-editable prompts-num"`,
@@ -580,9 +602,9 @@ function renderNumberControl(key, label, value, min, max, unit, options = {}) {
     `min="${escAttr(min)}"`,
     `max="${escAttr(max)}"`,
     options.step ? `step="${escAttr(options.step)}"` : "",
-    `value="${escAttr(value ?? "")}"`,
+    `value="${escAttr(displayValue ?? '')}"`,
     `data-key="${escAttr(key)}"`,
-    options.ms ? `data-ms="1"` : "",
+    msAttr ? `data-ms="${msAttr}"` : "",
   ].filter(Boolean).join(" ");
   return `
     <label class="pipeline-control">
@@ -664,7 +686,9 @@ async function savePrompts() {
     let val;
     if (el.type === 'number') {
       val = Number(el.value);
-      if (el.dataset.ms === '1') val = fromS(val);
+      if (el.dataset.ms === 'h') val = fromH(val);
+      else if (el.dataset.ms === 'd') val = fromD(val);
+      else if (el.dataset.ms === '1') val = fromS(val);
     } else {
       val = el.value;
     }
@@ -834,6 +858,11 @@ function renderWorldPipeline(role, p) {
             <label class="pipeline-sub-label">记忆上下文指令</label>
             ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
             ${renderPipelineMeta(["Memory 保留在 hidden-world 是因为 scenelet 需要知道用户长期偏好和关系事实", "memoryDefaultLimit 默认值 6，当前只作为带 query 相关召回的 fallback"])}
+            <label class="pipeline-sub-label" style="margin-top:8px">记忆处理超时</label>
+            ${renderControlGrid([
+              renderNumberControl("memoryCandidateTimeoutMs", "候选抽取超时", toS(p.memoryCandidateTimeoutMs), 10, 180, "s", { ms: true }),
+              renderNumberControl("memoryMergeTimeoutMs", "合并决策超时", toS(p.memoryMergeTimeoutMs), 30, 300, "s", { ms: true }),
+            ])}
           `,
         })}
         ${renderPipelineStep({
@@ -845,6 +874,7 @@ function renderWorldPipeline(role, p) {
             ${renderTextPreview("chatHistoryIntro", p.chatHistoryIntro)}
             ${renderControlGrid([
               renderNumberControl("visibleContextTurns", "可见轮次数", p.visibleContextTurns || 8, 1, 30, "turns"),
+              renderNumberControl("sceneContextMaxLifeArcs", "主回复life_arc条数", p.sceneContextMaxLifeArcs || 3, 0, 10, "条"),
             ])}
             ${renderPipelineMeta(["RAG context 当前不进 hidden-world；只允许 WebSearch/WebFetch guard 控制需要时搜索"])}
           `,
@@ -880,7 +910,14 @@ function renderWorldPipeline(role, p) {
           n: 9,
           title: "Inner Scenelet / Proactive Candidates",
           desc: "hidden-world 每轮输出 inner_scenelet 和 proactive_candidates（follow_up）；均由 sceneletInstructions 控制。life_arc 由 schedule creator 统一审批管理。",
-          body: renderPipelineMeta(["本环节只读", "life_arc 由 schedule creator 审批，hidden-world 只提 schedule_candidates", "主回复只拿简版，避免自行扩写日程", "hidden-world 在每轮还可生成一次性 follow_up 候选，来自当前对话自然形成的牵挂、承诺或未完成话题。"]),
+          body: `
+            ${renderPipelineMeta(["本环节只读", "life_arc 由 schedule creator 审批，hidden-world 只提 schedule_candidates", "主回复只拿简版，避免自行扩写日程", "hidden-world 在每轮还可生成一次性 follow_up 候选，来自当前对话自然形成的牵挂、承诺或未完成话题。"])}
+            <label class="pipeline-sub-label" style="margin-top:8px">意图数量限制</label>
+            ${renderControlGrid([
+              renderNumberControl("hiddenWorldMaxPendingIntents", "最大待处理意图展示", p.hiddenWorldMaxPendingIntents || 8, 1, 20, "条"),
+              renderNumberControl("maxFollowUpCandidatesPerTurn", "每轮最大候选数", p.maxFollowUpCandidatesPerTurn || 3, 0, 10, "条"),
+            ])}
+          `,
         })}
         ${renderPipelineStep({
           n: 10,
@@ -905,7 +942,10 @@ function renderWorldPipeline(role, p) {
             ${renderControlGrid([
               renderNumberControl("dailyShareSeedIntervalMs", "Seed 检查间隔", toS(p.dailyShareSeedIntervalMs), 60, 86400, "s", { ms: true }),
               renderNumberControl("dailyShareMinIdleMs", "沉默期阈值", toS(p.dailyShareMinIdleMs), 60, 86400, "s", { ms: true }),
+              renderNumberControl("dailyShareDefaultScheduleOffsetMs", "默认排程偏移", toS(p.dailyShareDefaultScheduleOffsetMs), 60, 1800, "s", { ms: true }),
+              renderNumberControl("dailyShareDefaultExpiryOffsetMs", "默认过期偏移", toS(p.dailyShareDefaultExpiryOffsetMs), 300, 7200, "s", { ms: true }),
             ])}
+            ${renderArrayTextarea("dailyShareDefaultCancelIf", "默认取消条件（每行一条）", p.dailyShareDefaultCancelIf)}
           `,
         })}
       </div>
@@ -914,7 +954,7 @@ function renderWorldPipeline(role, p) {
     <div class="panel">
       <div class="pipeline-phase-box">
         <div class="pipeline-phase-label phase-post"><span>阶段 4 — Independent Finalizers（独立二次确认）</span></div>
-        
+
         ${renderPipelineStep({
           n: 12,
           title: "Schedule 候选确认（Life Arc 审批）",
@@ -925,8 +965,16 @@ function renderWorldPipeline(role, p) {
             ${renderPipelineMeta(["审批标准见指令中的准入标准（持续性/周期性）", "schedule_candidates 由 Hidden World 生成，schedule creator 负责审批"])}
             <label class="pipeline-sub-label">Schedule 调度参数</label>
             ${renderControlGrid([
-              renderNumberControl("scheduleCheckIntervalMs", "日程检查", toS(p.scheduleCheckIntervalMs), 600, 604800, "s", { ms: true }),
-              renderNumberControl("scheduleMaxActive", "最大日程", p.scheduleMaxActive || 2, 1, 5, "items"),
+              renderNumberControl("scheduleCheckIntervalMs", "日程检查间隔", toS(p.scheduleCheckIntervalMs), 600, 604800, "s", { ms: true }),
+              renderNumberControl("scheduleMaxActive", "最大活跃日程", p.scheduleMaxActive || 2, 1, 5, "条"),
+              renderNumberControl("scheduleFinalizationTimeoutMs", "审批超时", toS(p.scheduleFinalizationTimeoutMs), 10, 300, "s", { ms: true }),
+              renderNumberControl("scheduleRecentKindsLimit", "最近类型回溯", p.scheduleRecentKindsLimit || 5, 1, 20, "条"),
+              renderNumberControl("schedulePromptProfileMaxChars", "Profile截取长度", p.schedulePromptProfileMaxChars || 800, 200, 3000, "字符"),
+              renderNumberControl("scheduleBasisMaxLength", "审批理由上限", p.scheduleBasisMaxLength || 300, 50, 1000, "字符"),
+              renderNumberControl("scheduleArcTitleMaxLength", "日程标题上限", p.scheduleArcTitleMaxLength || 80, 20, 200, "字符"),
+              renderNumberControl("scheduleArcSummaryMaxLength", "日程摘要上限", p.scheduleArcSummaryMaxLength || 500, 100, 2000, "字符"),
+              renderNumberControl("scheduleExpiryAfterEndBufferMs", "结束后缓冲", toH(p.scheduleExpiryAfterEndBufferMs), 1, 24, "h", { ms: 'h' }),
+              renderNumberControl("scheduleDefaultExpiryFromNowMs", "默认到期天数", toD(p.scheduleDefaultExpiryFromNowMs), 1, 7, "d", { ms: 'd' }),
             ])}
           `,
         })}
@@ -944,7 +992,20 @@ function renderWorldPipeline(role, p) {
             ${renderControlGrid([
               renderNumberControl("proactiveCheckIntervalMs", "检查间隔", toS(p.proactiveCheckIntervalMs), 5, 300, "s", { ms: true }),
               renderNumberControl("proactiveCooldownMs", "冷却时间", toS(p.proactiveCooldownMs), 60, 86400, "s", { ms: true }),
-              renderNumberControl("proactiveDailyMax", "每日上限", p.proactiveDailyMax || 8, 1, 24, "msgs"),
+              renderNumberControl("proactiveDailyMax", "每日上限", p.proactiveDailyMax || 8, 1, 24, "条"),
+              renderNumberControl("proactiveDefaultExpiryOffsetMs", "默认过期偏移", toS(p.proactiveDefaultExpiryOffsetMs), 300, 7200, "s", { ms: true }),
+            ])}
+          `,
+        })}
+
+        ${renderPipelineStep({
+          n: 14,
+          title: "发送与截断限制",
+          desc: "消息发送速率和文本截断长度控制。",
+          body: `
+            ${renderControlGrid([
+              renderNumberControl("chunkSendDelayMs", "分片发送间隔", p.chunkSendDelayMs || 450, 100, 3000, "ms"),
+              renderNumberControl("maxCancelReasonLength", "取消原因上限", p.maxCancelReasonLength || 500, 100, 1000, "字符"),
             ])}
           `,
         })}
@@ -2530,7 +2591,7 @@ async function renderConfig() {
   const formHtml = [
     S("Paths", F("paths.npmGlobal", "NPM Global Directory", c.paths?.npmGlobal, "text", "Auto") + F("paths.claude", "Claude Code Path", c.paths?.claude, "text", "Auto") + F("paths.codex", "Codex Path", c.paths?.codex, "text", "Auto") + F("paths.ragScript", "RAG Script Path", c.paths?.ragScript, "text", "Auto") + F("paths.workDir", "AI Working Directory", c.paths?.workDir, "text", "Auto")),
     S("Proxy", F("proxy.https", "Shared HTTPS Proxy", c.proxy?.https, "text", "Fallback") + F("proxy.claudeHttps", "Claude HTTPS Proxy", c.proxy?.claudeHttps, "text", "Direct when empty") + F("proxy.codexHttps", "Codex HTTPS Proxy", c.proxy?.codexHttps, "text", "http://127.0.0.1:7892") + F("proxy.ragHttps", "RAG HTTPS Proxy", c.proxy?.ragHttps, "text", "Fallback")),
-    S("Models", F("models.claudeFast", "Claude Fast Model", c.models?.claudeFast) + F("models.claudeFallback", "Claude Fallback Model", c.models?.claudeFallback) + F("models.scenelet", "Scenelet Model", c.models?.scenelet)),
+    S("Models", F("models.claudeFast", "Claude Fast Model", c.models?.claudeFast) + F("models.claudeFallback", "Claude Fallback Model", c.models?.claudeFallback)),
     S("Timeouts", F("timeouts.aiMs", "AI Timeout (ms)", c.timeouts?.aiMs, "number")),
     S("Vision", Select("vision.mode", "Mode", c.vision?.mode || "auto", [["auto", "Auto"], ["external", "External API"], ["native", "Native backend"], ["off", "Off"]]) + F("vision.baseUrl", "API Base URL", c.vision?.baseUrl, "text", "Default SiliconFlow") + F("vision.apiKey", "API Key", c.vision?.apiKey, "password", "Only for External API") + F("vision.model", "Model Name", c.vision?.model, "text", "Default Qwen/Qwen3-VL-32B-Instruct") + F("vision.detail", "Detail Level", c.vision?.detail) + F("vision.timeoutMs", "Timeout (ms)", c.vision?.timeoutMs, "number")),
     S("RAG", F("rag.knowledgeDir", "Knowledge Directory", c.rag?.knowledgeDir) + F("rag.collectionName", "Collection Name", c.rag?.collectionName) + F("rag.embedModel", "Embedding Model", c.rag?.embedModel) + F("rag.storeDir", "Vector Store Dir", c.rag?.storeDir) + F("rag.modelCacheDir", "Model Cache Dir", c.rag?.modelCacheDir) + F("rag.scoreMargin", "Score Margin", c.rag?.scoreMargin, "number") + F("rag.chunkMaxChars", "Chunk Max Chars", c.rag?.chunkMaxChars, "number") + F("rag.batchSize", "Batch Size", c.rag?.batchSize, "number") + F("rag.enabled", "Enabled (true/false)", c.rag?.enabled)),

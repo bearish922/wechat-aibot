@@ -4,8 +4,8 @@ import { uuid } from "./utils.mjs";
 import { log } from "./utils.mjs";
 import { DATA_DIR, dataPath, ensureDir } from "./paths.mjs";
 import { sessions, profileTemplates } from "./state.mjs";
-import { normalizeWorldState, normalizeWorldSession, normalizeWorldLastOutput, normalizeSceneState, normalizeLifeArcs, normalizeToolUsage, emptyToolUsage } from "./normalize.mjs";
-import { SCENELET_MODEL, CLAUDE_FAST_MODEL, runHiddenJson } from "./claude-runner.mjs";
+import { normalizeWorldState, normalizeWorldSession, normalizeWorldLastOutput, normalizeLifeArcs, getSceneConfig } from "./normalize.mjs";
+import { CLAUDE_MAIN_MODEL, CLAUDE_FAST_MODEL, runHiddenJson } from "./claude-runner.mjs";
 
 function sessionProfile(sess) {
   return sess?._profile ?? null;
@@ -17,7 +17,7 @@ function ensureWorldSession(sess) {
     sess._worldSession = {
       sid: uuid(),
       firstTurn: true,
-      model: SCENELET_MODEL,
+      model: CLAUDE_MAIN_MODEL,
       startedAt: nowIso,
       lastUsedAt: null,
       resetReason: "",
@@ -30,7 +30,7 @@ function ensureWorldSession(sess) {
       sess._worldSession.sid = uuid();
       sess._worldSession.firstTurn = true;
     }
-    if (!sess._worldSession.model) sess._worldSession.model = SCENELET_MODEL;
+    if (!sess._worldSession.model) sess._worldSession.model = CLAUDE_MAIN_MODEL;
   }
   return sess._worldSession;
 }
@@ -47,14 +47,13 @@ function normalizeRoleWorld(raw = {}, profile = "默认") {
     _worldSession: normalizeWorldSession(raw._worldSession || raw.worldSession) || {
       sid: uuid(),
       firstTurn: true,
-      model: SCENELET_MODEL,
+      model: CLAUDE_MAIN_MODEL,
       startedAt: nowIso,
       lastUsedAt: null,
       resetReason: "",
       lastUsage: null,
     },
     _worldLastOutput: normalizeWorldLastOutput(raw._worldLastOutput || raw.worldLastOutput),
-    _sceneState: normalizeSceneState(raw._sceneState || raw.sceneState),
     _lifeArcs: normalizeLifeArcs(raw._lifeArcs || raw.lifeArcs, { includeClosed: true }),
     _lastDailyShareSeedAt: raw._lastDailyShareSeedAt ? String(raw._lastDailyShareSeedAt) : null,
     _lastScheduleCheckAt: raw._lastScheduleCheckAt ? String(raw._lastScheduleCheckAt) : null,
@@ -68,24 +67,11 @@ function roleWorldSnapshot(world) {
     _worldState: normalizeWorldState(world?._worldState),
     _worldSession: normalizeWorldSession(world?._worldSession),
     _worldLastOutput: normalizeWorldLastOutput(world?._worldLastOutput),
-    _sceneState: normalizeSceneState(world?._sceneState),
     _lifeArcs: normalizeLifeArcs(world?._lifeArcs, { includeClosed: true }),
     _lastDailyShareSeedAt: world?._lastDailyShareSeedAt || null,
     _lastScheduleCheckAt: world?._lastScheduleCheckAt || null,
     updatedAt: world?.updatedAt || new Date().toISOString(),
   };
-}
-
-function mergeToolUsage(...items) {
-  const merged = emptyToolUsage();
-  for (const item of items.map(normalizeToolUsage).filter(Boolean)) {
-    merged.webSearch += item.webSearch;
-    merged.webFetch += item.webFetch;
-    for (const tool of item.tools) {
-      if (!merged.tools.includes(tool)) merged.tools.push(tool);
-    }
-  }
-  return merged;
 }
 
 function markToolUsage(usage, name, count = 1) {
@@ -97,8 +83,8 @@ function markToolUsage(usage, name, count = 1) {
   if (/web[_-]?fetch|webfetch/i.test(lower)) usage.webFetch += count;
 }
 
-function lifeArcPromptItems(sess) {
-  return normalizeLifeArcs(sess?._lifeArcs).map(arc => ({
+function lifeArcPromptItems(roleWorld) {
+  return normalizeLifeArcs(roleWorld?._lifeArcs).map(arc => ({
     id: arc.id,
     title: arc.title,
     summary: arc.summary,
@@ -172,14 +158,13 @@ function migrateRoleWorldsFromSessions() {
         if (!profile || !profileTemplates[profile]) continue;
         const key = roleWorldKey(profile);
         if (worlds.has(key)) continue;
-        const hasWorldData = sess._worldSession || sess._worldState || sess._worldLastOutput || sess._lifeArcs?.length || sess._sceneState;
+        const hasWorldData = sess._worldSession || sess._worldState || sess._worldLastOutput || sess._lifeArcs?.length;
         if (!hasWorldData) continue;
         worlds.set(key, normalizeRoleWorld({
           profile: key,
           _worldState: sess._worldState,
           _worldSession: sess._worldSession,
           _worldLastOutput: sess._worldLastOutput,
-          _sceneState: sess._sceneState,
           _lifeArcs: sess._lifeArcs,
           _lastDailyShareSeedAt: sess._lastDailyShareSeedAt,
           _lastScheduleCheckAt: sess._lastScheduleCheckAt,
@@ -196,7 +181,6 @@ export function syncRoleWorldToSession(sess, profile) {
   sess._worldSession = normalizeWorldSession(world._worldSession);
   sess._worldLastOutput = normalizeWorldLastOutput(world._worldLastOutput);
   sess._lifeArcs = normalizeLifeArcs(world._lifeArcs, { includeClosed: true });
-  if (world._sceneState) sess._sceneState = normalizeSceneState(world._sceneState);
   sess._lastDailyShareSeedAt = world._lastDailyShareSeedAt || sess._lastDailyShareSeedAt || null;
   sess._lastScheduleCheckAt = world._lastScheduleCheckAt || sess._lastScheduleCheckAt || null;
 }
@@ -220,18 +204,19 @@ export async function checkIntentDuplicateFlash(candidate, existingPending) {
   const result = await runHiddenJson(prompt, {
     label: "intent_dedup",
     bare: true,
-    model: CLAUDE_FAST_MODEL,
+    model: CLAUDE_MAIN_MODEL,
     timeoutMs: 30_000,
   });
-  return Boolean(result?.duplicate);
+  if (!result) return true;
+  return Boolean(result.duplicate);
 }
 
-export function applyLifeArcOps(sess, rawOps = []) {
-  if (!sess || !Array.isArray(rawOps) || !rawOps.length) return;
+export function applyLifeArcOps(roleWorld, rawOps = []) {
+  if (!roleWorld || !Array.isArray(rawOps) || !rawOps.length) return;
   const now = new Date();
   const nowIso = now.toISOString();
-  const defaultExpiresAt = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString();
-  const arcs = normalizeLifeArcs(sess._lifeArcs, { includeClosed: true });
+  const defaultExpiresAt = new Date(now.getTime() + getSceneConfig().scheduleDefaultExpiryFromNowMs).toISOString();
+  const arcs = normalizeLifeArcs(roleWorld._lifeArcs, { includeClosed: true });
   const findArc = (raw) => {
     const id = raw?.id ? String(raw.id) : "";
     if (id) {
@@ -259,7 +244,9 @@ export function applyLifeArcOps(sess, rawOps = []) {
 
     const expiresAt = raw.expires_at || raw.expiresAt ? String(raw.expires_at || raw.expiresAt) : (existing?.expiresAt || defaultExpiresAt);
     const lifeArcKinds = ["travel", "work", "school", "personal", "special_date"];
+    const lifeArcSubjects = ["role", "user", "shared"];
     const kind = lifeArcKinds.includes(raw.kind) ? raw.kind : (existing?.kind || null);
+    const subject = lifeArcSubjects.includes(raw.subject) ? raw.subject : (existing?.subject || null);
     const patch = {
       title: raw.title ? String(raw.title).trim().slice(0, 80) : existing?.title || "",
       summary: raw.summary ? String(raw.summary).trim().slice(0, 500) : existing?.summary || "",
@@ -267,12 +254,14 @@ export function applyLifeArcOps(sess, rawOps = []) {
       nextUsefulMoment: raw.next_useful_moment || raw.nextUsefulMoment ? String(raw.next_useful_moment || raw.nextUsefulMoment).trim().slice(0, 300) : existing?.nextUsefulMoment || "",
       source: raw.reason ? String(raw.reason).trim().slice(0, 300) : existing?.source || "",
       kind,
+      subject,
       timeStart: raw.time_start || raw.timeStart ? String(raw.time_start || raw.timeStart) : (existing?.timeStart || null),
       timeEnd: raw.time_end || raw.timeEnd ? String(raw.time_end || raw.timeEnd) : (existing?.timeEnd || null),
       expiresAt,
     };
     if (!patch.title && !patch.summary && !patch.currentState) continue;
     if (existing) {
+      if (existing.status === "closed") continue;
       Object.assign(existing, patch, { status: "active", updatedAt: nowIso });
     } else if (op === "create") {
       arcs.push({
@@ -287,16 +276,13 @@ export function applyLifeArcOps(sess, rawOps = []) {
     }
   }
 
-  sess._lifeArcs = normalizeLifeArcs(arcs, { includeClosed: true }).slice(-6);
+  roleWorld._lifeArcs = normalizeLifeArcs(arcs, { includeClosed: true }).slice(-6);
 }
 
 export {
   sessionProfile,
   ensureWorldSession,
   roleWorldKey,
-  normalizeRoleWorld,
-  roleWorldSnapshot,
-  mergeToolUsage,
   markToolUsage,
   lifeArcPromptItems,
 };

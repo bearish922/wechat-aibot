@@ -2,11 +2,10 @@ import fs from "node:fs";
 import { uuid, log } from "./utils.mjs";
 import { DATA_DIR, dataPath, ensureDir } from "./paths.mjs";
 import { sessions, profileTemplates } from "./state.mjs";
-import { sessionProfile, saveRoleWorlds } from "./world-state.mjs";
-import { normalizeFailedTurn, normalizeWorldState, normalizeWorldSession, normalizeWorldLastOutput, normalizeSceneState, normalizeLifeArcs, normalizeVisibleHistory, normalizeProactiveIntents } from "./normalize.mjs";
+import { saveRoleWorlds } from "./world-state.mjs";
+import { normalizeFailedTurn, normalizeWorldState, normalizeWorldSession, normalizeWorldLastOutput, normalizeLifeArcs, normalizeVisibleHistory, normalizeProactiveIntents } from "./normalize.mjs";
 
 const SESSION_FILE = dataPath("wechat-sessions.json");
-const SESSION_REF_FILE = dataPath("会话恢复指令.txt");
 const PROFILE_FILE = dataPath("wechat-profiles.json");
 
 export function loadProfiles() {
@@ -31,14 +30,11 @@ export function makeSession(name, profile = null) {
     _lastEnd: 0,
     sid: uuid(),
     _firstTurn: true,
-    _recentKaomoji: [],
-    _kaomojiTurn: 0,
     _profile: profile,
     _lastFailedTurn: null,
     _worldState: null,
     _worldSession: null,
     _worldLastOutput: null,
-    _sceneState: null,
     _lifeArcs: [],
     _visibleHistory: [],
     _proactiveIntents: [],
@@ -61,14 +57,11 @@ export function hydrateSession(ai, raw = {}) {
     queue: [],
     _closing: false,
     _lastEnd: 0,
-    _recentKaomoji: raw._recentKaomoji || [],
-    _kaomojiTurn: raw._kaomojiTurn || 0,
     _profile: raw._profile ?? null,
     _lastFailedTurn: normalizeFailedTurn(raw._lastFailedTurn),
     _worldState: normalizeWorldState(raw._worldState),
     _worldSession: normalizeWorldSession(raw._worldSession),
     _worldLastOutput: normalizeWorldLastOutput(raw._worldLastOutput),
-    _sceneState: normalizeSceneState(raw._sceneState),
     _lifeArcs: normalizeLifeArcs(raw._lifeArcs, { includeClosed: true }),
     _visibleHistory: normalizeVisibleHistory(raw._visibleHistory),
     _proactiveIntents: normalizeProactiveIntents(raw._proactiveIntents),
@@ -94,14 +87,11 @@ export function saveSessions() {
           name: s.name,
           sid: s.sid,
           _firstTurn: s._firstTurn,
-          _recentKaomoji: s._recentKaomoji || [],
-          _kaomojiTurn: s._kaomojiTurn || 0,
           _profile: s._profile ?? null,
           _lastFailedTurn: normalizeFailedTurn(s._lastFailedTurn),
           _worldState: normalizeWorldState(s._worldState),
           _worldSession: normalizeWorldSession(s._worldSession),
           _worldLastOutput: normalizeWorldLastOutput(s._worldLastOutput),
-          _sceneState: normalizeSceneState(s._sceneState),
           _lifeArcs: normalizeLifeArcs(s._lifeArcs, { includeClosed: true }),
           _visibleHistory: normalizeVisibleHistory(s._visibleHistory),
           _proactiveIntents: normalizeProactiveIntents(s._proactiveIntents),
@@ -118,30 +108,6 @@ export function saveSessions() {
   }
   fs.writeFileSync(SESSION_FILE, JSON.stringify(data, null, 2));
   saveRoleWorlds();
-
-  // Human-readable resume reference file
-  const lines = [];
-  lines.push(`# WeChat AI Bot 会话恢复指令`);
-  lines.push(`# 更新: ${new Date().toLocaleString("zh-CN")}`);
-  lines.push("");
-  for (const [ai, map] of Object.entries(sessions)) {
-    const aiLabel = ai === "cc" ? "Claude Code" : "Codex";
-    lines.push(`## ${aiLabel}`);
-    for (const [userId, u] of map) {
-      for (const s of u.list) {
-        const active = s.id === u.activeId ? " [当前]" : "";
-        lines.push(`  ${s.name}${active}`);
-        lines.push(`    角色: ${sessionProfile(s) || "默认"}`);
-        if (ai === "cc") {
-          lines.push(`    claude --resume ${s.sid}`);
-        } else {
-          lines.push(`    codex resume ${s.sid}`);
-        }
-        lines.push("");
-      }
-    }
-  }
-  fs.writeFileSync(SESSION_REF_FILE, lines.join("\n"), "utf-8");
 }
 
 export function loadSessions() {

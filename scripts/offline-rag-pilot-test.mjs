@@ -21,18 +21,6 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
-function shouldSkipRag(userMessage) {
-  const q = String(userMessage || "").trim().toLowerCase();
-  if (!q) return true;
-  const casual = [
-    /^(早上好|早安|早呀|早啊|早|上午好)[哦呀啊啦嘛~～!！。,.，\s]*$/i,
-    /^(晚上好|晚安|午安|下午好)[哦呀啊啦嘛~～!！。,.，\s]*$/i,
-    /^(你好|您好|在吗|在不在|hello|hi|hey)[哦呀啊啦嘛~～!！。,.，\s]*$/i,
-    /^(哈哈+|hhh+|嘿嘿+|嗯+|哦+|啊+)[哦呀啊啦嘛~～!！。,.，\s]*$/i,
-  ];
-  return q.length <= 24 && casual.some(pattern => pattern.test(q));
-}
-
 function shouldUseRoleplayRag(userMessage) {
   const text = String(userMessage || "").trim();
   if (!text) return false;
@@ -46,7 +34,6 @@ function shouldUseRoleplayRag(userMessage) {
 }
 
 function shouldUseRag(userMessage) {
-  if (shouldSkipRag(userMessage)) return false;
   return shouldUseRoleplayRag(userMessage);
 }
 
@@ -181,7 +168,7 @@ function runModelSample({ profiles, config, pinnedRules, item }) {
   const result = spawnSync(claude, [
     "-p",
     "--output-format", "json",
-    "--model", config.models?.scenelet || "deepseek-v4-pro[1m]",
+    "--model", config.models?.claudeMain || "deepseek-v4-pro[1m]",
   ], {
     cwd: ROOT,
     input: prompt,

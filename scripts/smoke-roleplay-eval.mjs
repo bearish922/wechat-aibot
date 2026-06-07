@@ -4,8 +4,7 @@ import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadPrompts, getChatStyle, expressionCapabilityPrompt, formatLocalChatReality } from "../app/lib/reply.mjs";
-import { renderMemoryPrompt } from "../app/lib/memory.mjs";
-import { shouldSkipRag } from "../app/lib/rag.mjs";
+import { memoryItemsText } from "../app/lib/memory.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PROFILE = "白鹭千圣";
@@ -51,7 +50,7 @@ function runClaudeJson(prompt, { label, config, tools = "", model = "" }) {
     "--permission-mode", "bypassPermissions",
   ];
   if (tools) args.push("--tools", tools);
-  args.push("--model", model || config.models?.scenelet || "deepseek-v4-pro[1m]");
+  args.push("--model", model || config.models?.claudeMain || "deepseek-v4-pro[1m]");
   const started = Date.now();
   const result = spawnSync(claude, args, {
     cwd: config.paths?.workDir || ROOT,
@@ -104,7 +103,6 @@ function safeRegexTest(pattern, text) {
 
 function shouldUseRagForTurn(userMessage, profile, profiles, prompts) {
   if (!profile || profile === "默认") return false;
-  if (shouldSkipRag(userMessage)) return false;
   const otherProfile = Object.keys(profiles.templates || {}).some(name => name !== "默认" && name !== profile && userMessage.includes(name));
   if (otherProfile) return true;
   const kw = prompts.ragKeywords || {};
@@ -454,7 +452,12 @@ async function main() {
   const profiles = readJson(PROFILE_PATH);
   const prompts = loadPrompts();
   const history = readJson(HISTORY_PATH).events || [];
-  const memoryPrompt = renderMemoryPrompt(USER_ID, { profile: PROFILE });
+  const memoryPrompt = (() => {
+    const items = memoryItemsText(USER_ID, { profile: PROFILE });
+    if (!items) return "";
+    const instruction = prompts.memoryContextInstruction || "";
+    return instruction ? `${instruction}\n\n${items}` : items;
+  })();
   const turns = pairTurns(history);
   const singles = pickSingleCases(turns);
   const segments = pickSegments(history);
@@ -481,8 +484,8 @@ async function main() {
     const visibleContext = recentVisibleContext(history, item.eventIndex, prompts.visibleContextTurns || 8);
     const rag = runRag(item.text, PROFILE, config, prompts, profiles);
     const scenePrompt = buildSceneletPrompt({ item, profiles, prompts, memoryPrompt, carriedSceneState, visibleContext, now });
-    const sceneModel = config.models?.scenelet || "deepseek-v4-pro[1m]";
-    const mainModel = config.models?.claudeMain || config.models?.claudeFast || config.models?.scenelet || "deepseek-v4-pro[1m]";
+    const sceneModel = config.models?.claudeMain || "deepseek-v4-pro[1m]";
+    const mainModel = config.models?.claudeMain || config.models?.claudeFast || "deepseek-v4-pro[1m]";
     const sceneCall = runClaudeJson(scenePrompt, { label: `${label}:scenelet`, config, tools: "WebSearch,WebFetch", model: sceneModel });
     const scenelet = normalizeScenelet(sceneCall.parsed);
     const mainPrompt = buildMainPrompt({ item, profiles, prompts, memoryPrompt, rag, scenelet, carriedSceneState, now });
@@ -540,7 +543,7 @@ async function main() {
       now: cp.now,
       sentToday,
     });
-    const seedModel = config.models?.scenelet || "deepseek-v4-pro[1m]";
+    const seedModel = config.models?.claudeMain || "deepseek-v4-pro[1m]";
     const call = runClaudeJson(prompt, { label: `daily_share_seed_${i + 1}`, config, tools: "WebSearch,WebFetch", model: seedModel });
     const parsed = call.parsed || {};
     if (parsed.should_create === true) sentToday++;
