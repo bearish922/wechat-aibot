@@ -1,10 +1,19 @@
 import crypto from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { loadPrompts } from "./reply.mjs";
 import { normalizeMemoryCategory } from "./memory.mjs";
 import { CLAUDE_MAIN_MODEL } from "./claude-runner.mjs";
+import { dataPath } from "./paths.mjs";
+
+function loadConfig() {
+  const configPath = dataPath("config.json");
+  if (!existsSync(configPath)) return {};
+  try { return JSON.parse(readFileSync(configPath, "utf-8")); } catch { return {}; }
+}
 
 function getSceneConfig() {
   const p = loadPrompts();
+  const c = loadConfig();
   return {
     visibleContextTurns: p.visibleContextTurns || 8,
     proactiveCheckIntervalMs: p.proactiveCheckIntervalMs || 20000,
@@ -34,9 +43,8 @@ function getSceneConfig() {
     scheduleDefaultExpiryFromNowMs: p.scheduleDefaultExpiryFromNowMs || 259200000,
     memoryCandidateTimeoutMs: p.memoryCandidateTimeoutMs || 45000,
     memoryMergeTimeoutMs: p.memoryMergeTimeoutMs || 90000,
-    sceneContextMaxLifeArcs: p.sceneContextMaxLifeArcs || 3,
-    chunkSendDelayMs: p.chunkSendDelayMs || 450,
-    maxCancelReasonLength: p.maxCancelReasonLength || 500,
+    chunkSendDelayMs: c.send?.chunkSendDelayMs ?? p.chunkSendDelayMs ?? 450,
+    maxCancelReasonLength: c.send?.maxCancelReasonLength ?? p.maxCancelReasonLength ?? 500,
   };
 }
 

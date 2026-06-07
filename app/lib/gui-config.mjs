@@ -39,6 +39,8 @@ const CONFIG_FIELDS = {
   "rag.resultMaxChars": "number",
   "rag.batchSize": "number",
   "logs.retentionDays": "number",
+  "send.chunkSendDelayMs": "number",
+  "send.maxCancelReasonLength": "number",
 };
 
 function readJsonFile(filePath) {

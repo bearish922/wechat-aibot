@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.5.1 — 模块化分拆，清理代码库 (2026-06-07)
+- GUI 全面实时保存：所有参数修改即保存，移除底部"全部保存"按钮及相关 draft/save-bar 代码
+- 重构 Prompts 页为 3 阶段 9 环节：Profile、表达能力、长期记忆、Hidden-world 输出、RAG、聊天风格及现实、用户消息（含 Vision Caption）、模型调用与输出、Memory Writer
+- 重构 Hidden World 页为 4 阶段 13 环节：System Prompt / 动态上下文 / 输出 / 其他独立模块
+- 移除全部 pipeline 灰色注释文字和分隔箭头，仅在关键环节保留必要说明
+- life_arc 移除 3 条上限，主回复接收全部活跃 life_arc 简述
+- Prompts 页 HW 输出环节新增 Inner Scenelet 正文标签和 HW 配置页快捷按钮
+- Memory 页改为 4 列网格布局，每页 12 条，新增分页控件
+- Proactive 页新增 Closed life_arc 折叠分组
+- HW 页 Reset 编辑器仅显示活跃 life_arc
+- 删除 HW 页 sceneContextMaxLifeArcs 参数及相关代码
+- chunkSendDelayMs / maxCancelReasonLength 迁移至 Config 页 Send 区块
+- 修复 HW 页数字参数双重 toS() 换算 bug
+- 修复 prompts.json 中 13 个 HW 参数默认值丢失问题
+- 清理 save bar、promptDrafts、pipeline-arrow/summary/meta 等 CSS 残留
+
 ## v2.5.0 — Searchable Scenelet, Prompt Pipeline & Voice ASR (2026-06-05)
 - Switch production scenelet generation to the **non-bare searchable scenelet** architecture by default: `inner_scenelet` hidden calls can use `WebSearch/WebFetch` for public facts, while proactive and daily-share hidden checks remain lightweight bare JSON calls.
 - Add `scene.sceneletBare` config switch so users can revert scenelet calls to bare mode without changing code.

@@ -10,14 +10,9 @@ function uniqueIntents(intents = []) {
   return [...byId.values()];
 }
 
-function activeLifeArcs(arcs = []) {
-  const now = Date.now();
+function allLifeArcs(arcs = []) {
   return arcs
-    .filter(a => a?.id && (a.status || "active") === "active")
-    .filter(a => {
-      const expires = Date.parse(a.expiresAt || "");
-      return !Number.isFinite(expires) || expires >= now;
-    })
+    .filter(a => a?.id)
     .map(a => ({
       id: a.id,
       title: a.title || "",
@@ -25,6 +20,7 @@ function activeLifeArcs(arcs = []) {
       currentState: a.currentState || "",
       nextUsefulMoment: a.nextUsefulMoment || "",
       source: a.source || "",
+      status: a.status || "active",
       kind: a.kind || null,
       timeStart: a.timeStart || null,
       timeEnd: a.timeEnd || null,
@@ -41,7 +37,7 @@ export function registerProactiveRoutes() {
       for (const [, u] of map) {
         for (const s of u.list) {
           const intents = uniqueIntents(s._proactiveIntents || []);
-          const lifeArcs = activeLifeArcs(s._lifeArcs || []);
+          const lifeArcs = allLifeArcs(s._lifeArcs || []);
           if (!intents.length && !lifeArcs.length) continue;
           result.push({
             sessionId: s.id,

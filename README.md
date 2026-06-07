@@ -1,6 +1,6 @@
 # WeChat AI Bot
 
-> v2.5.0 — Windows 本机运行的微信 AI 助手
+> v2.5.1 — Windows 本机运行的微信 AI 助手
 
 WeChat AI Bot 监听微信消息，将文字、图片、语音、文件、视频交给 Claude Code 或 Codex 回复。它支持多线程会话、角色扮演、本地知识库、长期记忆、主动回复、可编辑 prompt 管线，以及本地 GUI。
 

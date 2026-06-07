@@ -87,11 +87,11 @@ export function buildSceneContextBlock(sess, sceneletResult) {
     kind: arc.kind,
     time_start: arc.time_start,
     time_end: arc.time_end,
-  })).slice(-getSceneConfig().sceneContextMaxLifeArcs) : [];
+  })) : [];
   const parts = [
     lifeArcSummary.length ? [
-      "【短期 life_arc 简述】",
-      "以下是 hidden-world 已确认的短期生活线摘要，只作为时间框架和自然接话参考，不要主动复述 JSON。",
+      "【life_arc 简述】",
+      "以下是 hidden-world 已确认的全部生活线摘要，只作为时间框架和自然接话参考，不要主动复述 JSON。",
       JSON.stringify(lifeArcSummary, null, 2),
     ].join("\n") : "",
     sceneletResult?.innerScenelet ? [

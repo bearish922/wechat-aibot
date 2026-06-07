@@ -1118,6 +1118,10 @@ pre {
   border-bottom: 1px solid var(--line);
 }
 
+.proactive-group-body .life-arc-list {
+  grid-template-columns: 1fr;
+}
+
 .life-arc-item {
   border: 1px solid var(--line);
   border-left: 3px solid #d97706;
@@ -1363,6 +1367,7 @@ pre {
 .proactive-group-dot.sent    { background: var(--success); }
 .proactive-group-dot.done    { background: #9aa4b2; }
 .proactive-group-dot.pending { background: var(--primary); }
+.proactive-group-dot.closed  { background: #64748b; }
 
 .proactive-group-count {
   display: inline-flex;
@@ -1480,35 +1485,7 @@ pre {
   min-height: auto;
 }
 
-.pipeline-summary {
-  display: grid;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1.55;
-}
 
-.pipeline-summary code {
-  font-family: Consolas, "Cascadia Mono", monospace;
-  color: var(--text);
-  background: var(--surface-soft);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 1px 5px;
-}
-
-.pipeline-arrow-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  padding: 14px 20px;
-  margin: 8px 0;
-  background: var(--surface-soft);
-  border-radius: 6px;
-  border: 1px solid var(--line);
-  text-align: center;
-}
 
 .pipeline-left {
   padding: 12px 0;
@@ -1537,11 +1514,6 @@ pre {
   white-space: nowrap;
 }
 
-.pipeline-field-desc {
-  font-size: 14px;
-  color: var(--muted);
-  line-height: 1.5;
-}
 
 .pipeline-preview {
   display: flex;
@@ -1570,12 +1542,6 @@ pre {
   font-weight: 650;
 }
 
-.pipeline-meta-text {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1.6;
-}
 
 .pipeline-embedded-table {
   margin-top: 2px;
@@ -1641,20 +1607,7 @@ pre {
   color: var(--muted);
 }
 
-.pipeline-arrow-down {
-  color: var(--muted);
-  font-size: 17px;
-}
 
-.pipeline-arrow-text {
-  display: block;
-  font-size: 14px;
-  color: var(--muted);
-  font-weight: 650;
-  letter-spacing: 0;
-  margin-top: 4px;
-  line-height: 1.5;
-}
 
 .pipeline-num-group {
   display: flex;
@@ -1712,38 +1665,11 @@ pre {
   gap: 4px;
 }
 
-.prompts-savebar {
-  position: fixed;
-  bottom: 0;
-  left: 236px;
-  right: 0;
-  z-index: 50;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  padding: 14px 20px;
-  background: #111827;
-  color: #eef4ff;
-  font-size: 14px;
-  font-weight: 700;
-  box-shadow: 0 -4px 20px rgba(0,0,0,0.22);
-  animation: slide-up 0.2s ease-out;
-}
-
-.prompts-savebar .btn {
-  min-height: 34px;
-  padding: 7px 20px;
-}
-
 @media (max-width: 900px) {
   .pipeline-row {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .pipeline-field-desc {
-    display: none;
-  }
 
   .prompts-savebar {
     left: 0;
@@ -1932,10 +1858,6 @@ p {
   gap: 10px;
   flex-wrap: wrap;
   margin-bottom: 18px;
-  padding: 14px 16px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface-soft);
 }
 
 .memory-toolbar select {
@@ -2002,7 +1924,7 @@ p {
 
 .memory-section-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  grid-template-columns: repeat(4, 1fr);
   gap: 10px;
 }
 
@@ -2046,6 +1968,12 @@ p {
 .memory-card-category.trait      { background: #f3eeff; color: #6d3fd8; }
 .memory-card-category.preference { background: #e6f4ff; color: #0d74b5; }
 .memory-card-category.fact       { background: #e2f8ef; color: #0b7a52; }
+
+.memory-card-role {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: auto;
+}
 
 .memory-card-text {
   color: #1a2740;
