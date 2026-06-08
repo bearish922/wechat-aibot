@@ -41,12 +41,12 @@ import { getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendin
 import { uuid, sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost } from "./lib/wechat.mjs";
 import { memoryItemsText, memoryListText, normalizeMemoryCategory } from "./lib/memory.mjs";
-import { getSceneConfig, normalizeVisibleHistory, normalizeToolUsage, emptyToolUsage, normalizeWorldState, sanitizeVisibleReplyText } from "./lib/normalize.mjs";
+import { getSceneConfig, normalizeVisibleHistory, normalizeToolUsage, emptyToolUsage, normalizeWorldState, sanitizeVisibleReplyText, normalizeLifeArcs } from "./lib/normalize.mjs";
 import { envWithProxy, commandExists, runClaudeStream, runCodexStream, toolUsageFromUsage, killProc, CLAUDE, CODEX, LOGS_DIR } from "./lib/claude-runner.mjs";
 import { sessionProfile, markToolUsage, saveRoleWorlds, loadRoleWorlds, getSceneMemory, setSceneMemory, getRoleWorld, ensureWorldSession, syncRoleWorldToSession } from "./lib/world-state.mjs";
 import { loadProfiles, makeSession, saveSessions, loadSessions } from "./lib/session-store.mjs";
 import { buildTurnBody, appendVisibleHistory, getSceneMemorySystemBlock } from "./lib/prompts.mjs";
-import { generateSceneletForTurn, buildSceneContextBlock, addFollowUpCandidates, recordChatHistory, sendFinalAssistantMessage, checkProactiveIntents, updateUserMemoryFromTurn, generateSceneMemory, batchUpdateMemory, runScheduleExtractor, replyPrefix } from "./lib/turn.mjs";
+import { generateSceneletForTurn, buildSceneContextBlock, addFollowUpCandidates, generateFollowUpCandidates, recordChatHistory, sendFinalAssistantMessage, checkProactiveIntents, updateUserMemoryFromTurn, generateSceneMemory, batchUpdateMemory, runScheduleExtractor, replyPrefix } from "./lib/turn.mjs";
 const USER_HOME = process.env.USERPROFILE || process.env.HOME || process.cwd();
 const LONG_POLL_TIMEOUT_MS = 35_000;
 const roleWorlds = new Map();
@@ -276,6 +276,17 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
   if (memoryPrompt) writeTxtLog("MEMORY SNAPSHOT", memoryPrompt);
   if (sceneletResult?.innerScenelet) writeTxtLog("INNER SCENELET", sceneletResult.innerScenelet);
 
+  let followUpPromise = null;
+  if (isProfileChat && sceneletResult?.innerScenelet) {
+    followUpPromise = generateFollowUpCandidates({
+      innerScenelet: sceneletResult.innerScenelet,
+      worldState: normalizeWorldState(roleWorld._worldState),
+      profile: turnProfile,
+      userBody: body,
+      sess: styleState,
+    }).catch(e => { log("⚠️", `[${sessionName}] follow_up gen failed: ${e.message}`); return []; });
+  }
+
   let turnSucceeded = false;
   let assistantFullText = "";
   let toolUsage = emptyToolUsage();
@@ -371,8 +382,13 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       styleState._firstTurn = false;
       if (lastUsage) styleState._lastUsage = lastUsage;
 
-      if (sceneletResult?.followUpCandidates?.length && isProfileChat) {
-        await addFollowUpCandidates(styleState, sceneletResult, body);
+      if (followUpPromise) {
+        try {
+          const followUpCandidates = await followUpPromise;
+          if (followUpCandidates.length) {
+            await addFollowUpCandidates(styleState, { followUpCandidates }, body);
+          }
+        } catch (e) { log("⚠️", `[${sessionName}] follow_up gen: ${e.message}`); }
       }
 
       const userAt = new Date().toISOString();
@@ -385,7 +401,8 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
 
       if (isProfileChat && assistantFullText) {
         try {
-          const newCandidates = await runScheduleExtractor({ userBody: body, scenelet: sceneletResult?.innerScenelet || "", profile: turnProfile });
+          const activeSchedules = normalizeLifeArcs(roleWorld._lifeArcs).filter(a => a.status === "active" && a.kind);
+          const newCandidates = await runScheduleExtractor({ userBody: body, scenelet: sceneletResult?.innerScenelet || "", profile: turnProfile, activeSchedules });
           if (newCandidates.length) {
             const existing = roleWorld._pendingScheduleCandidates || [];
             const existingTitles = new Set(existing.map(c => c.title));

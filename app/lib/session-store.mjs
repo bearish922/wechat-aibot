@@ -114,7 +114,12 @@ export function saveSessions() {
     }
     data[ai] = aiData;
   }
-  fs.writeFileSync(SESSION_FILE, JSON.stringify(data, null, 2));
+  const tmp = SESSION_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
+  if (fs.existsSync(SESSION_FILE)) {
+    fs.copyFileSync(SESSION_FILE, SESSION_FILE.replace(/\.json$/, ".bak.json"));
+  }
+  fs.renameSync(tmp, SESSION_FILE);
   saveRoleWorlds();
 }
 

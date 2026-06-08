@@ -566,7 +566,7 @@ function renderNumberControl(key, label, value, min, max, unit, options = {}) {
 function renderTextPreview(key, value) {
   const isOpen = promptsEditing[key];
   if (isOpen) {
-    const h = key === 'sceneletInstructions' || key === 'proactiveInstructions' || key === 'memoryCandidateInstructions' || key === 'memoryWriterInstructions' || key === 'scheduleCreatorInstructions' ? '220px' : '110px';
+    const h = key === 'sceneletInstructions' || key === 'proactiveInstructions' || key === 'memoryCandidateInstructions' || key === 'memoryWriterInstructions' || key === 'scheduleCreatorInstructions' || key === 'followUpGenerationPrompt' ? '220px' : '110px';
     return `<textarea id="prompt_${key}" class="prompts-editable prompts-textarea" data-key="${key}" style="min-height:${h}">${escHtml(value || '')}</textarea>
       <div class="editor-actions" style="margin-top:4px">
         <button class="btn btn-primary" data-action="save-text" data-key="${key}">保存</button>
@@ -722,7 +722,7 @@ function renderWorldPipeline(role, p) {
         ${renderPipelineStep({
           n: 2,
           title: "Scenelet 指令",
-          desc: "驱动 inner_scenelet 叙事 + world_state 更新 + follow_up 候选。daily_share 已解耦给 Seed，schedule 已解耦给 Extractor。",
+          desc: "驱动 inner_scenelet 叙事 + world_state 更新。follow_up 已拆分为并行独立调用，daily_share 已解耦给 Seed，schedule 已解耦给 Extractor。",
           body: `
             <label class="pipeline-sub-label">Scenelet 生成指令</label>
             ${renderTextPreview("sceneletInstructions", p.sceneletInstructions)}
@@ -798,7 +798,9 @@ function renderWorldPipeline(role, p) {
           title: "Follow-up Candidates",
           desc: "",
           body: `
-            <p style="color:var(--muted);font-size:13px;margin:0 0 8px">每轮从对话中生长出的主动意图候选（如面试前关心、未完成话题的自然延续等）。daily_share 已解耦给独立 Seed 模块，schedule 已解耦给 Extractor 模块。</p>
+            <p style="color:var(--muted);font-size:13px;margin:0 0 8px">每轮独立并行调用，基于 inner_scenelet 和 world_state 生成主动意图候选。daily_share 已解耦给独立 Seed 模块，schedule 已解耦给 Extractor 模块。</p>
+            <label class="pipeline-sub-label">Follow-up 生成 Prompt</label>
+            ${renderTextPreview("followUpGenerationPrompt", p.followUpGenerationPrompt)}
             ${renderControlGrid([
               renderNumberControl("hiddenWorldMaxPendingIntents", "最大待处理意图展示", p.hiddenWorldMaxPendingIntents || 8, 1, 20, "条"),
               renderNumberControl("maxFollowUpCandidatesPerTurn", "每轮最大候选数", p.maxFollowUpCandidatesPerTurn || 3, 0, 10, "条"),

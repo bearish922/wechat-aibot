@@ -46,6 +46,7 @@ function getSceneConfig() {
     memoryMergeTimeoutMs: p.memoryMergeTimeoutMs || 90000,
     chunkSendDelayMs: c.send?.chunkSendDelayMs ?? p.chunkSendDelayMs ?? 450,
     maxCancelReasonLength: c.send?.maxCancelReasonLength ?? p.maxCancelReasonLength ?? 500,
+    stateStaleThresholdMs: p.stateStaleThresholdMs ?? 1800000,
   };
 }
 

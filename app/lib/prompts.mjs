@@ -135,6 +135,8 @@ function buildHiddenWorldSystemPrompt(profile, sceneMemory = "") {
       : "",
     "",
     cfg.sceneletInstructions,
+    "",
+    cfg.hiddenWorldChatStyle || "",
   );
   return parts.filter(Boolean).join("\n");
 }

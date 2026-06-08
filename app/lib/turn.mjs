@@ -126,6 +126,53 @@ export async function addFollowUpCandidates(sess, sceneletResult, userBody) {
   sess._proactiveIntents = normalizeProactiveIntents(existing);
 }
 
+export async function generateFollowUpCandidates({ innerScenelet, worldState, profile, userBody, sess }) {
+  const prompt = loadPrompts().followUpGenerationPrompt;
+  if (!prompt || !innerScenelet) return [];
+
+  const roleWorld = getRoleWorld(profile);
+  const pendingIntents = normalizeProactiveIntents(sess._proactiveIntents || []).filter(i => i.status === "pending");
+
+  const now = new Date();
+  const input = [
+    prompt,
+    "",
+    "角色profile：", profile,
+    "",
+    "当前时间：",
+    JSON.stringify({
+      current_time: now.toISOString(),
+      time_of_day: now.getHours() < 6 ? "凌晨" : now.getHours() < 9 ? "清晨" : now.getHours() < 12 ? "上午" : now.getHours() < 14 ? "中午" : now.getHours() < 17 ? "下午" : now.getHours() < 20 ? "傍晚" : now.getHours() < 23 ? "晚上" : "深夜",
+      month: now.getMonth() + 1,
+      season: ["冬","冬","春","春","春","夏","夏","夏","秋","秋","秋","冬"][now.getMonth()],
+    }, null, 2),
+    "",
+    "当前 world_state：",
+    JSON.stringify(worldState || roleWorld._worldState || {}, null, 2),
+    "",
+    "本轮 inner_scenelet：",
+    innerScenelet,
+    "",
+    "已有的 pending follow_up_candidates（避免重复）：",
+    pendingIntents.length
+      ? pendingIntents.map(i => `- [${i.kind}] ${i.messageIntent || ""} scheduled:${i.scheduledAt}`).join("\n")
+      : "(无)",
+    "",
+    "用户本轮消息：",
+    userBody || "",
+  ].join("\n");
+
+  const raw = await runHiddenJson(input, {
+    label: "follow_up_gen",
+    bare: true,
+    model: CLAUDE_MAIN_MODEL,
+    timeoutMs: 45000,
+  });
+
+  if (!raw || !Array.isArray(raw.candidates)) return [];
+  return raw.candidates;
+}
+
 export function recordChatHistory({ ai, userId, sess, role, kind = "chat", text, scenelet = "", sceneletStatus = "", sceneletError = "", proactiveIntentId = "", toolUsage = null, ragUsage = null, timestamp = new Date().toISOString() }) {
   if (!sess || (!text?.trim() && !scenelet?.trim())) return;
   appendChatEvent({
@@ -201,6 +248,62 @@ async function evaluateProactiveIntent({ ai, userId, sess, profile, intent }) {
   return normalizeProactiveDecision(raw);
 }
 
+async function advanceWorldState({ roleWorld, profile, now }) {
+  const cfg = getSceneConfig();
+  const prompt = loadPrompts().timeAdvancementPrompt;
+  if (!prompt) return false;
+
+  const nowIso = now.toISOString();
+  const activeArcs = normalizeLifeArcs(roleWorld._lifeArcs).filter(a => a.status === "active");
+  const state = roleWorld._worldState || {};
+
+  const input = [
+    prompt,
+    "",
+    "当前时间：",
+    JSON.stringify({
+      current_time: nowIso,
+      time_of_day: now.getHours() < 6 ? "凌晨" : now.getHours() < 9 ? "清晨" : now.getHours() < 12 ? "上午" : now.getHours() < 14 ? "中午" : now.getHours() < 17 ? "下午" : now.getHours() < 20 ? "傍晚" : now.getHours() < 23 ? "晚上" : "深夜",
+      month: now.getMonth() + 1,
+      season: ["冬","冬","春","春","春","夏","夏","夏","秋","秋","秋","冬"][now.getMonth()],
+    }, null, 2),
+    "",
+    "上次记录的状态：",
+    JSON.stringify({
+      location: state.location || "未知",
+      activity: state.activity || "未知",
+      awake_state: state.awakeState || "awake",
+      current_plan: state.currentPlan || "",
+      last_world_event_at: state.lastWorldEventAt || null,
+    }, null, 2),
+    "",
+    "活跃日程 (life_arcs)：",
+    activeArcs.length
+      ? activeArcs.map(a => `- [${a.kind}] ${a.title} (${a.timeStart || "?"} ~ ${a.timeEnd || "?"}) ${a.summary || ""}`).join("\n")
+      : "(无)",
+    "",
+    "角色profile：", profile,
+  ].join("\n");
+
+  const raw = await runHiddenJson(input, {
+    label: "time_advance",
+    bare: true,
+    model: CLAUDE_MAIN_MODEL,
+    timeoutMs: 30000,
+  });
+
+  if (!raw || typeof raw !== "object") return false;
+
+  if (raw.location) roleWorld._worldState.location = String(raw.location);
+  if (raw.activity) roleWorld._worldState.activity = String(raw.activity);
+  if (raw.awake_state) roleWorld._worldState.awakeState = String(raw.awake_state);
+  if (raw.current_plan) roleWorld._worldState.currentPlan = String(raw.current_plan);
+  roleWorld._worldState.lastWorldEventAt = nowIso;
+  roleWorld._worldState.updatedAt = nowIso;
+  saveRoleWorlds();
+  return true;
+}
+
 async function runDailyShareSeed({ sess, profile }) {
   const cfg = getSceneConfig();
   const roleWorld = getRoleWorld(profile);
@@ -265,6 +368,12 @@ async function maybeSeedDailyShareIntent({ ai, userId, sess, profile }) {
   const nowIso = new Date(nowMs).toISOString();
   roleWorld._lastDailyShareSeedAt = nowIso;
   sess._lastDailyShareSeedAt = nowIso;
+
+  const lastEventMs = Date.parse(roleWorld._worldState?.lastWorldEventAt || "");
+  if (!Number.isFinite(lastEventMs) || nowMs - lastEventMs >= (cfg.stateStaleThresholdMs || 1800000)) {
+    await advanceWorldState({ roleWorld, profile, now: new Date(nowMs) }).catch(() => {});
+  }
+
   saveRoleWorlds();
 
   const intent = await runDailyShareSeed({ sess, profile });
@@ -273,9 +382,15 @@ async function maybeSeedDailyShareIntent({ ai, userId, sess, profile }) {
 
 
 
-export async function runScheduleExtractor({ userBody, scenelet, profile }) {
+export async function runScheduleExtractor({ userBody, scenelet, profile, activeSchedules }) {
+  const arcs = Array.isArray(activeSchedules) ? activeSchedules.filter(a => a.status === "active" && a.kind) : [];
   const prompt = [
     loadPrompts().scheduleExtractorPrompt || "",
+    "",
+    "当前活跃 life_arcs：",
+    arcs.length
+      ? arcs.map(a => `- [${a.kind}] ${a.title || ""} (id: ${a.id}) ${a.summary || ""}`).join("\n")
+      : "(无)",
     "",
     "本轮用户消息：",
     userBody || "",
