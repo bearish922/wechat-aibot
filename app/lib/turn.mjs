@@ -296,7 +296,7 @@ export async function runScheduleExtractor({ userBody, scenelet, profile }) {
   if (!raw || !Array.isArray(raw.candidates)) return [];
   return raw.candidates.filter(c => c && c.title);
 }
-async function maybeCreateScheduleEntry({ sess, profile }) {
+export async function maybeCreateScheduleEntry({ sess, profile }) {
   const cfg = getSceneConfig();
   const roleWorld = getRoleWorld(profile);
   const activeSchedules = normalizeLifeArcs(roleWorld._lifeArcs).filter(a => a.kind);
@@ -372,7 +372,8 @@ async function maybeCreateScheduleEntry({ sess, profile }) {
   }
 
   roleWorld.updatedAt = new Date().toISOString();
-  roleWorld._pendingScheduleCandidates = [];
+  const selIdx = Number(result.selected_index ?? -1);
+  roleWorld._pendingScheduleCandidates = (roleWorld._pendingScheduleCandidates || []).filter((_, i) => i !== selIdx);
   syncRoleWorldToSession(sess, profile);
   saveRoleWorlds();
   const opLabel = op === "close" ? "closed" : op === "update" ? "updated" : "created";
