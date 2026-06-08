@@ -43,22 +43,34 @@ function freshStore() {
   return { version: 2, users: {} };
 }
 
-export function loadMemoryStore() {
+const MEMORY_BAK_FILE = dataPath("wechat-memory.bak.json");
+
+function readStoreFrom(filePath) {
   try {
-    if (!fs.existsSync(MEMORY_FILE)) return freshStore();
-    const data = JSON.parse(fs.readFileSync(MEMORY_FILE, "utf-8"));
-    if (!data || typeof data !== "object") return freshStore();
+    if (!fs.existsSync(filePath)) return null;
+    const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    if (!data || typeof data !== "object") return null;
     if (!data.users || typeof data.users !== "object") data.users = {};
     data.version = 2;
     return data;
-  } catch {
-    return freshStore();
-  }
+  } catch { return null; }
+}
+
+export function loadMemoryStore() {
+  let store = readStoreFrom(MEMORY_FILE);
+  if (store) return store;
+  store = readStoreFrom(MEMORY_BAK_FILE);
+  return store ?? freshStore();
 }
 
 export function saveMemoryStore(store) {
   ensureDir(PROJECT_ROOT);
-  fs.writeFileSync(MEMORY_FILE, JSON.stringify(store, null, 2) + "\n", "utf-8");
+  const tmp = MEMORY_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(store, null, 2) + "\n", "utf-8");
+  if (fs.existsSync(MEMORY_FILE)) {
+    fs.copyFileSync(MEMORY_FILE, MEMORY_BAK_FILE);
+  }
+  fs.renameSync(tmp, MEMORY_FILE);
 }
 
 function roleItems(user, profile) {

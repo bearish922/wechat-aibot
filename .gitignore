@@ -8,6 +8,7 @@ data/wechat-sessions.json
 # Personal memory (auto-generated per-user data)
 wechat-memory.json
 data/wechat-memory.json
+data/wechat-memory.bak.json
 data/wechat-worlds.json
 data/wechat-worlds.backup.json
 
