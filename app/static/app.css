@@ -1111,15 +1111,11 @@ pre {
 }
 
 .life-arc-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--line);
-}
-
-.proactive-group-body .life-arc-list {
-  grid-template-columns: 1fr;
 }
 
 .life-arc-item {

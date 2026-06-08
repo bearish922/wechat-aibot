@@ -1505,17 +1505,17 @@ function renderLifeArcsEditor(arcs) {
         <span class="la-card-kind">${escHtml(a.kind || "")}</span>
         <span class="la-card-status">${a.status || "active"}</span>
       </div>
-      <div class="la-card-body">
-        <div class="form-grid">
-          <div class="form-group"><label>title</label><input id="la_${i}_title" value="${escAttr(a.title || "")}"></div>
-          <div class="form-group"><label>kind</label><select id="la_${i}_kind">${kinds.map(k => `<option value="${k}"${a.kind === k ? " selected" : ""}>${k}</option>`).join("")}</select></div>
-          <div class="form-group"><label>status</label><select id="la_${i}_status"><option value="active"${a.status !== "closed" ? " selected" : ""}>active</option><option value="closed"${a.status === "closed" ? " selected" : ""}>closed</option></select></div>
-          <div class="form-group"><label>timeStart</label><input id="la_${i}_ts" value="${escAttr(formatTime(a.timeStart))}" placeholder="ISO"></div>
-          <div class="form-group"><label>timeEnd</label><input id="la_${i}_te" value="${escAttr(formatTime(a.timeEnd))}" placeholder="ISO"></div>
-          <div class="form-group"><label>expiresAt</label><input id="la_${i}_exp" value="${escAttr(formatTime(a.expiresAt))}" placeholder="ISO"></div>
-        </div>
+      <div class="la-card-body" style="display:flex;flex-direction:column;gap:8px">
+        <div class="form-group"><label>title</label><input id="la_${i}_title" value="${escAttr(a.title || "")}"></div>
         <div class="form-group"><label>summary</label><textarea id="la_${i}_summary" class="snap-textarea" rows="2">${escHtml(a.summary || "")}</textarea></div>
         <div class="form-group"><label>progressNote</label><textarea id="la_${i}_state" class="snap-textarea" rows="2">${escHtml(a.progressNote || "")}</textarea></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <div class="form-group"><label>kind</label><select id="la_${i}_kind">${kinds.map(k => `<option value="${k}"${a.kind === k ? " selected" : ""}>${k}</option>`).join("")}</select></div>
+          <div class="form-group"><label>status</label><select id="la_${i}_status"><option value="active"${a.status !== "closed" ? " selected" : ""}>active</option><option value="closed"${a.status === "closed" ? " selected" : ""}>closed</option></select></div>
+          <div class="form-group"><label>timeStart</label><input id="la_${i}_ts" value="${escAttr(formatTime(a.timeStart))}" placeholder="ISO" style="width:180px"></div>
+          <div class="form-group"><label>timeEnd</label><input id="la_${i}_te" value="${escAttr(formatTime(a.timeEnd))}" placeholder="ISO" style="width:180px"></div>
+          <div class="form-group"><label>expiresAt</label><input id="la_${i}_exp" value="${escAttr(formatTime(a.expiresAt))}" placeholder="ISO" style="width:180px"></div>
+        </div>
         <div class="form-group"><label>id</label><input id="la_${i}_id" value="${escAttr(a.id || "")}" readonly style="opacity:0.6"></div>
       </div>
     </div>
@@ -2023,20 +2023,21 @@ function renderLifeArc(arc, now) {
   const isExpiring = Number.isFinite(expires) && expires - now < 6 * 60 * 60 * 1000;
   const kindLabels = { travel: "旅行", work: "工作/通告", school: "学校", personal: "个人", special_date: "特殊日" };
   const kindBadge = arc.kind ? `<span class="life-arc-kind life-arc-kind-${escHtml(arc.kind)}">${kindLabels[arc.kind] || arc.kind}</span>` : "";
-  const timeRange = (arc.timeStart || arc.timeEnd) ? `
-    <div class="life-arc-timerange">
-      ${arc.timeStart ? `<span>开始: <time>${formatTime(arc.timeStart)}</time></span>` : ""}
-      ${arc.timeEnd ? `<span>结束: <time>${formatTime(arc.timeEnd)}</time></span>` : ""}
-    </div>` : "";
+  const timeParts = [
+    arc.timeStart ? `开始: <time>${formatTime(arc.timeStart)}</time>` : "",
+    arc.timeEnd ? `结束: <time>${formatTime(arc.timeEnd)}</time>` : "",
+    arc.expiresAt ? `到期: <time>${formatTime(arc.expiresAt)}</time>` : "",
+  ].filter(Boolean);
+  const timeRow = timeParts.length ? `<div class="life-arc-timerange" style="color:var(--muted);font-size:12px;display:flex;gap:12px;flex-wrap:wrap">${timeParts.join("")}</div>` : "";
+  const parts = [
+    `<strong>${kindBadge}${escHtml(arc.title || "(untitled life line)")}</strong>`,
+    timeRow,
+    arc.summary ? `<div class="life-arc-summary">${escHtml(arc.summary)}</div>` : "",
+    arc.progressNote ? `<div class="life-arc-progress">${escHtml(arc.progressNote)}</div>` : "",
+  ].filter(Boolean).join("\n");
   return `
     <div class="life-arc-item ${isExpiring ? 'expiring' : ''}">
-      <div class="life-arc-top">
-        <strong>${kindBadge}${escHtml(arc.title || "(untitled life line)")}</strong>
-        ${arc.expiresAt ? `<time>到期: ${formatTime(arc.expiresAt)}</time>` : ""}
-      </div>
-      ${timeRange}
-      ${arc.progressNote ? `<div class="life-arc-progress">${escHtml(arc.progressNote)}</div>` : ""}
-      ${arc.summary ? `<div class="life-arc-summary">${escHtml(arc.summary)}</div>` : ""}
+      ${parts}
     </div>
   `;
 }
