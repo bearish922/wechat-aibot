@@ -2,19 +2,33 @@ import fs from "node:fs";
 import { dataPath, ensureDir, DATA_DIR } from "./paths.mjs";
 
 const CHAT_HISTORY_FILE = dataPath("chat-history.json");
-export function loadAllEvents() {
+const CHAT_HISTORY_BAK = dataPath("chat-history.bak.json");
+
+function readEventsFrom(filePath) {
   try {
-    if (!fs.existsSync(CHAT_HISTORY_FILE)) return [];
-    const data = JSON.parse(fs.readFileSync(CHAT_HISTORY_FILE, "utf-8"));
-    return Array.isArray(data?.events) ? data.events : [];
+    if (!fs.existsSync(filePath)) return null;
+    const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    return Array.isArray(data?.events) ? data.events : null;
   } catch {
-    return [];
+    return null;
   }
+}
+
+export function loadAllEvents() {
+  let events = readEventsFrom(CHAT_HISTORY_FILE);
+  if (events !== null) return events;
+  events = readEventsFrom(CHAT_HISTORY_BAK);
+  return events ?? [];
 }
 
 function saveAllEvents(events) {
   ensureDir(DATA_DIR);
-  fs.writeFileSync(CHAT_HISTORY_FILE, JSON.stringify({ events }, null, 2), "utf-8");
+  const tmp = CHAT_HISTORY_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify({ events }, null, 2), "utf-8");
+  if (fs.existsSync(CHAT_HISTORY_FILE)) {
+    fs.copyFileSync(CHAT_HISTORY_FILE, CHAT_HISTORY_BAK);
+  }
+  fs.renameSync(tmp, CHAT_HISTORY_FILE);
 }
 
 function normalizeToolUsage(raw = null) {
