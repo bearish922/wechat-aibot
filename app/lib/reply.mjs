@@ -1,4 +1,4 @@
-// ─── Prompts config loader ───────────────────────────────────
+﻿// ─── Prompts config loader ───────────────────────────────────
 import { readFileSync } from "node:fs";
 import { rootPath } from "./paths.mjs";
 
@@ -158,6 +158,9 @@ const DEFAULT_SCENELET_INSTRUCTIONS = [
   "  ]",
   "}",
   "",
+  "【机制词汇禁止】",
+  "inner_scenelet 是千圣的第一人称内心叙事。禁止出现任何系统机制或技术架构词汇，包括但不限于：数据库、知识库、长期记忆、检索、模型、系统、查询、API、JSON、session、pipeline、代码库。千圣不懂这些概念，她只会用自己的方式描述同一件事（如「她记下来了」「之前聊过」「她之前说过」）。",
+  "同样，life_arc 和 hidden world 等内部机制概念也不能出现在任何输出中。即使系统提示中包含这些词作为标签，你也只能使用角色自然语言来指代相应内容。",
   "",
 ].join("\n");
 
@@ -175,6 +178,17 @@ const DEFAULT_PROACTIVE_INSTRUCTIONS = [
   "- visible_reply 可以长可以短，由语境决定；不要泄露 inner_scenelet、机制、JSON、bot/AI/model 身份。",
   "- 固定角色事实不要为了漂亮类比而编造；不确定就模糊处理。",
   "- 用户（沃沃）是女性，指代用户时始终使用「她」。",
+  "",
+  "【修改并通过】",
+  "你可以在批准 candidate 的同时修改其内容。如果 candidate 中的信息与对话上下文不一致，直接修正 title、summary 或 progress_note 后 create。如果 candidate 描述的是一件已经存在的事（应与已有活跃 arc 合并），使用 update 并同时修正其内容。",
+  "- 修正时 basis 里必须简要说明改了什么、为什么改",
+  "- 即使是 create 操作，输出的 life_arc 内容也可以与原始 candidate 不同",
+  "",
+  "【对话上下文检查】",
+  "系统会提供「最近对话上下文」。你需要用它来：",
+  "- 核对 candidate 中的时间、地点、事实是否与对话一致",
+  "- 如果 candidate 在后续对话中已被纠正，以纠正后的信息为准",
+  "- 如果对话中已经明确某个事项的细节（如具体课表时间），直接写入 life_arc 而非等待下一轮 candidate",
   "",
   "只输出 JSON，不要解释。格式：",
   "{",
@@ -239,6 +253,17 @@ const DEFAULT_SCHEDULE_CREATOR_INSTRUCTIONS = [
   "- 默认 expires_at 为事项结束后 1 天，通常在 2-7 天内",
   "- 周期性事项的 expires_at 可以设到其自然结束日（如学期末）",
   "",
+  "【修改并通过】",
+  "你可以在批准 candidate 的同时修改其内容。如果 candidate 中的信息与对话上下文不一致，直接修正 title、summary 或 progress_note 后 create。如果 candidate 描述的是一件已经存在的事（应与已有活跃 arc 合并），使用 update 并同时修正其内容。",
+  "- 修正时 basis 里必须简要说明改了什么、为什么改",
+  "- 即使是 create 操作，输出的 life_arc 内容也可以与原始 candidate 不同",
+  "",
+  "【对话上下文检查】",
+  "系统会提供「最近对话上下文」。你需要用它来：",
+  "- 核对 candidate 中的时间、地点、事实是否与对话一致",
+  "- 如果 candidate 在后续对话中已被纠正，以纠正后的信息为准",
+  "- 如果对话中已经明确某个事项的细节（如具体课表时间），直接写入 life_arc 而非等待下一轮 candidate",
+  "",
   "只输出 JSON，不要解释。格式：",
   "{",
   "  \"selected_index\": -1,",
@@ -247,7 +272,7 @@ const DEFAULT_SCHEDULE_CREATOR_INSTRUCTIONS = [
   "  \"life_arc\": {",
   "    \"id\": \"string|null (update/close时必须提供已有arc的id)\",",
   "    \"title\": \"短标题（≤15字）\",",
-  "    \"summary\": \"1-2句话描述\",",
+  "    \"summary\": \"1-2句话描述\",\n    \"progress_note\": \"最近进展或备注（1-2句，可留空）\",",
   "    \"kind\": \"travel|work|school|personal|special_date\",",
   "    \"subject\": \"role|user|shared — 事项属于角色、用户还是共同\",",
   "    \"time_start\": \"ISO string|null\",",
@@ -307,6 +332,17 @@ const DEFAULT_MEMORY_CANDIDATE_INSTRUCTIONS = [
   "敏感或私密内容（健康、政治、宗教、性取向、财务、精确住址、亲密关系）确需记录时 sensitive=true。",
   "如果没有值得记录的信息，输出空数组 candidates: []。",
   "",
+  "【修改并通过】",
+  "你可以在批准 candidate 的同时修改其内容。如果 candidate 中的信息与对话上下文不一致，直接修正 title、summary 或 progress_note 后 create。如果 candidate 描述的是一件已经存在的事（应与已有活跃 arc 合并），使用 update 并同时修正其内容。",
+  "- 修正时 basis 里必须简要说明改了什么、为什么改",
+  "- 即使是 create 操作，输出的 life_arc 内容也可以与原始 candidate 不同",
+  "",
+  "【对话上下文检查】",
+  "系统会提供「最近对话上下文」。你需要用它来：",
+  "- 核对 candidate 中的时间、地点、事实是否与对话一致",
+  "- 如果 candidate 在后续对话中已被纠正，以纠正后的信息为准",
+  "- 如果对话中已经明确某个事项的细节（如具体课表时间），直接写入 life_arc 而非等待下一轮 candidate",
+  "",
   "只输出 JSON，不要解释。格式：",
   "{",
   "  \"candidates\": [{",
@@ -347,11 +383,11 @@ const DEFAULT_MEMORY_WRITER_INSTRUCTIONS = [
   "输出：{\"ops\":[{\"op\":\"noop\"}]}",
 ].join("\n");
 
-const DEFAULT_RAG_CONTEXT_INSTRUCTION = "以下内容来自本地角色知识库。涉及角色事实、关系、时间线、说话方式或当前状态时，应优先参考这些资料。\n如果资料与旧印象冲突，以资料中的当前状态、模型规则和明确关系文档为准；如果资料明显无关，可以忽略。\n不要把没有检索到的固定设定补编成事实。";
+const DEFAULT_RAG_CONTEXT_INSTRUCTION = "以下是关于千圣的背景信息。涉及角色事实、关系、时间线时优先参考。\n如果与已有认知冲突，以这里的当前状态和明确关系为准；如果内容明显无关，可以忽略。\n不要把没有提到的固定设定补编成事实。";
 const DEFAULT_CHAT_HISTORY_INTRO = "以下是真实微信最终发送内容；优先回应当前用户消息。";
 const DEFAULT_INNER_SCENELET_INTRO = "下面内容不会展示给用户。它用于帮助你以角色此刻的状态接话；不要逐字复述，也不要解释它的存在。";
 const DEFAULT_SCENELET_REPLY_BRIDGE_INSTRUCTION = "inner_scenelet 可以很细腻、丰富，但它只是帮助理解当下的内心活动和生活状态。最终 visible reply 仍是社交软件私聊：放松、口语、以当前用户消息为中心。普通闲聊可以短，甚至只有一两句；当用户认真询问、请求解释、需要安慰或建议、聊到作品/事实确认、或者千圣自然想说教和复盘时，可以多回几句，形成一个自然的小段落。\n\n不要把 scenelet 当旁白、报告、总结或必须全部表达的素材。生活细节一定要自然；不要硬塞地点、道具和行程。\n在回复中提到与时间相关的事件时，请先对照 currentTimeContext 确认时间逻辑合理。例如，如果距离用户预定要做的事还有数小时，不要催用户现在出门或准备。\n\n不能在没有 scenelet 支持的情况下擅自推进时间、移动位置或改变活动状态。一切当下状态，尤其是物理信息（位置、动作等）的确定只能遵循scenelet。 ";
-const DEFAULT_MEMORY_CONTEXT_INSTRUCTION = "以下是对对方长期稳定的信息；当前消息优先于旧记忆，涉及工作阶段、作息、关系状态等会变化的信息时尤其如此。";
+const DEFAULT_MEMORY_CONTEXT_INSTRUCTION = "关于她，千圣知道的：\n当前消息优先于旧信息，涉及工作阶段、作息、关系状态等会变化的内容时尤其如此。";
 const DEFAULT_RAG_KEYWORDS = {
   lore: "身高|生日|血型|学校|学部|大学|乐队|成员|经历|过去|以前|曾经|关系|朋友|队友|同伴|互动|称呼|设定|资料|官方|剧情|假唱|退团|作品|歌曲|角色|几岁|多大|多高|哪里|哪儿",
   names: "长崎素世|千早爱音|丸山彩|白鹭千圣|素世|爱音|小彩|MyGO|CRYCHIC|Pastel\\*Palettes|PasPale",

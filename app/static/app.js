@@ -424,7 +424,7 @@ function renderPromptsPipeline(p, profileRows) {
           title: "Hidden-world 输出",
           desc: "",
           body: `
-            <p style="color:var(--muted);font-size:13px;margin:0 0 8px">注入了 worldState（currentPlan、openThreads）、inner_scenelet 场景叙事、以及全部 life_arc 简述（title / kind / current_state / next_useful_moment）。</p>
+            <p style="color:var(--muted);font-size:13px;margin:0 0 8px">注入了 worldState（currentPlan、openThreads）、inner_scenelet 场景叙事、以及全部 life_arc 简述（title / kind / progress_note）。</p>
             <label class="pipeline-sub-label">Inner Scenelet 引导说明</label>
             ${renderTextPreview("innerSceneletIntro", p.innerSceneletIntro)}
             <label class="pipeline-sub-label">Inner Scenelet 正文</label>
@@ -1515,8 +1515,7 @@ function renderLifeArcsEditor(arcs) {
           <div class="form-group"><label>expiresAt</label><input id="la_${i}_exp" value="${escAttr(formatTime(a.expiresAt))}" placeholder="ISO"></div>
         </div>
         <div class="form-group"><label>summary</label><textarea id="la_${i}_summary" class="snap-textarea" rows="2">${escHtml(a.summary || "")}</textarea></div>
-        <div class="form-group"><label>currentState</label><textarea id="la_${i}_state" class="snap-textarea" rows="2">${escHtml(a.currentState || "")}</textarea></div>
-        <div class="form-group"><label>nextUsefulMoment</label><input id="la_${i}_next" value="${escAttr(a.nextUsefulMoment || "")}"></div>
+        <div class="form-group"><label>progressNote</label><textarea id="la_${i}_state" class="snap-textarea" rows="2">${escHtml(a.progressNote || "")}</textarea></div>
         <div class="form-group"><label>id</label><input id="la_${i}_id" value="${escAttr(a.id || "")}" readonly style="opacity:0.6"></div>
       </div>
     </div>
@@ -1553,8 +1552,7 @@ async function saveWorldReset() {
           kind: content.querySelector(`#la_${i}_kind`)?.value || "",
           status: content.querySelector(`#la_${i}_status`)?.value || "active",
           summary: content.querySelector(`#la_${i}_summary`)?.value || "",
-          currentState: content.querySelector(`#la_${i}_state`)?.value || "",
-          nextUsefulMoment: content.querySelector(`#la_${i}_next`)?.value || "",
+          progressNote: content.querySelector(`#la_${i}_state`)?.value || "",
           timeStart: content.querySelector(`#la_${i}_ts`)?.value || null,
           timeEnd: content.querySelector(`#la_${i}_te`)?.value || null,
           expiresAt: content.querySelector(`#la_${i}_exp`)?.value || null,
@@ -2037,9 +2035,8 @@ function renderLifeArc(arc, now) {
         ${arc.expiresAt ? `<time>到期: ${formatTime(arc.expiresAt)}</time>` : ""}
       </div>
       ${timeRange}
-      ${arc.currentState ? `<div class="life-arc-state">${escHtml(arc.currentState)}</div>` : ""}
+      ${arc.progressNote ? `<div class="life-arc-progress">${escHtml(arc.progressNote)}</div>` : ""}
       ${arc.summary ? `<div class="life-arc-summary">${escHtml(arc.summary)}</div>` : ""}
-      ${arc.nextUsefulMoment ? `<div class="life-arc-next">${escHtml(arc.nextUsefulMoment)}</div>` : ""}
     </div>
   `;
 }

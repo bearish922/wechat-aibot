@@ -1,6 +1,6 @@
-import { uuid, log, sleep } from "./utils.mjs";
+﻿import { uuid, log, sleep } from "./utils.mjs";
 import { sessions, profileTemplates, pendingInputs } from "./state.mjs";
-import { SCENELET_BARE, CLAUDE_FAST_MODEL, CLAUDE_MAIN_MODEL, runHiddenJson } from "./claude-runner.mjs";
+import { SCENELET_BARE, CLAUDE_MAIN_MODEL, runHiddenJson } from "./claude-runner.mjs";
 import { loadPrompts, MAX_REPLY_LEN, splitText, splitSocialReply } from "./reply.mjs";
 import { getSceneConfig, normalizeProactiveIntents, normalizeToolUsage, normalizeWorldState, applyWorldStatePatch, normalizeLifeArcs, normalizeSceneletResult, normalizeRawProactiveCandidate, normalizeScheduleCandidates, normalizeMemoryCandidates, normalizeMemoryOps, normalizeProactiveDecision, sanitizeVisibleReplyText, proactiveSentToday, lastConversationActivityMs } from "./normalize.mjs";
 import { sessionProfile, roleWorldKey, ensureWorldSession, getRoleWorld, saveRoleWorlds, syncRoleWorldToSession, checkIntentDuplicateFlash, applyLifeArcOps, lifeArcPromptItems, getSceneMemory, setSceneMemory } from "./world-state.mjs";
@@ -81,16 +81,15 @@ export function buildSceneContextBlock(sess, sceneletResult) {
   const profile = sessionProfile(sess);
   const lifeArcSummary = profile ? lifeArcPromptItems(getRoleWorld(profile)).map(arc => ({
     title: arc.title,
-    current_state: arc.current_state,
-    next_useful_moment: arc.next_useful_moment,
+    progress_note: arc.progress_note,
     kind: arc.kind,
     time_start: arc.time_start,
     time_end: arc.time_end,
   })) : [];
   const parts = [
     lifeArcSummary.length ? [
-      "【life_arc 简述】",
-      "以下是 hidden-world 已确认的全部生活线摘要，只作为时间框架和自然接话参考，不要主动复述 JSON。",
+      "【正在发生的事】",
+      "千圣生活中跨越多天的安排，只作为时间参考和自然接话线索，不要主动复述。",
       JSON.stringify(lifeArcSummary, null, 2),
     ].join("\n") : "",
     sceneletResult?.innerScenelet ? [
@@ -190,18 +189,11 @@ function markProactiveIntent(intent, status, reason = "") {
 }
 
 async function evaluateProactiveIntent({ ai, userId, sess, profile, intent }) {
-  const memoryPrompt = (() => {
-    const items = memoryItemsText(userId, { profile });
-    if (!items) return "";
-    const instruction = loadPrompts().memoryContextInstruction || "";
-    return instruction ? `${instruction}\n\n${items}` : items;
-  })();
   const prompt = buildProactivePrompt({
     userId,
     sessionName: sess.name,
     profile,
     intent,
-    memoryPrompt,
     visibleContext: recentVisibleContext(sess),
     sess,
   });
@@ -297,7 +289,7 @@ export async function runScheduleExtractor({ userBody, scenelet, profile }) {
   const raw = await runHiddenJson(prompt, {
     label: "schedule_extractor",
     bare: true,
-    model: CLAUDE_FAST_MODEL,
+    model: CLAUDE_MAIN_MODEL,
     timeoutMs: 45000,
   });
 
@@ -325,6 +317,8 @@ async function maybeCreateScheduleEntry({ sess, profile }) {
     .slice(-cfg.scheduleRecentKindsLimit)
     .map(a => a.kind);
 
+  const visibleCtx = recentVisibleContext(sess);
+  const visibleContext = visibleCtx.length ? JSON.stringify(visibleCtx, null, 2) : "";
   const prompt = buildScheduleFinalizationPrompt({
     profileSnippet: profile && profileTemplates[profile] ? profileTemplates[profile].slice(0, cfg.schedulePromptProfileMaxChars) : "",
     candidates,
@@ -337,7 +331,7 @@ async function maybeCreateScheduleEntry({ sess, profile }) {
   const result = await runHiddenJson(prompt, {
     label: "schedule_finalization",
     bare: false,
-    model: CLAUDE_FAST_MODEL,
+    model: CLAUDE_MAIN_MODEL,
     timeoutMs: cfg.scheduleFinalizationTimeoutMs,
   });
 
@@ -372,6 +366,7 @@ async function maybeCreateScheduleEntry({ sess, profile }) {
       time_start: arc.time_start || arc.timeStart || null,
       time_end: timeEnd,
       expires_at: expiresAt,
+      progress_note: arc.progress_note || arc.progressNote || '',
       reason,
     }]);
   }
@@ -483,7 +478,7 @@ export async function updateUserMemoryFromTurn(userId, userBody, profile) {
   const candidatesRaw = await runHiddenJson(buildMemoryCandidatePrompt(userBody, userId, profile), {
     label: "memory_candidate_extractor",
     bare: true,
-    model: CLAUDE_FAST_MODEL,
+    model: CLAUDE_MAIN_MODEL,
     timeoutMs: getSceneConfig().memoryCandidateTimeoutMs,
   });
   const candidates = normalizeMemoryCandidates(candidatesRaw?.candidates || candidatesRaw?.memory_candidates || []);
@@ -534,26 +529,24 @@ export async function generateSceneMemory({ userId, sess, profile, roleWorld }) 
   const raw = await runHiddenJson(prompt, {
     label: "scene_memory",
     bare: true,
-    model: CLAUDE_FAST_MODEL,
+    model: CLAUDE_MAIN_MODEL,
     timeoutMs: 90000,
   });
   return typeof raw === "string" ? raw : (raw?.summary || raw?.scene_memory || raw?.inner_scenelet || "");
 }
 
-export async function batchUpdateMemory({ userId, visibleHistory, profile }) {
+export async function batchUpdateMemory({ userId, userMessages, profile }) {
   if (!isMemoryEnabled(userId)) return [];
-  const userMessages = (visibleHistory || [])
-    .filter(e => e.role === "user" && e.text)
-    .map(e => e.text);
-  if (!userMessages.length) return [];
+  const msgs = (userMessages || []).filter(Boolean);
+  if (!msgs.length) return [];
 
-  const combinedBody = userMessages.join("\n---\n");
+  const combinedBody = msgs.join("\n---\n");
   if (!shouldRunMemoryWriter(combinedBody)) return [];
 
   const candidatesRaw = await runHiddenJson(buildMemoryCandidatePrompt(combinedBody, userId, profile), {
     label: "memory_batch_candidates",
     bare: true,
-    model: CLAUDE_FAST_MODEL,
+    model: CLAUDE_MAIN_MODEL,
     timeoutMs: getSceneConfig().memoryCandidateTimeoutMs,
   });
   const candidates = normalizeMemoryCandidates(candidatesRaw?.candidates || candidatesRaw?.memory_candidates || []);

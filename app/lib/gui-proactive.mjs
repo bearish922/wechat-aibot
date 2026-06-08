@@ -1,4 +1,4 @@
-import { addRoute } from "./server.mjs";
+﻿import { addRoute } from "./server.mjs";
 import { sessions, activeAI } from "./state.mjs";
 
 function uniqueIntents(intents = []) {
@@ -17,8 +17,7 @@ function allLifeArcs(arcs = []) {
       id: a.id,
       title: a.title || "",
       summary: a.summary || "",
-      currentState: a.currentState || "",
-      nextUsefulMoment: a.nextUsefulMoment || "",
+      progressNote: a.progressNote || "",
       source: a.source || "",
       status: a.status || "active",
       kind: a.kind || null,

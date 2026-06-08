@@ -1,11 +1,11 @@
-import fs from "node:fs";
+﻿import fs from "node:fs";
 import crypto from "node:crypto";
 import { uuid } from "./utils.mjs";
 import { log } from "./utils.mjs";
 import { DATA_DIR, dataPath, ensureDir } from "./paths.mjs";
 import { sessions, profileTemplates } from "./state.mjs";
 import { normalizeWorldState, normalizeWorldSession, normalizeWorldLastOutput, normalizeLifeArcs, getSceneConfig } from "./normalize.mjs";
-import { CLAUDE_MAIN_MODEL, CLAUDE_FAST_MODEL, runHiddenJson } from "./claude-runner.mjs";
+import { CLAUDE_MAIN_MODEL, runHiddenJson } from "./claude-runner.mjs";
 
 function sessionProfile(sess) {
   return sess?._profile ?? null;
@@ -92,8 +92,7 @@ function lifeArcPromptItems(roleWorld) {
     id: arc.id,
     title: arc.title,
     summary: arc.summary,
-    current_state: arc.currentState,
-    next_useful_moment: arc.nextUsefulMoment,
+    progress_note: arc.progressNote,
     kind: arc.kind || null,
     time_start: arc.timeStart || null,
     time_end: arc.timeEnd || null,
@@ -265,16 +264,15 @@ export function applyLifeArcOps(roleWorld, rawOps = []) {
     const patch = {
       title: raw.title ? String(raw.title).trim().slice(0, 80) : existing?.title || "",
       summary: raw.summary ? String(raw.summary).trim().slice(0, 500) : existing?.summary || "",
-      currentState: raw.current_state || raw.currentState ? String(raw.current_state || raw.currentState).trim().slice(0, 500) : existing?.currentState || "",
-      nextUsefulMoment: raw.next_useful_moment || raw.nextUsefulMoment ? String(raw.next_useful_moment || raw.nextUsefulMoment).trim().slice(0, 300) : existing?.nextUsefulMoment || "",
-      source: raw.reason ? String(raw.reason).trim().slice(0, 300) : existing?.source || "",
+      progressNote: raw.progress_note || raw.progressNote ? String(raw.progress_note || raw.progressNote).trim().slice(0, 500) : existing?.progressNote || "",
+      source: raw.source || raw.basis ? String(raw.source || raw.basis).trim().slice(0, 300) : existing?.source || "",
       kind,
       subject,
       timeStart: raw.time_start || raw.timeStart ? String(raw.time_start || raw.timeStart) : (existing?.timeStart || null),
       timeEnd: raw.time_end || raw.timeEnd ? String(raw.time_end || raw.timeEnd) : (existing?.timeEnd || null),
       expiresAt,
     };
-    if (!patch.title && !patch.summary && !patch.currentState) continue;
+    if (!patch.title && !patch.summary && !patch.progressNote) continue;
     if (existing) {
       if (existing.status === "closed") continue;
       Object.assign(existing, patch, { status: "active", updatedAt: nowIso });

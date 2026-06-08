@@ -405,7 +405,9 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
         const threshold = getSceneConfig().turnResetThreshold || 8;
         if (styleState._turnCount >= threshold) {
           try {
-            await batchUpdateMemory({ userId, visibleHistory: styleState._visibleHistory, profile: turnProfile });
+            const userMsgLog = styleState._userMessageLog || [];
+            await batchUpdateMemory({ userId, userMessages: userMsgLog, profile: turnProfile });
+            styleState._userMessageLog = [];
             const summary = await generateSceneMemory({ userId, sess: styleState, profile: turnProfile, roleWorld });
             if (summary) {
               setSceneMemory(roleWorld, summary);

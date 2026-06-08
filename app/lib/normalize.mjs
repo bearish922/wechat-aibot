@@ -1,4 +1,4 @@
-import crypto from "node:crypto";
+﻿import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { loadPrompts } from "./reply.mjs";
 import { normalizeMemoryCategory } from "./memory.mjs";
@@ -198,8 +198,8 @@ function normalizeLifeArc(raw) {
   const id = raw.id ? String(raw.id) : "";
   const title = raw.title ? String(raw.title).trim().slice(0, 80) : "";
   const summary = raw.summary ? String(raw.summary).trim().slice(0, 500) : "";
-  const currentState = raw.currentState || raw.current_state ? String(raw.currentState || raw.current_state).trim().slice(0, 500) : "";
-  if (!id || (!title && !summary && !currentState)) return null;
+  const progressNote = raw.progressNote || raw.progress_note ? String(raw.progressNote || raw.progress_note).trim().slice(0, 500) : "";
+  if (!id || (!title && !summary && !progressNote)) return null;
   const nowIso = new Date().toISOString();
   const status = ["active", "closed"].includes(raw.status) ? raw.status : "active";
   const createdAt = raw.createdAt || raw.created_at ? String(raw.createdAt || raw.created_at) : nowIso;
@@ -218,8 +218,7 @@ function normalizeLifeArc(raw) {
     status,
     title,
     summary,
-    currentState,
-    nextUsefulMoment: raw.nextUsefulMoment || raw.next_useful_moment ? String(raw.nextUsefulMoment || raw.next_useful_moment).trim().slice(0, 300) : "",
+    progressNote,
     source: raw.source ? String(raw.source).trim().slice(0, 300) : "",
     kind,
     subject,

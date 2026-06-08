@@ -7,7 +7,7 @@ function buildRagContextBlock(ragContext) {
   if (!ragContext) return "";
   const cfg = loadPrompts();
   return [
-    "【本轮知识库检索结果】",
+    "【关于千圣自己】",
     cfg.ragContextInstruction,
     ragContext,
   ].filter(Boolean).join("\n");
@@ -76,6 +76,10 @@ function appendVisibleHistory(sess, role, text, kind = "chat", timestamp = new D
     ...(sess._visibleHistory || []),
     { role, text: String(text), timestamp, kind },
   ]);
+  if (role === "user") {
+    if (!Array.isArray(sess._userMessageLog)) sess._userMessageLog = [];
+    sess._userMessageLog.push(String(text));
+  }
 }
 
 function getSceneMemorySystemBlock(roleWorld) {
@@ -141,7 +145,7 @@ function buildHiddenWorldPrompt({ userId, sessionName, profile, userBody, lifeAr
   return [
     "你将收到本轮动态上下文。请按 hidden-world system prompt 的规则输出 JSON。",
     "",
-    memoryPrompt ? `长期记忆：\n${memoryPrompt}` : "",
+    memoryPrompt ? `关于她，千圣一直记得：\n${memoryPrompt}` : "",
     "",
     "当前时间：",
     JSON.stringify(currentTimeContext(now), null, 2),
@@ -195,7 +199,7 @@ function buildMemoryMergePrompt({ userBody, userId, profile, candidates, existin
   ].join("\n");
 }
 
-function buildProactivePrompt({ userId, sessionName, profile, intent, memoryPrompt, visibleContext, sess }) {
+function buildProactivePrompt({ userId, sessionName, profile, intent, visibleContext, sess }) {
   const now = new Date();
   const cfg = loadPrompts();
   const instr = cfg.proactiveInstructions || "";
@@ -204,8 +208,6 @@ function buildProactivePrompt({ userId, sessionName, profile, intent, memoryProm
     "",
     "角色 prompt：",
     profile && profileTemplates[profile] ? profileTemplates[profile] : "",
-    "",
-    memoryPrompt ? `长期记忆：\n${memoryPrompt}` : "",
     "",
     "当前时间：",
     JSON.stringify(currentTimeContext(now), null, 2),
@@ -236,14 +238,25 @@ function buildScheduleFinalizationPrompt({
   candidates,
   activeSchedules,
   recentKindsHint,
+  visibleContext,
 }) {
   const cfg = loadPrompts();
   const instr = cfg.scheduleCreatorInstructions || "";
-  return [
+  const sections = [
     instr,
     "",
     "角色 prompt（截取关键身份信息）：",
     profileSnippet || "",
+  ];
+  if (visibleContext) {
+    sections.push(
+      "",
+      "【最近对话上下文 — 用于核对 candidate 事实】",
+      "以下为角色与用户的近期对话摘要。请逐条核对 candidate 中的事实信息（时间、地点、频率、细节）是否与对话一致：",
+      visibleContext,
+    );
+  }
+  sections.push(
     "",
     "Hidden-world 提出的 schedule candidates：",
     JSON.stringify(candidates, null, 2),
@@ -252,7 +265,8 @@ function buildScheduleFinalizationPrompt({
     activeSchedules || "(无)",
     "",
     recentKindsHint,
-  ].filter(Boolean).join("\n");
+  );
+  return sections.filter(Boolean).join("\n");
 }
 
 export {
