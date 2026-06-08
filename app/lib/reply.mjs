@@ -242,6 +242,7 @@ const DEFAULT_SCHEDULE_CREATOR_INSTRUCTIONS = [
   "- 同类 life_arc 短时间内不应重复创建",
   "- 如果候选与已有活跃 life_arc 重叠，选择 update 而非 create",
   "- 已关闭的 life_arc 不应重新打开；候选对应已关闭的旧事项时按 create 处理",
+  "- 同一类别且共享时间跨度的周期性事项可以合并为一个 life_arc（如「千圣的课表」包含多门课程）。新 candidate 属于已有合并 arc 时使用 update 追加内容，而非 create 新条目",
   "",
   "【操作类型 (op)】",
   "- create: 新建 life_arc。候选通过准入标准，且不与已有活跃 arc 重叠时使用。",
