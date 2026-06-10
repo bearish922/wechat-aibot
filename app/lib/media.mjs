@@ -474,7 +474,7 @@ export async function captionImageCloud(filePath, hint = "") {
   const mime = detectMimeFromBuffer(imageBuffer, getMimeFromFilename(filePath));
   const imageBase64 = imageBuffer.toString("base64");
   const vcfg = loadPrompts();
-  const basePrompt = vcfg.visionCaptionPrompt || `请为另一个聊天模型客观解析这张图片，输出中文。\n优先识别：画面主体、可见文字/OCR、物品类型、作品名或品牌名、场景、数量/分量。\n请区分'看清楚的事实'和'不确定的推测'。不要把推测写成事实。\n如果能清楚读出漫画/书/商品的标题，请写出标题；如果读不清，明确说读不清。\n如果存在电脑屏幕、桌面、背景物体等，只描述确实入镜且清晰可见的内容。\n不要从少量视觉线索脑补作品类型、剧情、用餐人数、几碗饭或用户偏好。\n输出 3-6 句；需要时可加一行'低置信度/不确定点'。不要角色扮演。`;
+  const basePrompt = vcfg.visionCaptionPrompt;
   const prompt = [
     basePrompt,
     hint ? `用户补充文字（可能不完整或带偏）：${hint.slice(0, 300)}` : '',

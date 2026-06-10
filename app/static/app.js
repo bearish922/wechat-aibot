@@ -7,8 +7,10 @@
 const get = path => api("GET", path);
 const post = (path, body) => api("POST", path, body);
 const del = (path, body) => api("DELETE", path, body);
+const put = (path, body) => api("PUT", path, body);
 
 let activeTab = "status";
+let _statusPollTimer = null;
 const content = document.getElementById("content");
 const tabs = document.querySelectorAll("nav button");
 
@@ -29,7 +31,21 @@ function toast(msg, ok = true) {
   setTimeout(() => el.remove(), 3000);
 }
 
+function showModal(title, body) {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `<div class="modal-box"><div class="modal-head"><h3>${escHtml(title)}</h3><button class="btn modal-close">&times;</button></div><div class="modal-body"><pre style="white-space:pre-wrap;max-height:60vh;overflow:auto;font-size:13px;line-height:1.5">${escHtml(body)}</pre></div></div>`;
+  overlay.querySelector(".modal-close").addEventListener("click", () => overlay.remove());
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+function clearStatusPoll() {
+  if (_statusPollTimer) { clearInterval(_statusPollTimer); _statusPollTimer = null; }
+}
+
 async function render() {
+  clearStatusPoll();
   content.innerHTML = '<div class="panel"><p>Loading...</p></div>';
   try {
     switch (activeTab) {
@@ -49,10 +65,11 @@ async function render() {
 // Status (merged with Sessions)
 async function renderStatus() {
   const s = await get("/api/status");
+  window._activeBackend = s.currentAI || "cc";
   const d = await get("/api/sessions");
   const rows = d.sessions.map(s => `
     <tr>
-      <td><span class="badge badge-${s.ai === 'cc' ? 'cc' : 'codex'}">${s.ai === 'cc' ? 'CC' : 'Codex'}</span></td>
+      <td><span class="badge badge-${s.ai === 'cc' ? 'cc' : 'codex'}">${s.ai === 'cc' ? 'CC' : s.ai === 'api' ? 'API' : 'Codex'}</span></td>
       <td>${s.active ? '<span class="badge badge-cc" style="margin-right:6px">Active</span>' : ''}${escHtml(s.name)}</td>
       <td><span class="badge badge-default">${escHtml(s.profile)}</span></td>
       <td>${s.busy ? 'Busy' : s.queue ? 'Queue(' + Number(s.queue) + ')' : 'Idle'}</td>
@@ -68,13 +85,15 @@ async function renderStatus() {
         <h2>Status</h2>
         <span class="status-pill ${s.online ? 'online' : 'offline'}">${s.online ? 'Online' : 'Offline'}</span>
       </div>
-      <div class="stat-grid">
-        <div class="stat-tile"><span>AI</span><strong>${s.currentAI === 'cc' ? 'Claude Code' : 'Codex'}</strong></div>
-        <div class="stat-tile"><span>Model</span><strong>${escHtml(s.currentModel)}</strong></div>
-        <div class="stat-tile"><span>CC Sessions</span><strong>${Number(s.sessions?.cc || 0)}</strong></div>
-        <div class="stat-tile"><span>Codex Sessions</span><strong>${Number(s.sessions?.codex || 0)}</strong></div>
+      <div class="stat-grid" id="statGrid">
+        <div class="stat-tile"><span>AI</span><strong data-stat="ai">${s.currentAI === 'cc' ? 'Claude Code' : s.currentAI === 'api' ? 'Direct API' : 'Codex'}</strong></div>
+      ${s.apiContext ? `<div class="stat-tile" data-stat="apiCtx"><span>API 上下文</span><strong data-stat="apiCtxVal">${s.apiContext.messages} msgs / ${s.apiContext.turns} turns</strong></div>` : '<div class="stat-tile" data-stat="apiCtx" style="display:none"><span>API 上下文</span><strong data-stat="apiCtxVal"></strong></div>'}
+        <div class="stat-tile"><span>Model</span><strong data-stat="model">${escHtml(s.currentModel)}</strong></div>
+        <div class="stat-tile"><span>CC Sessions</span><strong data-stat="ccCount">${Number(s.sessions?.cc || 0)}</strong></div>
+        <div class="stat-tile"><span>Codex Sessions</span><strong data-stat="codexCount">${Number(s.sessions?.codex || 0)}</strong></div>
       </div>
     </div>
+    ${renderCCContext(s)}
     <div class="panel">
       <div class="panel-head"><h2>Sessions (${d.currentAI === 'cc' ? 'Claude Code' : 'Codex'})</h2></div>
       <div class="table-wrap"><table>
@@ -89,6 +108,89 @@ async function renderStatus() {
   `;
   content.querySelectorAll('[data-action="copy-resume"]').forEach(btn => {
     btn.addEventListener("click", () => copyResumeCommand(btn));
+  });
+  bindCCContextEvents();
+  startStatusPoll();
+}
+
+async function pollStatusUpdate() {
+  try {
+    const s = await get("/api/status");
+    if (activeTab !== "status") return;
+    const grid = document.getElementById("statGrid");
+    if (!grid) return;
+
+    const setStat = (name, val) => { const el = grid.querySelector(`[data-stat="${name}"]`); if (el) el.textContent = val; };
+
+    setStat("ai", s.currentAI === 'cc' ? 'Claude Code' : s.currentAI === 'api' ? 'Direct API' : 'Codex');
+    setStat("model", s.currentModel);
+    setStat("ccCount", String(s.sessions?.cc || 0));
+    setStat("codexCount", String(s.sessions?.codex || 0));
+
+    const apiTile = grid.querySelector('[data-stat="apiCtx"]');
+    if (s.apiContext) {
+      if (apiTile) apiTile.style.display = "";
+      setStat("apiCtxVal", `${s.apiContext.messages} msgs / ${s.apiContext.turns} turns`);
+    } else {
+      if (apiTile) apiTile.style.display = "none";
+    }
+    if (s.ccContext) {
+      const ccPanel = document.querySelector('[data-panel="cc-context"]');
+      if (ccPanel) ccPanel.style.display = "";
+      const turn = document.querySelector('[data-cc="turn"]'); if (turn) turn.textContent = `${s.ccContext.turnCount}/${s.ccContext.turnThreshold}`;
+      const uc = document.querySelector('[data-cc="userCtx"]'); if (uc) uc.textContent = ctxPct(s.ccContext.userCtx);
+      const hc = document.querySelector('[data-cc="hwCtx"]'); if (hc) hc.textContent = ctxPct(s.ccContext.hwCtx);
+    }
+  } catch {} // swallow poll errors
+}
+
+function ctxPct(ctx) { if (!ctx) return '-'; const pct = ctx.max ? (ctx.tokens / ctx.max * 100).toFixed(1) : 0; return `${(ctx.tokens / 1000).toFixed(0)}k / 1M (${pct}%)`; }
+
+function startStatusPoll() {
+  clearStatusPoll();
+  _statusPollTimer = setInterval(pollStatusUpdate, 4000);
+}
+
+function renderCCContext(s) {
+  const cc = s.ccContext;
+  if (!cc) return `<div class="panel" data-panel="cc-context" style="display:none"></div>`;
+  const turn = `${cc.turnCount}/${cc.turnThreshold}`;
+  const userCtx = ctxPct(cc.userCtx);
+  const hwCtx = ctxPct(cc.hwCtx);
+  const hasScene = cc.sceneMemory && cc.sceneMemory.length > 0;
+  return `
+    <div class="panel" data-panel="cc-context">
+      <div class="panel-head">
+        <h2>CC Context — ${escHtml(cc.profile)}</h2>
+        <div class="cc-toolbar">
+          <button class="btn btn-sm" data-action="show-cc-scene">${hasScene ? 'View Scene Memory' : 'No Scene Memory'}</button>
+          <button class="btn btn-sm btn-reset" data-action="reset-cc">Reset</button>
+        </div>
+      </div>
+      <div class="stat-grid">
+        <div class="stat-tile"><span>Turn</span><strong data-cc="turn">${turn}</strong></div>
+        <div class="stat-tile"><span>User Context</span><strong data-cc="userCtx">${userCtx}</strong></div>
+        <div class="stat-tile"><span>HW Context</span><strong data-cc="hwCtx">${hwCtx}</strong></div>
+      </div>
+    </div>`;
+}
+
+function bindCCContextEvents() {
+  content.querySelector('[data-action="reset-cc"]')?.addEventListener("click", async () => {
+    if (!confirm("确认手动 reset？将归零轮次计数并重置会话和 HW session。")) return;
+    try {
+      const st = await get("/api/status");
+      if (!st.ccContext?.profile) return toast("无活跃 CC 会话", false);
+      const r = await post("/api/world/reset", { profile: st.ccContext.profile });
+      toast(r.ok ? "Reset 成功" : r.error, r.ok);
+    } catch (e) { toast("Reset 失败: " + e.message, false); }
+  });
+  content.querySelector('[data-action="show-cc-scene"]')?.addEventListener("click", async () => {
+    try {
+      const st = await get("/api/status");
+      const text = st.ccContext?.sceneMemory || "暂无 scene memory（reset 后自动生成）";
+      showModal("Scene Memory", text);
+    } catch (e) {}
   });
 }
 
@@ -483,18 +585,11 @@ function renderPromptsPipeline(p, profileRows) {
         })}
         ${renderPipelineStep({
           n: 9,
-          title: "Memory Writer",
-          desc: "",
+          title: "Memory Update",
+          desc: "Reset 时将当前记忆文档 + 积累的用户消息合并，让 LLM 直接输出更新后的完整 Markdown 文档。",
           body: `
-            <label class="pipeline-sub-label">候选抽取指令</label>
-            ${renderTextPreview("memoryCandidateInstructions", p.memoryCandidateInstructions)}
-            <label class="pipeline-sub-label" style="margin-top:12px">合并规划指令</label>
-            ${renderTextPreview("memoryWriterInstructions", p.memoryWriterInstructions)}
-            <label class="pipeline-sub-label" style="margin-top:12px">记忆处理超时</label>
-            ${renderControlGrid([
-              renderNumberControl("memoryCandidateTimeoutMs", "候选抽取超时", p.memoryCandidateTimeoutMs, 10, 180, "s", { ms: true }),
-              renderNumberControl("memoryMergeTimeoutMs", "合并决策超时", p.memoryMergeTimeoutMs, 30, 300, "s", { ms: true }),
-            ])}
+            <label class="pipeline-sub-label">Memory Update Prompt</label>
+            ${renderTextPreview("memoryUpdatePrompt", p.memoryUpdatePrompt)}
           `,
         })}
       </div>
@@ -566,7 +661,7 @@ function renderNumberControl(key, label, value, min, max, unit, options = {}) {
 function renderTextPreview(key, value) {
   const isOpen = promptsEditing[key];
   if (isOpen) {
-    const h = key === 'sceneletInstructions' || key === 'proactiveInstructions' || key === 'memoryCandidateInstructions' || key === 'memoryWriterInstructions' || key === 'scheduleCreatorInstructions' || key === 'followUpGenerationPrompt' ? '220px' : '110px';
+    const h = key === 'sceneletInstructions' || key === 'proactiveInstructions' || key === 'memoryUpdatePrompt' || key === 'scheduleCreatorInstructions' ? '220px' : '110px';
     return `<textarea id="prompt_${key}" class="prompts-editable prompts-textarea" data-key="${key}" style="min-height:${h}">${escHtml(value || '')}</textarea>
       <div class="editor-actions" style="margin-top:4px">
         <button class="btn btn-primary" data-action="save-text" data-key="${key}">保存</button>
@@ -674,7 +769,7 @@ window.deleteProfile = async (name) => {
 };
 
 // Hidden World
-let worldState = { profile: "", resetProfile: "" };
+let worldState = { profile: "" };
 
 async function renderWorld() {
   const [wd, pd] = await Promise.all([get("/api/world/roles"), get("/api/prompts")]);
@@ -682,10 +777,6 @@ async function renderWorld() {
   if (!worldState.profile && profiles.length) worldState.profile = profiles.includes("白鹭千圣") ? "白鹭千圣" : profiles[0];
   const role = (wd.roles || []).find(r => r.profile === worldState.profile) || wd.roles?.[0] || {};
   const p = pd.prompts || {};
-  if (worldState.resetProfile) {
-    renderWorldReset(role, p);
-    return;
-  }
 
   content.innerHTML = `
     <div class="panel">
@@ -693,7 +784,6 @@ async function renderWorld() {
         <h2>Hidden World Pipeline</h2>
         <div class="memory-toolbar">
           <select id="worldProfileSelect">${profiles.map(name => `<option value="${escAttr(name)}"${name === role.profile ? " selected" : ""}>${escHtml(name)}</option>`).join("")}</select>
-          <button class="btn" data-action="open-world-reset">Reset / Edit Snapshot</button>
         </div>
       </div>
 	    </div>
@@ -800,10 +890,8 @@ function renderWorldPipeline(role, p) {
           body: `
             <p style="color:var(--muted);font-size:13px;margin:0 0 8px">每轮独立并行调用，基于 inner_scenelet 和 world_state 生成主动意图候选。daily_share 已解耦给独立 Seed 模块，schedule 已解耦给 Extractor 模块。</p>
             <label class="pipeline-sub-label">Follow-up 生成 Prompt</label>
-            ${renderTextPreview("followUpGenerationPrompt", p.followUpGenerationPrompt)}
             ${renderControlGrid([
               renderNumberControl("hiddenWorldMaxPendingIntents", "最大待处理意图展示", p.hiddenWorldMaxPendingIntents || 8, 1, 20, "条"),
-              renderNumberControl("maxFollowUpCandidatesPerTurn", "每轮最大候选数", p.maxFollowUpCandidatesPerTurn || 3, 0, 10, "条"),
             ])}
           `,
         })}
@@ -838,13 +926,10 @@ function renderWorldPipeline(role, p) {
             <label class="pipeline-sub-label">调度参数</label>
             ${renderControlGrid([
               renderNumberControl("scheduleCheckIntervalMs", "审批间隔", p.scheduleCheckIntervalMs, 600, 604800, "s", { ms: true }),
-              renderNumberControl("scheduleMaxActive", "最大活跃 arc", p.scheduleMaxActive || 2, 1, 5, "条"),
               renderNumberControl("scheduleFinalizationTimeoutMs", "审批超时", p.scheduleFinalizationTimeoutMs, 10, 300, "s", { ms: true }),
               renderNumberControl("scheduleRecentKindsLimit", "最近类型回溯", p.scheduleRecentKindsLimit || 5, 1, 20, "条"),
-              renderNumberControl("schedulePromptProfileMaxChars", "Profile 截取", p.schedulePromptProfileMaxChars || 800, 200, 3000, "字符"),
               renderNumberControl("scheduleBasisMaxLength", "理由上限", p.scheduleBasisMaxLength || 300, 50, 1000, "字符"),
               renderNumberControl("scheduleArcTitleMaxLength", "标题上限", p.scheduleArcTitleMaxLength || 80, 20, 200, "字符"),
-              renderNumberControl("scheduleArcSummaryMaxLength", "摘要上限", p.scheduleArcSummaryMaxLength || 500, 100, 2000, "字符"),
               renderNumberControl("scheduleExpiryAfterEndBufferMs", "结束后缓冲", p.scheduleExpiryAfterEndBufferMs, 1, 24, "h", { ms: 'h' }),
               renderNumberControl("scheduleDefaultExpiryFromNowMs", "默认到期", p.scheduleDefaultExpiryFromNowMs, 1, 7, "d", { ms: 'd' }),
             ])}
@@ -1400,10 +1485,6 @@ function bindWorldEvents() {
     worldState.profile = e.target.value;
     renderWorld();
   });
-  content.querySelector('[data-action="open-world-reset"]')?.addEventListener("click", () => {
-    worldState.resetProfile = worldState.profile;
-    renderWorld();
-  });
 
   // Schedule Calendar events
   const scOpen = content.querySelector('#openScheduleCalendar');
@@ -1449,129 +1530,6 @@ function bindWorldEvents() {
       scState.selected = scDateKey(month, day);
       scRefreshCalendar();
     });
-  }
-}
-
-function renderWorldReset(role) {
-  const ws = role.worldState || {};
-  content.innerHTML = `
-    <div class="panel">
-      <div class="panel-head">
-        <h2>Reset Hidden World — ${escHtml(role.profile || worldState.resetProfile)}</h2>
-        <button class="btn" data-action="cancel-world-reset">Back</button>
-      </div>
-      <div class="form-grid one">
-        <fieldset class="snap-fieldset">
-          <legend>world_state</legend>
-          <div class="form-grid">
-            <div class="form-group"><label>location</label><input id="snap_ws_location" value="${escAttr(ws.location || "")}" placeholder="当前位置"></div>
-            <div class="form-group"><label>activity</label><input id="snap_ws_activity" value="${escAttr(ws.activity || "")}" placeholder="当前活动"></div>
-            <div class="form-group"><label>awake_state</label><select id="snap_ws_awake">${["awake","sleeping","light_sleep","just_woke","unknown"].map(v => `<option value="${v}"${ws.awake_state === v ? " selected" : ""}>${v}</option>`).join("")}</select></div>
-            <div class="form-group"><label>current_plan</label><input id="snap_ws_plan" value="${escAttr(ws.current_plan || "")}" placeholder="接下来几小时的计划"></div>
-            <div class="form-group"><label>open_threads</label><textarea id="snap_ws_threads" class="snap-textarea" rows="3" placeholder="每行一个未闭合线索">${escHtml((ws.open_threads || []).join("\n"))}</textarea></div>
-            <div class="form-group"><label>last_world_event_at</label><input id="snap_ws_event_at" value="${escAttr(ws.last_world_event_at || "")}" placeholder="ISO string"></div>
-          </div>
-        </fieldset>
-        ${renderLifeArcsEditor(role.lifeArcs || [])}
-        ${renderSnapshotTextarea("threadIntents", "thread proactive intents (每个 session 的 proactive intents 数组，通常不需要手动编辑)", role.threadIntents || [])}
-        ${(() => {
-          const val = role.lastOutput;
-          const str = val ? JSON.stringify(val, null, 2) : "";
-          return `<div class="form-group"><label>last hidden output (上次 hidden world 完整输出快照，仅供查看)</label><textarea id="snap_lastOutput" class="profile-prompt-editor" spellcheck="false" style="min-height:180px" readonly>${escHtml(str)}</textarea></div>`;
-        })()}
-        <div class="form-grid">
-          <div class="form-group"><label>lastDailyShareSeedAt</label><input id="snap_lastDailyShareSeedAt" value="${escAttr(formatTime(role.lastDailyShareSeedAt))}"></div>
-          <div class="form-group"><label>lastScheduleCheckAt</label><input id="snap_lastScheduleCheckAt" value="${escAttr(formatTime(role.lastScheduleCheckAt))}"></div>
-        </div>
-      </div>
-      <div class="editor-actions">
-        <button class="btn btn-primary" data-action="save-world-reset">Save Snapshot and Reset Session</button>
-        <button class="btn" data-action="cancel-world-reset">Cancel</button>
-      </div>
-    </div>
-  `;
-  content.querySelectorAll('[data-action="cancel-world-reset"]').forEach(btn => {
-    btn.addEventListener("click", () => { worldState.resetProfile = ""; renderWorld(); });
-  });
-  content.querySelector('[data-action="save-world-reset"]')?.addEventListener("click", saveWorldReset);
-}
-
-function renderLifeArcsEditor(arcs) {
-  const list = (Array.isArray(arcs) ? arcs : []).filter(a => a.status !== "closed");
-  if (!list.length) return `<div class="snap-fieldset"><legend>active life_arcs</legend><p class="muted">暂无活跃 life_arc</p></div>`;
-  const kinds = ["travel","work","school","personal","special_date"];
-  const cards = list.map((a, i) => `
-    <div class="la-card" data-index="${i}">
-      <div class="la-card-head">
-        <span class="la-card-title">${escHtml(a.title || "(untitled)")}</span>
-        <span class="la-card-kind">${escHtml(a.kind || "")}</span>
-        <span class="la-card-status">${a.status || "active"}</span>
-      </div>
-      <div class="la-card-body" style="display:flex;flex-direction:column;gap:8px">
-        <div class="form-group"><label>title</label><input id="la_${i}_title" value="${escAttr(a.title || "")}"></div>
-        <div class="form-group"><label>summary</label><textarea id="la_${i}_summary" class="snap-textarea" rows="2">${escHtml(a.summary || "")}</textarea></div>
-        <div class="form-group"><label>progressNote</label><textarea id="la_${i}_state" class="snap-textarea" rows="2">${escHtml(a.progressNote || "")}</textarea></div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <div class="form-group"><label>kind</label><select id="la_${i}_kind">${kinds.map(k => `<option value="${k}"${a.kind === k ? " selected" : ""}>${k}</option>`).join("")}</select></div>
-          <div class="form-group"><label>status</label><select id="la_${i}_status"><option value="active"${a.status !== "closed" ? " selected" : ""}>active</option><option value="closed"${a.status === "closed" ? " selected" : ""}>closed</option></select></div>
-          <div class="form-group"><label>timeStart</label><input id="la_${i}_ts" value="${escAttr(formatTime(a.timeStart))}" placeholder="ISO" style="width:180px"></div>
-          <div class="form-group"><label>timeEnd</label><input id="la_${i}_te" value="${escAttr(formatTime(a.timeEnd))}" placeholder="ISO" style="width:180px"></div>
-          <div class="form-group"><label>expiresAt</label><input id="la_${i}_exp" value="${escAttr(formatTime(a.expiresAt))}" placeholder="ISO" style="width:180px"></div>
-        </div>
-        <div class="form-group"><label>id</label><input id="la_${i}_id" value="${escAttr(a.id || "")}" readonly style="opacity:0.6"></div>
-      </div>
-    </div>
-  `).join("");
-  return `<div class="snap-fieldset"><legend>active life_arcs (${list.length})</legend>${cards}</div>`;
-}
-
-function renderSnapshotTextarea(id, label, value) {
-  return `<div class="form-group"><label>${escHtml(label)}</label><textarea id="snap_${id}" class="profile-prompt-editor" spellcheck="false" style="min-height:180px">${escHtml(JSON.stringify(value || null, null, 2))}</textarea></div>`;
-}
-
-async function saveWorldReset() {
-  const profile = worldState.resetProfile || worldState.profile;
-  const threadsRaw = content.querySelector("#snap_ws_threads")?.value || "";
-  const openThreads = threadsRaw.split("\n").map(s => s.trim()).filter(Boolean);
-  const worldState = {
-    location: content.querySelector("#snap_ws_location")?.value || null,
-    activity: content.querySelector("#snap_ws_activity")?.value || null,
-    awake_state: content.querySelector("#snap_ws_awake")?.value || null,
-    current_plan: content.querySelector("#snap_ws_plan")?.value || null,
-    open_threads: openThreads.length ? openThreads : null,
-    last_world_event_at: content.querySelector("#snap_ws_event_at")?.value || null,
-  };
-  const payload = {
-    profile,
-    worldState,
-    lifeArcs: (() => {
-      const arcs = [];
-      content.querySelectorAll(".la-card").forEach(card => {
-        const i = card.dataset.index;
-        arcs.push({
-          id: content.querySelector(`#la_${i}_id`)?.value || "",
-          title: content.querySelector(`#la_${i}_title`)?.value || "",
-          kind: content.querySelector(`#la_${i}_kind`)?.value || "",
-          status: content.querySelector(`#la_${i}_status`)?.value || "active",
-          summary: content.querySelector(`#la_${i}_summary`)?.value || "",
-          progressNote: content.querySelector(`#la_${i}_state`)?.value || "",
-          timeStart: content.querySelector(`#la_${i}_ts`)?.value || null,
-          timeEnd: content.querySelector(`#la_${i}_te`)?.value || null,
-          expiresAt: content.querySelector(`#la_${i}_exp`)?.value || null,
-        });
-      });
-      return arcs;
-    })(),
-    threadIntents: JSON.parse(content.querySelector("#snap_threadIntents")?.value || "[]"),
-    lastOutput: JSON.parse(content.querySelector("#snap_lastOutput")?.value || "null"),
-    lastDailyShareSeedAt: content.querySelector("#snap_lastDailyShareSeedAt")?.value || null,
-    lastScheduleCheckAt: content.querySelector("#snap_lastScheduleCheckAt")?.value || null,
-  };
-  const r = await post("/api/world/reset", payload);
-  toast(r.ok ? "Hidden world reset" : r.error, r.ok);
-  if (r.ok) {
-    worldState.resetProfile = "";
-    renderWorld();
   }
 }
 
@@ -1626,6 +1584,8 @@ let historyState = { q: "", sessionKey: "", page: 1, dateFrom: "", dateTo: "" };
 const HISTORY_PAGE_SIZE = 20;
 
 async function renderHistory() {
+  // Always refresh backend state
+  try { const s = await get("/api/status"); window._activeBackend = s.currentAI || "cc"; } catch {}
   const q = historyState.q || "";
   const dateFrom = historyState.dateFrom || "";
   const dateTo = historyState.dateTo || "";
@@ -1677,6 +1637,22 @@ async function renderHistory() {
 }
 
 function bindHistoryEvents() {
+  // Add edit buttons to messages if API mode
+  if (backendCanEdit()) {
+    document.querySelectorAll(".history-message").forEach(article => {
+      const header = article.querySelector("header");
+      if (!header || header.querySelector(".btn-edit")) return;
+      const btn = document.createElement("button");
+      btn.className = "btn-edit";
+      btn.textContent = "edit";
+      btn.dataset.eid = article.dataset.eid;
+      btn.addEventListener("click", () => editHistoryMsg(btn));
+      const span = document.createElement("span");
+      span.className = "header-edit";
+      span.appendChild(btn);
+      header.appendChild(span);
+    });
+  }
   const doSearch = () => {
     const input = content.querySelector("#historySearch");
     historyState.q = (input?.value || "").trim();
@@ -1701,6 +1677,7 @@ function bindHistoryEvents() {
   content.querySelectorAll("[data-history-session]").forEach(btn => {
     btn.addEventListener("click", () => {
       historyState.sessionKey = btn.dataset.historySession;
+      historyState.q = "";
       historyState.page = 1;
       renderHistory();
     });
@@ -1762,7 +1739,7 @@ function renderHistoryConversations(conversations) {
     <button class="history-conv ${item.key === historyState.sessionKey ? "active" : ""}" data-history-session="${escAttr(item.key)}">
       <span class="history-conv-top">
         <strong>${escHtml(item.sessionName || "Session")}</strong>
-        <span class="badge badge-${item.ai === "cc" ? "cc" : "codex"}">${item.ai === "cc" ? "CC" : "Codex"}</span>
+        <span class="badge badge-${item.ai === "cc" ? "cc" : "codex"}">${item.ai === "cc" ? "CC" : item.ai === "api" ? "API" : "Codex"}</span>
       </span>
       <span class="history-conv-meta">${escHtml(item.profile || "default")} · ${Number(item.count || 0)} msgs · ${Number(item.sceneletCount || 0)} scenelets</span>
       <span class="history-conv-last">${escHtml(item.lastText || "")}</span>
@@ -1770,6 +1747,8 @@ function renderHistoryConversations(conversations) {
     </button>
   `).join("");
 }
+
+const backendCanEdit = () => window._activeBackend === "api";
 
 function renderHistoryMessages(messages) {
   if (!messages.length) return '<p class="empty-text">No messages in this conversation</p>';
@@ -1779,13 +1758,84 @@ function renderHistoryMessages(messages) {
         <span>${item.role === "assistant" ? escHtml(item.profile || "Assistant") : "User"}</span>
         <time>${formatTime(item.timestamp)}</time>
         ${item.kind && item.kind !== "chat" ? `<span class="history-kind">${escHtml(item.kind)}</span>` : ""}
+        <span class="header-edit">${backendCanEdit() ? `<button class="btn-edit" data-eid="${escAttr(item.id)}" onclick="editHistoryMsg(this)">edit</button>` : ''}</span>
       </header>
-      <div class="history-text">${escHtml(item.text || "")}</div>
+      <div class="history-text" data-eid="${escAttr(item.id)}">${escHtml(item.text || "")}</div>
       ${renderHistorySceneletNote(item)}
       ${renderHistoryToolNote(item)}
       ${item.scenelet ? `<details class="scenelet-details"><summary>inner scenelet</summary><pre>${escHtml(item.scenelet)}</pre></details>` : ""}
     </article>
   `).join("");
+}
+
+async function editHistoryMsg(btn) {
+  const eid = btn.dataset.eid;
+  const article = btn.closest("article");
+  const textDiv = article.querySelector(".history-text");
+  const isEditing = btn.classList.contains("editing");
+
+  if (!isEditing) {
+    // Replace div with textarea pre-filled with original content
+    const original = textDiv.textContent.trim();
+    const ta = document.createElement("textarea");
+    ta.className = "history-edit-area active";
+    ta.value = original;
+    ta.dataset.eid = eid;
+    textDiv.replaceWith(ta);
+    ta.focus();
+    btn.textContent = "save";
+    btn.classList.add("editing");
+    btn._origTextDiv = textDiv;
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "btn-edit cancel";
+    cancelBtn.textContent = "cancel";
+    cancelBtn.onclick = () => {
+      ta.replaceWith(textDiv);
+      btn.textContent = "edit";
+      btn.classList.remove("editing");
+      cancelBtn.remove();
+      delBtn.remove();
+    };
+    btn.parentNode.appendChild(cancelBtn);
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn-edit delete";
+    delBtn.textContent = "delete";
+    delBtn.onclick = async () => {
+      if (!confirm(`Delete this message?`)) return;
+      try {
+        const resp = await fetch("/api/history/" + encodeURIComponent(eid), {
+          method: "DELETE", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ syncToApi: true }),
+        });
+        if ((await resp.json()).ok) {
+          const convItem = article.closest("li");
+          article.remove();
+          if (convItem && !convItem.querySelector("article")) convItem.remove();
+        }
+      } catch (e) { alert(`Delete failed: ` + e.message); }
+    };
+    btn.parentNode.appendChild(delBtn);
+  } else {
+    // Save
+    const ta = article.querySelector(".history-edit-area.active");
+    const newText = (ta?.value || "").trim();
+    if (!newText) return;
+    try {
+      const resp = await fetch("/api/history/" + encodeURIComponent(eid), {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: newText, syncToApi: true }),
+      });
+      if ((await resp.json()).ok) {
+        const origDiv = btn._origTextDiv;
+        origDiv.textContent = newText;
+        ta.replaceWith(origDiv);
+        btn.textContent = "edit";
+        btn.classList.remove("editing");
+        btn.parentNode.querySelector(".cancel")?.remove();
+        btn.parentNode.querySelector(".delete")?.remove();
+      }
+    } catch (e) { alert("保存失败: " + e.message); }
+  }
 }
 
 function renderHistorySceneletNote(item) {
@@ -1899,8 +1949,8 @@ async function renderProactive() {
 function renderProactiveSession(session, now) {
   const intents = session.intents || [];
   const lifeArcs = session.lifeArcs || [];
-  const activeArcs = lifeArcs.filter(a => a.status !== "closed");
-  const closedArcs = lifeArcs.filter(a => a.status === "closed");
+  const activeArcs = lifeArcs.filter(a => a.status !== "closed" && (!a.expiresAt || Date.parse(a.expiresAt) >= now));
+  const expiredArcs = lifeArcs.filter(a => a.status !== "closed" && a.expiresAt && Date.parse(a.expiresAt) < now);
   const pending = intents.filter(i => i.status === "pending").reverse();
   const sent = intents.filter(i => i.status === "sent").reverse();
   const cancelled = intents.filter(i => i.status === "cancelled").reverse();
@@ -1938,12 +1988,9 @@ function renderProactiveSession(session, now) {
     }
   }
 
-  const sentVisible = sent.length;
-  const doneVisible = cancelled.length;
-
   const total = pending.length + sent.length + cancelled.length;
   const candidates = session.scheduleCandidates || [];
-  const candidatesHtml = candidates.length ? `
+  const candidatesHtml = `
     <details class="proactive-group">
       <summary class="proactive-group-summary">
         <span class="proactive-group-dot candidate"></span>
@@ -1951,22 +1998,22 @@ function renderProactiveSession(session, now) {
         <span class="proactive-group-count">${candidates.length}</span>
       </summary>
       <div class="proactive-group-body">
-        ${renderScheduleCandidatesList(candidates)}
+        ${candidates.length ? renderScheduleCandidatesList(candidates) : '<div class="proactive-group-empty">No schedule candidates</div>'}
       </div>
     </details>
-  ` : "";
-  const closedHtml = closedArcs.length ? `
+  `;
+  const expiredHtml = `
     <details class="proactive-group">
       <summary class="proactive-group-summary">
         <span class="proactive-group-dot closed"></span>
-        <span class="proactive-group-label">Closed</span>
-        <span class="proactive-group-count">${closedArcs.length}</span>
+        <span class="proactive-group-label">Expired</span>
+        <span class="proactive-group-count">${expiredArcs.length}</span>
       </summary>
       <div class="proactive-group-body">
-        ${renderLifeArcList(closedArcs, now)}
+        ${expiredArcs.length ? renderLifeArcList(expiredArcs, now) : '<div class="proactive-group-empty">No expired life arcs</div>'}
       </div>
     </details>
-  ` : "";
+  `;
   return `
     <div class="proactive-session-card">
       <div class="proactive-session-head">
@@ -1980,13 +2027,13 @@ function renderProactiveSession(session, now) {
       </div>
       ${activeArcs.length ? renderLifeArcList(activeArcs, now) : ""}
       ${candidatesHtml}
-      ${closedHtml}
+      ${expiredHtml}
       <div class="proactive-intent-list">
         ${pendingItems.length
           ? pendingItems.join("")
           : '<div class="proactive-group-empty">No pending intents</div>'}
-        ${sentVisible ? renderCollapsibleGroup("sent", sentVisible, sentItems) : ""}
-        ${doneVisible ? renderCollapsibleGroup("done", doneVisible, standalone.map(i => renderProactiveIntent(i, now, 0))) : ""}
+        ${renderCollapsibleGroup("sent", sent.length, sentItems)}
+        ${renderCollapsibleGroup("done", cancelled.length, standalone.map(i => renderProactiveIntent(i, now, 0)))}
       </div>
     </div>
   `;
@@ -2085,8 +2132,10 @@ function renderProactiveIntentWithMerged(target, now, mergedIntents) {
 }
 
 function renderCollapsibleGroup(groupClass, count, itemsHtml) {
-  if (count === 0) return "";
   const label = groupClass === "sent" ? "Sent" : "Done";
+  const body = count > 0
+    ? (Array.isArray(itemsHtml) ? itemsHtml.join("") : itemsHtml)
+    : `<div class="proactive-group-empty">No ${label.toLowerCase()} intents</div>`;
   return `
     <details class="proactive-group">
       <summary class="proactive-group-summary">
@@ -2094,9 +2143,7 @@ function renderCollapsibleGroup(groupClass, count, itemsHtml) {
         <span class="proactive-group-label">${label}</span>
         <span class="proactive-group-count">${count}</span>
       </summary>
-      <div class="proactive-group-body">
-        ${Array.isArray(itemsHtml) ? itemsHtml.join("") : itemsHtml}
-      </div>
+      <div class="proactive-group-body">${body}</div>
     </details>
   `;
 }
@@ -2135,379 +2182,103 @@ function renderProactiveIntent(intent, now, mergedCount = 0) {
   `;
 }
 
-// Memory
-let memoryState = { role: "", category: "", editingId: null, renameUid: null, allEntries: [], allUsers: [], page: 1 };
-const MEM_PAGE_SIZE = 12;
+// Memory — Markdown document editor
+let memoryDoc = "";
+let memoryPreview = true;
+let worldMemoryDoc = "";
+let worldMemoryPreview = true;
 
-const CAT_LABELS = { trait: "Trait", preference: "Preference", fact: "Fact" };
-const CAT_ORDER = ["trait", "preference", "fact"];
-
-function currentUserId() {
-  return memoryState.allUsers[0]?.userId || "";
-}
-
-function currentDisplayName() {
-  const u = memoryState.allUsers[0];
-  return (u?.displayName) || (u?.userId) || "";
-}
-
-function userDisplayName(uid) {
-  const u = memoryState.allUsers.find(u => u.userId === uid);
-  return (u?.displayName) || uid;
+function renderMd(src) {
+  const esc = String(src)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const paragraphs = esc.split(/\n\n+/);
+  return paragraphs.map(block => {
+    const lines = block.split("\n");
+    // headers
+    if (lines.length === 1 && /^#{1,3} /.test(lines[0])) {
+      const m = lines[0].match(/^(#{1,3}) (.+)$/);
+      const level = m[1].length + 1; // # → h2, ## → h3, ### → h4
+      return `<h${level}>${m[2]}</h${level}>`;
+    }
+    // unordered lists
+    if (lines.every(l => /^- /.test(l))) {
+      const items = lines.map(l => `<li>${l.slice(2)}</li>`).join("");
+      return `<ul>${items}</ul>`;
+    }
+    // regular paragraph with inline bold
+    return `<p>${block.replace(/\n/g, "<br>").replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")}</p>`;
+  }).join("\n");
 }
 
 async function renderMemory() {
-  const d = await get("/api/memory");
-  const entries = d.entries || [];
-  const users = d.users || [];
-  memoryState.allEntries = entries;
-  memoryState.allUsers = users;
+  const [wd, ud] = await Promise.all([get("/api/world-memory"), get("/api/memory")]);
+  worldMemoryDoc = wd.content || "";
+  memoryDoc = ud.content || "";
 
-  const uid = currentUserId();
-  const selUser = users.find(u => u.userId === uid);
-  const roles = selUser ? selUser.roles : [];
-  if (!roles.includes(memoryState.role) && roles.length) {
-    memoryState.role = roles[0];
+  function memoryPanel(label, doc, preview, toggleId, saveId) {
+    return `
+      <div class="panel">
+        <div class="panel-head">
+          <h2>${label}</h2>
+          <div style="display:flex;gap:8px">
+            <span style="color:var(--muted);font-size:13px;align-self:center">${doc.length} chars</span>
+            <button class="btn" id="${toggleId}">${preview ? "Edit" : "Preview"}</button>
+            <button class="btn btn-primary" id="${saveId}">Save</button>
+          </div>
+        </div>
+        ${preview
+          ? `<article class="markdown-body" style="min-height:300px;padding:32px">${renderMd(doc)}</article>`
+          : `<textarea id="${toggleId}-editor" style="width:100%;min-height:300px;font-family:monospace;font-size:13px;padding:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);resize:vertical">${escHtml(doc)}</textarea>`}
+      </div>`;
   }
 
-  const filtered = filterMemoryEntries();
-  const totalPages = Math.ceil(filtered.length / MEM_PAGE_SIZE) || 1;
-  if (memoryState.page > totalPages) memoryState.page = totalPages;
-  const start = (memoryState.page - 1) * MEM_PAGE_SIZE;
-  const paged = filtered.slice(start, start + MEM_PAGE_SIZE);
-  const counts = { trait: 0, preference: 0, fact: 0 };
-  for (const e of filtered) { if (counts[e.category] !== undefined) counts[e.category]++; }
-
-  const dName = currentDisplayName();
   content.innerHTML = `
-    <div class="panel">
-      <div class="panel-head">
-        <h2>Memory — ${escHtml(dName)}</h2>
-        <button class="btn btn-primary" id="memoryAddBtn">+ Add Memory</button>
-      </div>
-      ${renderMemorySummary(filtered.length, counts)}
-      ${renderMemoryToolbar(roles)}
-      ${renderMemoryFilterChips(counts)}
-      ${renderMemoryCards(paged)}
-      ${renderPagination(filtered.length, memoryState.page, totalPages, "mem")}
-    </div>
-    <div id="memoryEditorMount"></div>
+    ${memoryPanel("World Memory", worldMemoryDoc, worldMemoryPreview, "worldMemoryToggleBtn", "worldMemorySaveBtn")}
+    ${memoryPanel("User Memory", memoryDoc, memoryPreview, "memoryToggleBtn", "memorySaveBtn")}
   `;
 
-  bindMemoryEvents();
-}
-
-function filterMemoryEntries() {
-  let items = memoryState.allEntries;
-  const uid = currentUserId();
-  if (uid) items = items.filter(e => e.userId === uid);
-  if (memoryState.role) items = items.filter(e => e.role === memoryState.role);
-  if (memoryState.category) items = items.filter(e => e.category === memoryState.category);
-  items.sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
-  return items;
-}
-
-function renderMemorySummary(total, counts) {
-  return `
-    <div class="memory-summary">
-      <div class="memory-summary-item total"><span class="label">Total</span><span class="value">${total}</span></div>
-      <div class="memory-summary-item trait"><span class="label">Trait</span><span class="value">${counts.trait}</span></div>
-      <div class="memory-summary-item preference"><span class="label">Preference</span><span class="value">${counts.preference}</span></div>
-      <div class="memory-summary-item fact"><span class="label">Fact</span><span class="value">${counts.fact}</span></div>
-    </div>
-  `;
-}
-
-function renderMemoryToolbar(roles) {
-  const userId = currentUserId();
-  const dName = currentDisplayName();
-  const isRenaming = memoryState.renameUid === userId;
-  return `
-    <div class="memory-toolbar">
-      <div class="form-group" style="margin-bottom:0;min-width:160px">
-        <label>User</label>
-        ${isRenaming
-          ? `<span class="rename-row"><input id="renameInput" class="rename-input" value="${escAttr(dName)}" placeholder="Display name"><button class="btn btn-primary" data-action="save-rename" style="min-height:28px;padding:2px 12px;font-size:11px">Save</button><button class="btn" data-action="cancel-rename" style="min-height:28px;padding:2px 12px;font-size:11px">Cancel</button></span>`
-          : `<span class="memory-user-inline"><span class="user-display-name">${escHtml(dName)}</span>${dName !== userId ? `<span class="user-raw-id">(${escHtml(userId)})</span>` : ""}<button class="btn rename-user-btn" data-action="rename-user" title="Rename" style="margin-left:6px">✎</button></span>`}
-      </div>
-      <div class="form-group" style="margin-bottom:0;min-width:160px">
-        <label>Role</label>
-        <select id="memoryRoleSelect">${roles.map(r => `<option value="${escAttr(r)}"${r === memoryState.role ? " selected" : ""}>${escHtml(r)}</option>`).join("") || '<option value="">--</option>'}</select>
-      </div>
-    </div>
-  `;
-}
-
-function renderMemoryFilterChips(counts) {
-  const cat = memoryState.category;
-  const total = (counts.trait || 0) + (counts.preference || 0) + (counts.fact || 0);
-  let chips = `<button class="memory-filter-chip${cat === "" ? " active" : ""}" data-cat="">All<span class="chip-count">${total}</span></button>`;
-  for (const c of CAT_ORDER) {
-    chips += `<button class="memory-filter-chip${cat === c ? " active" : ""}" data-cat="${c}">${CAT_LABELS[c]}<span class="chip-count">${counts[c] || 0}</span></button>`;
-  }
-  return `<div class="memory-filter-chips">${chips}</div>`;
-}
-
-function renderMemoryCards(entries) {
-  if (!entries.length) return '<div class="memory-empty">No memory entries found. Click "+ Add Memory" to create one.</div>';
-  let html = '<div class="memory-section-cards">';
-  for (const item of entries) {
-    html += renderMemoryCard(item);
-  }
-  html += '</div>';
-  return html;
-}
-
-function renderMemoryCard(item) {
-  const isEditing = memoryState.editingId === item.id;
-  if (isEditing) return renderMemoryCardEdit(item);
-
-  return `
-    <div class="memory-card" data-mem-id="${escAttr(item.id)}">
-      <div class="memory-card-top">
-        <span class="memory-card-category ${item.category}">${CAT_LABELS[item.category] || item.category}</span>
-        <span class="memory-card-role">${escHtml(item.role || "")}</span>
-        <div class="memory-card-actions">
-          <button class="btn" data-action="edit-memory" data-id="${escAttr(item.id)}">Edit</button>
-          <button class="btn btn-danger" data-action="delete-memory" data-id="${escAttr(item.id)}">Del</button>
-        </div>
-      </div>
-      <div class="memory-card-text">${escHtml(item.text)}</div>
-      <div class="memory-card-meta">
-        <div class="memory-card-tags">
-          ${item.sensitive ? '<span class="memory-tag sensitive">Sensitive</span>' : ''}
-          <span class="memory-tag source">${escHtml(item.source || "manual")}</span>
-        </div>
-        <span class="meta-sep">·</span>
-        <span>Updated ${formatTime(item.updatedAt)}</span>
-      </div>
-    </div>
-  `;
-}
-
-function renderMemoryCardEdit(item) {
-  return `
-    <div class="memory-card" data-mem-id="${escAttr(item.id)}" style="border-color:var(--primary);box-shadow:0 0 0 3px rgba(31,111,235,0.14);">
-      <div class="form-group" style="margin-bottom:8px">
-        <label>Category</label>
-        <select id="editCat_${escAttr(item.id)}">
-          ${CAT_ORDER.map(c => `<option value="${c}"${item.category === c ? " selected" : ""}>${CAT_LABELS[c]}</option>`).join("")}
-        </select>
-      </div>
-      <div class="form-group" style="margin-bottom:8px">
-        <label>Text</label>
-        <textarea id="editText_${escAttr(item.id)}" style="min-height:70px">${escHtml(item.text)}</textarea>
-      </div>
-      <div class="form-group" style="margin-bottom:10px">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:650">
-          <input type="checkbox" id="editSensitive_${escAttr(item.id)}"${item.sensitive ? " checked" : ""}> Sensitive
-        </label>
-      </div>
-      <div class="editor-actions">
-        <button class="btn btn-primary" data-action="save-memory" data-id="${escAttr(item.id)}">Save</button>
-        <button class="btn" data-action="cancel-edit">Cancel</button>
-      </div>
-    </div>
-  `;
-}
-
-function bindMemoryEvents() {
-  content.querySelector("#memoryAddBtn")?.addEventListener("click", showMemoryEditor);
-
-  content.querySelector("#memoryRoleSelect")?.addEventListener("change", e => {
-    memoryState.role = e.target.value;
-    memoryState.editingId = null;
-    memoryState.renameUid = null;
-    memoryState.page = 1;
-    renderMemory();
-  });
-
-  content.querySelectorAll(".memory-filter-chip").forEach(btn => {
-    btn.addEventListener("click", () => {
-      memoryState.category = btn.dataset.cat;
-      memoryState.editingId = null;
-      memoryState.renameUid = null;
-      memoryState.page = 1;
+  function bindPanel(toggleId, saveId, previewKey, apiPath, label) {
+    document.getElementById(toggleId).addEventListener("click", () => {
+      if (previewKey === "w") worldMemoryPreview = !worldMemoryPreview;
+      else memoryPreview = !memoryPreview;
       renderMemory();
     });
-  });
-
-  // Memory pagination
-  content.querySelectorAll('[data-mem-page]').forEach(btn => {
-    btn.addEventListener("click", () => {
-      memoryState.page = Number(btn.dataset.memPage);
-      renderMemory();
-    });
-  });
-  const memJumpInput = content.querySelector("#memPageJumpInput");
-  const memJumpBtn = content.querySelector("#memPageJumpBtn");
-  if (memJumpInput && memJumpBtn) {
-    memJumpBtn.addEventListener("click", () => {
-      const p = Number(memJumpInput.value);
-      const max = Number(memJumpInput.dataset.totalPages) || 1;
-      if (p >= 1 && p <= max) { memoryState.page = p; renderMemory(); }
-    });
-    memJumpInput.addEventListener("keydown", e => {
-      if (e.key === "Enter") { e.preventDefault(); memJumpBtn.click(); }
+    document.getElementById(saveId).addEventListener("click", async () => {
+      const previewing = previewKey === "w" ? worldMemoryPreview : memoryPreview;
+      const currentDoc = previewKey === "w" ? worldMemoryDoc : memoryDoc;
+      const text = previewing ? currentDoc : document.getElementById(toggleId + "-editor").value;
+      await put(apiPath, { content: text });
+      if (previewKey === "w") worldMemoryDoc = text;
+      else memoryDoc = text;
+      toast(label + " saved");
     });
   }
 
-  content.querySelectorAll('[data-action="edit-memory"]').forEach(btn => {
-    btn.addEventListener("click", () => {
-      memoryState.editingId = btn.dataset.id;
-      memoryState.renameUid = null;
-      renderMemory();
-    });
-  });
-
-  content.querySelectorAll('[data-action="cancel-edit"]').forEach(btn => {
-    btn.addEventListener("click", () => {
-      memoryState.editingId = null;
-      renderMemory();
-    });
-  });
-
-  content.querySelectorAll('[data-action="save-memory"]').forEach(btn => {
-    btn.addEventListener("click", () => saveMemoryEdit(btn.dataset.id));
-  });
-
-  content.querySelectorAll('[data-action="delete-memory"]').forEach(btn => {
-    btn.addEventListener("click", () => deleteMemoryItem(btn.dataset.id));
-  });
-
-  content.querySelectorAll('[data-action="rename-user"]').forEach(btn => {
-    btn.addEventListener("click", () => {
-      memoryState.renameUid = currentUserId();
-      memoryState.editingId = null;
-      renderMemory();
-      setTimeout(() => {
-        const inp = content.querySelector("#renameInput");
-        if (inp) { inp.focus(); inp.select(); }
-      }, 60);
-    });
-  });
-
-  content.querySelectorAll('[data-action="save-rename"]').forEach(btn => {
-    btn.addEventListener("click", () => saveRename());
-  });
-
-  content.querySelectorAll('[data-action="cancel-rename"]').forEach(btn => {
-    btn.addEventListener("click", () => { memoryState.renameUid = null; renderMemory(); });
-  });
-
-  const renameInp = content.querySelector("#renameInput");
-  if (renameInp) {
-    renameInp.addEventListener("keydown", e => {
-      if (e.key === "Enter") saveRename();
-    });
-  }
+  bindPanel("worldMemoryToggleBtn", "worldMemorySaveBtn", "w", "/api/world-memory", "World Memory");
+  bindPanel("memoryToggleBtn", "memorySaveBtn", "u", "/api/memory", "User Memory");
 }
 
-async function saveRename() {
-  const uid = currentUserId();
-  const inp = content.querySelector("#renameInput");
-  if (!inp || !uid) return;
-  const displayName = inp.value.trim();
-  const r = await api("PUT", "/api/memory/user", { userId: uid, displayName });
-  if (r.ok) {
-    toast(displayName ? `Renamed to "${displayName}"` : "Display name cleared");
-    memoryState.renameUid = null;
-    renderMemory();
-  } else {
-    toast(r.error, false);
-  }
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
+function escAttr(s) { return escHtml(s); }
 
-function showMemoryEditor() {
-  const mount = content.querySelector("#memoryEditorMount");
-  if (!mount) return;
-  mount.innerHTML = `
-    <div class="memory-editor-overlay" id="memoryOverlay">
-      <div class="memory-editor">
-        <h3>New Memory Entry</h3>
-        <div class="form-group">
-          <label>Role</label>
-          <input id="memNewRole" value="${escAttr(memoryState.role)}" placeholder="e.g. 白鹭千圣">
-        </div>
-        <div class="form-group">
-          <label>Category</label>
-          <select id="memNewCat">
-            ${CAT_ORDER.map(c => `<option value="${c}">${CAT_LABELS[c]}</option>`).join("")}
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Text</label>
-          <textarea id="memNewText" placeholder="Memory content (max 180 chars)" style="min-height:80px"></textarea>
-        </div>
-        <div class="form-group">
-          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:650">
-            <input type="checkbox" id="memNewSensitive"> Sensitive
-          </label>
-        </div>
-        <div class="btn-row">
-          <button class="btn btn-primary" id="memNewSave">Add</button>
-          <button class="btn" id="memNewCancel">Cancel</button>
-        </div>
-      </div>
-    </div>
-  `;
-
-  mount.querySelector("#memNewSave").addEventListener("click", async () => {
-    const userId = currentUserId();
-    const role = mount.querySelector("#memNewRole").value.trim();
-    const category = mount.querySelector("#memNewCat").value;
-    const text = mount.querySelector("#memNewText").value.trim();
-    const sensitive = mount.querySelector("#memNewSensitive").checked;
-    if (!userId || !role || !text) { toast("Role and Text are required", false); return; }
-    const r = await post("/api/memory", { userId, role, category, text, sensitive });
-    if (r.ok) {
-      toast(r.updated ? "Updated existing entry" : "Added");
-      memoryState.role = role;
-      memoryState.editingId = null;
-      mount.innerHTML = "";
-      renderMemory();
-    } else {
-      toast(r.error, false);
-    }
-  });
-
-  mount.querySelector("#memNewCancel").addEventListener("click", () => { mount.innerHTML = ""; });
-  mount.querySelector("#memoryOverlay")?.addEventListener("click", e => {
-    if (e.target === e.currentTarget) mount.innerHTML = "";
-  });
-
-  setTimeout(() => mount.querySelector("#memNewUserId")?.focus(), 60);
+// RAG keyword helpers — read/write pending edits stored in _ragKwEdits
+function getRagKw(groupKey) {
+  if (!window._ragKwEdits) window._ragKwEdits = {};
+  const val = window._ragKwEdits[groupKey];
+  if (typeof val === "string") return val.split("|").filter(Boolean);
+  if (typeof val === "number") return [String(val)];
+  return [];
 }
-
-async function saveMemoryEdit(id) {
-  const cat = content.querySelector(`#editCat_${id}`)?.value;
-  const text = content.querySelector(`#editText_${id}`)?.value?.trim();
-  const sensitive = content.querySelector(`#editSensitive_${id}`)?.checked;
-  if (!text) { toast("Text is required", false); return; }
-  const item = memoryState.allEntries.find(e => e.id === id);
-  if (!item) { toast("Item not found", false); return; }
-  const r = await api("PUT", "/api/memory", { id, category: cat, text, sensitive, userId: item.userId, role: item.role });
-  if (r.ok) {
-    toast("Saved");
-    memoryState.editingId = null;
-    renderMemory();
-  } else {
-    toast(r.error, false);
-  }
-}
-
-async function deleteMemoryItem(id) {
-  const item = memoryState.allEntries.find(e => e.id === id);
-  if (!item) return;
-  const dName = userDisplayName(item.userId);
-  if (!confirm(`Delete memory entry?\n\n"${item.text.slice(0, 80)}"\n\nUser: ${dName} / Role: ${item.role}`)) return;
-  const r = await del("/api/memory", { id, userId: item.userId, role: item.role });
-  if (r.ok) {
-    toast("Deleted");
-    renderMemory();
-  } else {
-    toast(r.error, false);
-  }
+function setRagKw(groupKey, arr) {
+  if (!window._ragKwEdits) window._ragKwEdits = {};
+  window._ragKwEdits[groupKey] = arr.join("|");
 }
 
 // Config
@@ -2527,11 +2298,12 @@ async function renderConfig() {
 
   const formHtml = [
     S("Paths", F("paths.npmGlobal", "NPM Global Directory", c.paths?.npmGlobal, "text", "Auto") + F("paths.claude", "Claude Code Path", c.paths?.claude, "text", "Auto") + F("paths.codex", "Codex Path", c.paths?.codex, "text", "Auto") + F("paths.ragScript", "RAG Script Path", c.paths?.ragScript, "text", "Auto") + F("paths.workDir", "AI Working Directory", c.paths?.workDir, "text", "Auto")),
-    S("Proxy", F("proxy.https", "Shared HTTPS Proxy", c.proxy?.https, "text", "Fallback") + F("proxy.claudeHttps", "Claude HTTPS Proxy", c.proxy?.claudeHttps, "text", "Direct when empty") + F("proxy.codexHttps", "Codex HTTPS Proxy", c.proxy?.codexHttps, "text", "http://127.0.0.1:7892") + F("proxy.ragHttps", "RAG HTTPS Proxy", c.proxy?.ragHttps, "text", "Fallback")),
+    S("API", F("api.baseUrl", "API Base URL", c.api?.baseUrl, "text", "https://api.deepseek.com") + F("api.apiKey", "API Key", c.api?.apiKey, "password") + F("api.model", "API Model", c.api?.model, "text", "deepseek-v4-pro")),
+    S("Proxy", F("proxy.https", "Shared HTTPS Proxy", c.proxy?.https, "text", "Fallback") + F("proxy.claudeHttps", "Claude HTTPS Proxy", c.proxy?.claudeHttps, "text") + F("proxy.codexHttps", "Codex HTTPS Proxy", c.proxy?.codexHttps, "text") + F("proxy.ragHttps", "RAG HTTPS Proxy", c.proxy?.ragHttps, "text", "Fallback")),
     S("Models", F("models.claudeFast", "Claude Fast Model", c.models?.claudeFast) + F("models.claudeFallback", "Claude Fallback Model", c.models?.claudeFallback)),
     S("Timeouts", F("timeouts.aiMs", "AI Timeout (ms)", c.timeouts?.aiMs, "number")),
-    S("Vision", Select("vision.mode", "Mode", c.vision?.mode || "auto", [["auto", "Auto"], ["external", "External API"], ["native", "Native backend"], ["off", "Off"]]) + F("vision.baseUrl", "API Base URL", c.vision?.baseUrl, "text", "Default SiliconFlow") + F("vision.apiKey", "API Key", c.vision?.apiKey, "password", "Only for External API") + F("vision.model", "Model Name", c.vision?.model, "text", "Default Qwen/Qwen3-VL-32B-Instruct") + F("vision.detail", "Detail Level", c.vision?.detail) + F("vision.timeoutMs", "Timeout (ms)", c.vision?.timeoutMs, "number")),
-    S("RAG", F("rag.knowledgeDir", "Knowledge Directory", c.rag?.knowledgeDir) + F("rag.collectionName", "Collection Name", c.rag?.collectionName) + F("rag.embedModel", "Embedding Model", c.rag?.embedModel) + F("rag.storeDir", "Vector Store Dir", c.rag?.storeDir) + F("rag.modelCacheDir", "Model Cache Dir", c.rag?.modelCacheDir) + F("rag.scoreMargin", "Score Margin", c.rag?.scoreMargin, "number") + F("rag.chunkMaxChars", "Chunk Max Chars", c.rag?.chunkMaxChars, "number") + F("rag.batchSize", "Batch Size", c.rag?.batchSize, "number") + F("rag.enabled", "Enabled (true/false)", c.rag?.enabled)),
+    S("Vision", Select("vision.mode", "Mode", c.vision?.mode || "auto", [["auto", "Auto"], ["external", "External API"], ["native", "Native backend"], ["off", "Off"]]) + F("vision.baseUrl", "API Base URL", c.vision?.baseUrl, "text") + F("vision.apiKey", "API Key", c.vision?.apiKey, "password") + F("vision.model", "Model Name", c.vision?.model) + F("vision.detail", "Detail Level", c.vision?.detail) + F("vision.timeoutMs", "Timeout (ms)", c.vision?.timeoutMs, "number")),
+    S("RAG", F("rag.knowledgeDir", "Knowledge Directory", c.rag?.knowledgeDir) + F("rag.collectionName", "Collection Name", c.rag?.collectionName) + F("rag.embedModel", "Embedding Model", c.rag?.embedModel) + F("rag.storeDir", "Vector Store Dir", c.rag?.storeDir) + F("rag.scoreMargin", "Score Margin", c.rag?.scoreMargin, "number") + F("rag.chunkMaxChars", "Chunk Max Chars", c.rag?.chunkMaxChars, "number") + F("rag.batchSize", "Batch Size", c.rag?.batchSize, "number") + F("rag.enabled", "Enabled (true/false)", c.rag?.enabled)),
     S("Send", F("send.chunkSendDelayMs", "Chunk Send Delay (ms)", c.send?.chunkSendDelayMs, "number") + F("send.maxCancelReasonLength", "Max Cancel Reason Length", c.send?.maxCancelReasonLength, "number")),
     S("Logs", F("logs.retentionDays", "Retention (days, 0=never)", c.logs?.retentionDays, "number")),
   ].join("");
@@ -2568,29 +2340,6 @@ function buildNested(fd) {
     else cur[last] = val;
   }
   return obj;
-}
-
-function escHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-function escAttr(s) { return escHtml(s); }
-
-// RAG keyword helpers — read/write pending edits stored in _ragKwEdits
-function getRagKw(groupKey) {
-  if (!window._ragKwEdits) window._ragKwEdits = {};
-  const val = window._ragKwEdits[groupKey];
-  if (typeof val === "string") return val.split("|").filter(Boolean);
-  if (typeof val === "number") return [String(val)];
-  return [];
-}
-function setRagKw(groupKey, arr) {
-  if (!window._ragKwEdits) window._ragKwEdits = {};
-  window._ragKwEdits[groupKey] = arr.join("|");
 }
 
 setInterval(() => { document.getElementById("clock").textContent = new Date().toLocaleString("zh-CN"); }, 1000);

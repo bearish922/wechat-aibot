@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   --bg: #eef1f4;
   --surface: #ffffff;
   --surface-soft: #f7f9fb;
@@ -184,7 +184,7 @@ select {
 
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -1434,7 +1434,7 @@ pre {
   font-weight: 650;
 }
 
-/* ── Prompts Pipeline ───────────────────────────────────── */
+/* 鈹€鈹€ Prompts Pipeline 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .pipeline-phase-box .pipeline-row:last-child {
   border-bottom: 0;
 }
@@ -1828,7 +1828,7 @@ p {
   }
 }
 
-/* ── Memory ─────────────────────────────────────────────── */
+/* 鈹€鈹€ Memory 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .memory-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2380,7 +2380,7 @@ p {
 .snap-fieldset legend { font-weight: 600; font-size: 13px; padding: 0 6px; color: var(--accent); }
 .snap-textarea { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; font-family: var(--mono); resize: vertical; background: var(--bg); color: var(--text); }
 
-/* ── Life Arc Card Editor ─────────────────────────────────── */
+/* 鈹€鈹€ Life Arc Card Editor 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .la-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
 .la-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .la-card-title { font-weight: 600; font-size: 14px; }
@@ -2785,3 +2785,26 @@ p {
 }
 .seasonal-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 
+
+/* history inline edit — button in header, no layout impact */
+.history-message header { position: relative; }
+.header-edit { margin-left: auto; }
+.btn-edit { font-size: 11px; padding: 0 5px; border: 1px solid #e0e0e0; border-radius: 3px; background: #fafafa; cursor: pointer; color: #999; font-family: inherit; line-height: 1.5; }
+.btn-edit:hover { color: #1a73e8; border-color: #1a73e8; }
+.btn-edit.editing { color: #1e8e3e; }
+.btn-edit.cancel { margin-left: 6px; }
+.btn-edit.cancel:hover { color: #ea4335; }
+.btn-edit.delete { margin-left: 6px; }
+.btn-edit.delete:hover { color: #ea4335; font-weight: bold; }
+.history-edit-area { display: none; }
+.history-edit-area.active { display: block; width: 100%; min-height: 150px; background: #f8f9fa; color: #333; border: 1px solid #dadce0; border-radius: 4px; padding: 6px 8px; font: inherit; resize: vertical; }
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; z-index: 999; }
+.modal-box { background: var(--surface); border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.2); min-width: 420px; max-width: 720px; width: 90%; max-height: 80vh; display: flex; flex-direction: column; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 18px; border-bottom: 1px solid var(--surface-quiet); }
+.modal-head h3 { margin: 0; font-size: 16px; }
+.modal-close { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--muted); padding: 0 4px; }
+.cc-toolbar { display: flex; gap: 6px; align-items: center; }
+.cc-toolbar .btn-sm { padding: 3px 10px; font-size: 12px; }
+.cc-toolbar .btn-reset { background: #fff0f0; color: #c62828; border-color: #ef9a9a; }
+.cc-toolbar .btn-reset:hover { background: #ffebee; }
+.modal-body { padding: 18px; overflow: auto; }

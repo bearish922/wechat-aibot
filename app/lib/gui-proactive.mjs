@@ -1,6 +1,11 @@
 ﻿import { addRoute } from "./server.mjs";
 import { sessions, activeAI } from "./state.mjs";
 
+function roleWorldForProfile(profile) {
+  const worlds = globalThis.__wechatRoleWorlds;
+  return worlds?.get?.(profile || "默认") || null;
+}
+
 function uniqueIntents(intents = []) {
   const byId = new Map();
   for (const intent of intents) {
@@ -36,15 +41,16 @@ export function registerProactiveRoutes() {
       for (const [, u] of map) {
         for (const s of u.list) {
           const intents = uniqueIntents(s._proactiveIntents || []);
-          const lifeArcs = allLifeArcs(s._lifeArcs || []);
+          const rw = roleWorldForProfile(s._profile || "默认");
+          const lifeArcs = allLifeArcs(rw?._lifeArcs || []);
           if (!intents.length && !lifeArcs.length) continue;
-          const scheduleCandidates = (s._pendingScheduleCandidates || []).map(c => ({
+          const scheduleCandidates = (rw?._pendingScheduleCandidates || []).map(c => ({
             title: c.title || "",
             summary: c.summary || "",
             kind: c.kind || null,
             subject: c.subject || null,
-            timeStart: c.time_start || null,
-            timeEnd: c.time_end || null,
+            timeStart: c.timeStart || null,
+            timeEnd: c.timeEnd || null,
             basis: c.basis || "",
           }));
           result.push({

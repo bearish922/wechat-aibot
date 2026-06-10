@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join, extname, resolve, relative, sep } from "node:path";
 import { exec } from "node:child_process";
 import { log } from "./utils.mjs";
@@ -57,7 +57,8 @@ function serveStatic(urlPath, res) {
     if (decoded.includes("\0")) return false;
     const relPath = decoded === "/" ? "index.html" : decoded.replace(/^\/+/, "");
     const fullPath = resolve(STATIC_DIR, relPath);
-    if (!isInsideStaticDir(fullPath) || !existsSync(fullPath) || !statSync(fullPath).isFile()) return false;
+    if (!isInsideStaticDir(fullPath)) return false;
+    try { if (!statSync(fullPath).isFile()) return false; } catch { return false; }
 
     const ext = extname(fullPath).toLowerCase();
     res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
@@ -75,18 +76,18 @@ function json(res, data, status = 200) {
 
 async function readBody(req) {
   return new Promise((resolve, reject) => {
-    let body = "";
-    let tooLarge = false;
+    const chunks = [];
+    let size = 0;
+    const LIMIT = 1024 * 1024;
     req.on("data", (c) => {
-      if (tooLarge) return;
-      body += c;
-      if (body.length > 1024 * 1024) {
-        tooLarge = true;
-        reject(new Error("request body too large"));
-      }
+      if (size > LIMIT) return;
+      chunks.push(c);
+      size += c.length;
+      if (size > LIMIT) reject(new Error("request body too large"));
     });
     req.on("end", () => {
-      if (tooLarge) return;
+      if (size > LIMIT) return;
+      const body = Buffer.concat(chunks).toString();
       try { resolve(JSON.parse(body)); } catch { resolve(body); }
     });
     req.on("error", reject);
@@ -101,7 +102,7 @@ export function startServer(port = 18720) {
     const url = req.url.split("?")[0];
     const method = req.method.toUpperCase();
 
-    // API routes first
+    // 优先匹配 API 路由（动态路由优先于静态文件）
     for (const route of routes) {
       const params = route.method === method ? matchRoute(route.path, url) : null;
       if (params) {
@@ -116,7 +117,7 @@ export function startServer(port = 18720) {
       }
     }
 
-    // Static files
+    // 其次尝试匹配静态文件（如 HTML/CSS/JS）
     if (method === "GET" && serveStatic(url, res)) return;
 
     // 404
@@ -125,8 +126,6 @@ export function startServer(port = 18720) {
 
   server.on("error", (e) => {
     log("❌", `GUI server failed: ${e.message}`);
-    process.exitCode = 1;
-    try { server.close(); } catch {}
     process.exit(1);
   });
 

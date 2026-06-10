@@ -34,3 +34,12 @@ data/rag_vector_store*/
 # Chat history (contains personal chat data)
 data/chat-history.json
 data/chat-history.bak.json
+data/chat-history.db
+data/chat-history.db.bak
+data/chat-history.db.bak2
+
+# Auto-generated markdown memory (personal data)
+data/wechat-memory.md
+data/wechat-memory.bak.md
+data/wechat-world-memory.md
+data/wechat-world-memory.bak.md

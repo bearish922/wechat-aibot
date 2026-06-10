@@ -14,8 +14,8 @@ describe("prompt cache layout", () => {
   });
 
   it("places memory at the front of the dynamic turn body", () => {
-    assert.match(prompts, /function buildTurnBody\(userBody, ragContext = "", sceneContext = "", memoryPrompt = ""\)/);
-    assert.match(prompts, /const sections = \[\];\s+const now = new Date\(\);\s+if \(memoryPrompt\) \{\s+sections\.push\(memoryPrompt\);/);
+    assert.match(prompts, /function buildTurnBody\(userBody, ragContext = "", sceneContext = ""\)/);
+    assert.match(prompts, /const sections = \[\];\s+const now = new Date\(\);\s+if \(sceneContext\) \{\s+sections\.push\(sceneContext\);/);
   });
 
   it("does not count memory as stable system prompt chars", () => {

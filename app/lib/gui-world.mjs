@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import { addRoute } from "./server.mjs";
 import { sessions, activeAI, profileTemplates } from "./state.mjs";
+import { generateSceneMemory } from "./turn.mjs";
+import { getRoleWorld, setSceneMemory } from "./world-state.mjs";
 
 function worldsMap() {
   return globalThis.__wechatRoleWorlds;
@@ -12,14 +14,14 @@ function saveWorlds() {
   }
 }
 
+function roleKey(profile) {
+  return String(profile || "默认").trim() || "默认";
+}
+
 function saveSessions() {
   if (typeof globalThis.__wechatSaveSessions === "function") {
     globalThis.__wechatSaveSessions();
   }
-}
-
-function roleKey(profile) {
-  return String(profile || "默认").trim() || "默认";
 }
 
 function sessionRowsForProfile(profile) {
@@ -38,6 +40,7 @@ function sessionRowsForProfile(profile) {
           busy: Boolean(s.busy),
           sid: s.sid,
           firstTurn: Boolean(s._firstTurn),
+          turnCount: s._turnCount || 0,
           visibleTurns: Array.isArray(s._visibleHistory) ? s._visibleHistory.length : 0,
           pendingIntents: (s._proactiveIntents || []).filter(i => i?.status === "pending").length,
           intents: s._proactiveIntents || [],
@@ -55,10 +58,10 @@ function safeWorld(profile) {
     profile: key,
     worldState: world._worldState || null,
     worldSession: world._worldSession || null,
-    lastOutput: world._worldLastOutput || null,
     lifeArcs: world._lifeArcs || [],
     lastDailyShareSeedAt: world._lastDailyShareSeedAt || null,
     lastScheduleCheckAt: world._lastScheduleCheckAt || null,
+    sceneMemory: world._sceneMemory || null,
     updatedAt: world.updatedAt || null,
     sessions: sessionRowsForProfile(key),
     threadIntents: sessionRowsForProfile(key).map(s => ({
@@ -76,45 +79,6 @@ function allProfiles() {
   return [...names].sort((a, b) => a.localeCompare(b, "zh-CN"));
 }
 
-function parseObject(value, fallback) {
-  if (value === undefined) return fallback;
-  if (value === null || value === "") return null;
-  if (typeof value === "object") return value;
-  try { return JSON.parse(String(value)); } catch {
-    throw new Error("invalid JSON snapshot field");
-  }
-}
-
-function syncSessions(profile, world) {
-  const key = roleKey(profile);
-  for (const [, map] of Object.entries(sessions)) {
-    for (const [, u] of map) {
-      for (const s of u.list) {
-        if (roleKey(s._profile || "默认") !== key) continue;
-        s._worldState = world._worldState || null;
-        s._worldSession = world._worldSession || null;
-        s._worldLastOutput = world._worldLastOutput || null;
-        s._lifeArcs = Array.isArray(world._lifeArcs) ? world._lifeArcs : [];
-        s._lastDailyShareSeedAt = world._lastDailyShareSeedAt || null;
-        s._lastScheduleCheckAt = world._lastScheduleCheckAt || null;
-      }
-    }
-  }
-}
-
-function applyThreadIntents(threadIntents = []) {
-  if (!Array.isArray(threadIntents)) return;
-  const byKey = new Map(threadIntents.map(item => [`${item.ai}|${item.sessionId}`, item]));
-  for (const [ai, map] of Object.entries(sessions)) {
-    for (const [, u] of map) {
-      for (const s of u.list) {
-        const item = byKey.get(`${ai}|${s.id}`);
-        if (item && Array.isArray(item.intents)) s._proactiveIntents = item.intents;
-      }
-    }
-  }
-}
-
 export function registerWorldRoutes() {
   addRoute("GET", "/api/world/roles", () => ({
     ok: true,
@@ -128,36 +92,58 @@ export function registerWorldRoutes() {
     role: safeWorld(params.profile),
   }));
 
-  addRoute("POST", "/api/world/reset", ({ body }) => {
+  addRoute("POST", "/api/world/reset", async ({ body }) => {
     const profile = roleKey(body?.profile);
-    const map = worldsMap();
-    if (!map) return { ok: false, error: "role world store unavailable" };
-    const current = map.get(profile) || { profile };
     const now = new Date().toISOString();
-    const next = {
-      ...current,
-      profile,
-      _worldState: parseObject(body?.worldState, current._worldState || null),
-      _lifeArcs: parseObject(body?.lifeArcs, current._lifeArcs || []),
-      _worldLastOutput: parseObject(body?.lastOutput, current._worldLastOutput || null),
-      _lastDailyShareSeedAt: body?.lastDailyShareSeedAt ?? current._lastDailyShareSeedAt ?? null,
-      _lastScheduleCheckAt: body?.lastScheduleCheckAt ?? current._lastScheduleCheckAt ?? null,
-      _worldSession: {
-        sid: crypto.randomUUID(),
-        firstTurn: true,
-        model: current._worldSession?.model || null,
-        startedAt: now,
-        lastUsedAt: null,
-        resetReason: "manual reset from Hidden World GUI",
-        lastUsage: null,
-      },
-      updatedAt: now,
-    };
-    map.set(profile, next);
-    syncSessions(profile, next);
-    applyThreadIntents(parseObject(body?.threadIntents, []));
-    saveWorlds();
+    const roleWorld = getRoleWorld(profile);
+
+    // Step 1: Generate scene memory from accumulated context (before resetting state)
+    let generated = false;
+    for (const [userId, u] of sessions.cc) {
+      for (const s of u.list || []) {
+        if (roleKey(s._profile || "默认") !== profile) continue;
+        if (!s.active) continue;
+        try {
+          const summary = await generateSceneMemory({ userId, sess: s, profile, roleWorld });
+          if (summary) {
+            setSceneMemory(roleWorld, summary);
+            generated = true;
+          }
+        } catch (e) {
+          console.error("[gui] scene memory generation failed:", e.message);
+        }
+      }
+    }
+
+    // Step 2: Reset session state
+    for (const [, u] of sessions.cc) {
+      for (const s of u.list || []) {
+        if (roleKey(s._profile || "默认") !== profile) continue;
+        if (!s.active) continue;
+
+        s.sid = crypto.randomUUID();
+        s._firstTurn = true;
+        s._turnCount = 0;
+
+        if (s._worldSession) {
+          s._worldSession.sid = crypto.randomUUID();
+          s._worldSession.firstTurn = true;
+          s._worldSession.startedAt = now;
+          s._worldSession.resetReason = "manual from GUI";
+        }
+      }
+    }
+
+    if (roleWorld?._worldSession) {
+      roleWorld._worldSession.sid = crypto.randomUUID();
+      roleWorld._worldSession.firstTurn = true;
+      roleWorld._worldSession.startedAt = now;
+      roleWorld._worldSession.resetReason = "manual from GUI";
+    }
+
     saveSessions();
-    return { ok: true, role: safeWorld(profile) };
+    saveWorlds();
+    return { ok: true, sceneMemoryGenerated: generated };
   });
+
 }
