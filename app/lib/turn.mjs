@@ -33,7 +33,7 @@ export async function generateSceneletForTurn({ userId, sess, profile, userBody,
   // 确保当前 profile 有一个活跃的 world session，并返回其引用
   const world = ensureWorldSession(roleWorld);
   // 构建发送给隐藏世界模型的提示词
-  const prompt = buildHiddenWorldPrompt({
+  const prompt = await buildHiddenWorldPrompt({
     userId,
     sessionName: sess.name,
     profile,

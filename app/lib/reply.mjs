@@ -3,6 +3,7 @@
 
 import { readFileSync } from "node:fs";
 import { rootPath } from "./paths.mjs";
+export { getWeatherReality, formatWeatherReality } from "./weather.mjs";
 
 // 运行时 prompt 配置文件路径
 const PROMPTS_FILE = rootPath("data/prompts.json");

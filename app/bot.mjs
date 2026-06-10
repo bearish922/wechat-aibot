@@ -452,7 +452,7 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
     // 场景记忆块（仅角色扮演模式的首轮）
     const sceneMemoryBlock = (isProfileChat && firstTurn) ? getSceneMemorySystemBlock(roleWorld) : "";
     // 组装发送给 AI 的完整消息体
-    const turnBody = buildTurnBody(body, ragContext, sceneContext, recentVisibleContext(styleState), sceneMemoryBlock);
+    const turnBody = await buildTurnBody(body, ragContext, sceneContext, recentVisibleContext(styleState), sceneMemoryBlock);
 
     writeTxtLog("TURN BODY", turnBody);
     if (stableStyle) writeTxtLog("STABLE STYLE", stableStyle);

@@ -1,4 +1,4 @@
-import { loadPrompts, getChatStyle, formatLocalChatReality, formatZonedTimeParts } from "./reply.mjs";
+import { loadPrompts, getChatStyle, formatLocalChatReality, formatZonedTimeParts, getWeatherReality } from "./reply.mjs";
 import { normalizeVisibleHistory, getSceneConfig } from "./normalize.mjs";
 import { lifeArcPromptItems } from "./world-state.mjs";
 import { profileTemplates } from "./state.mjs";
@@ -46,7 +46,7 @@ function buildVisibleHistoryBlock(history) {
 //   visibleHistory - recentVisibleContext 返回的数组（可选）
 //   sceneMemory    - 情景记忆/对话摘要文本（可选，仅 reset 后首轮注入）
 // 返回：拼接好的多段落 prompt 字符串，各段以 "\n\n---\n\n" 分隔
-function buildTurnBody(userBody, ragContext = "", sceneContext = "", visibleHistory = [], sceneMemory = "") {
+async function buildTurnBody(userBody, ragContext = "", sceneContext = "", visibleHistory = [], sceneMemory = "") {
   // 存储各段内容的数组
   const sections = [];
   const now = new Date();
@@ -71,6 +71,9 @@ function buildTurnBody(userBody, ragContext = "", sceneContext = "", visibleHist
   sections.push(getChatStyle());
   // 本地时间现实描述（日期、星期、节日等）
   sections.push(formatLocalChatReality(now));
+  // 实时天气（失败时静默降级为空字符串）
+  const weather = await getWeatherReality();
+  if (weather) sections.push(weather);
   // 构建双时区时间标签（北京时间 + 东京时间）
   const beijing = formatZonedTimeParts(now, "Asia/Shanghai");
   const tokyo = formatZonedTimeParts(now, "Asia/Tokyo");
@@ -296,16 +299,19 @@ function buildHiddenWorldSystemPrompt(profile, sceneMemory = "", memoryPrompt = 
 //   proactiveIntents - 待处理的主动意图列表（默认空数组）
 //   worldSession    - hidden-world 自身的会话信息（默认 null）
 // 返回：完整的 hidden-world 用户消息 prompt 字符串
-function buildHiddenWorldPrompt({ userId, sessionName, profile, userBody, lifeArcs = [], visibleContext, memoryPrompt, worldState = null, proactiveIntents = [], worldSession = null }) {
+async function buildHiddenWorldPrompt({ userId, sessionName, profile, userBody, lifeArcs = [], visibleContext, memoryPrompt, worldState = null, proactiveIntents = [], worldSession = null }) {
   const now = new Date();
   // 加载提示词配置
   const cfg = loadPrompts();
+  // 实时天气（失败时静默降级为空）
+  const weather = await getWeatherReality();
   return [
     // 提示语：要求按 hidden-world system prompt 规则输出 JSON
     "你将收到本轮动态上下文。请按 hidden-world system prompt 的规则输出 JSON。",
     "",
     "当前时间：",
     JSON.stringify(currentTimeContext(now), null, 2),
+    ...(weather ? ["", weather] : []),
     "",
     "输入：",
     // 核心输入数据，以 JSON 格式提供
