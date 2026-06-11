@@ -18,6 +18,17 @@ function roleKey(profile) {
   return String(profile || "默认").trim() || "默认";
 }
 
+export function activeSessionEntriesForProfile(sessionMap, profile) {
+  const key = roleKey(profile);
+  const entries = [];
+  for (const [userId, u] of sessionMap || new Map()) {
+    const active = (u.list || []).find(s => s.id === u.activeId);
+    if (!active || roleKey(active._profile || "默认") !== key) continue;
+    entries.push({ userId, user: u, session: active });
+  }
+  return entries;
+}
+
 function saveSessions() {
   if (typeof globalThis.__wechatSaveSessions === "function") {
     globalThis.__wechatSaveSessions();
@@ -96,41 +107,33 @@ export function registerWorldRoutes() {
     const profile = roleKey(body?.profile);
     const now = new Date().toISOString();
     const roleWorld = getRoleWorld(profile);
+    const activeSessions = activeSessionEntriesForProfile(sessions.cc, profile);
 
     // Step 1: Generate scene memory from accumulated context (before resetting state)
     let generated = false;
-    for (const [userId, u] of sessions.cc) {
-      for (const s of u.list || []) {
-        if (roleKey(s._profile || "默认") !== profile) continue;
-        if (!s.active) continue;
-        try {
-          const summary = await generateSceneMemory({ userId, sess: s, profile, roleWorld });
-          if (summary) {
-            setSceneMemory(roleWorld, summary);
-            generated = true;
-          }
-        } catch (e) {
-          console.error("[gui] scene memory generation failed:", e.message);
+    for (const { userId, session } of activeSessions) {
+      try {
+        const summary = await generateSceneMemory({ userId, sess: session, profile, roleWorld });
+        if (summary) {
+          setSceneMemory(roleWorld, summary);
+          generated = true;
         }
+      } catch (e) {
+        console.error("[gui] scene memory generation failed:", e.message);
       }
     }
 
     // Step 2: Reset session state
-    for (const [, u] of sessions.cc) {
-      for (const s of u.list || []) {
-        if (roleKey(s._profile || "默认") !== profile) continue;
-        if (!s.active) continue;
+    for (const { session } of activeSessions) {
+      session.sid = crypto.randomUUID();
+      session._firstTurn = true;
+      session._turnCount = 0;
 
-        s.sid = crypto.randomUUID();
-        s._firstTurn = true;
-        s._turnCount = 0;
-
-        if (s._worldSession) {
-          s._worldSession.sid = crypto.randomUUID();
-          s._worldSession.firstTurn = true;
-          s._worldSession.startedAt = now;
-          s._worldSession.resetReason = "manual from GUI";
-        }
+      if (session._worldSession) {
+        session._worldSession.sid = crypto.randomUUID();
+        session._worldSession.firstTurn = true;
+        session._worldSession.startedAt = now;
+        session._worldSession.resetReason = "manual from GUI";
       }
     }
 

@@ -8,21 +8,15 @@ const appJs = readFileSync(join(import.meta.dirname, "..", "static", "app.js"), 
 describe("Prompts runtime pipeline UI", () => {
   it("renders runtime steps in execution order", () => {
     const steps = [
-      "WeChat 入站轮询",
-      "会话 Profile 绑定",
-      "入站附件 / Vision Caption",
-      "失败轮次保护",
-      "Profile Template",
-      "稳定表达能力",
-      "长期记忆注入",
-      "Hidden-world 输出注入",
-      "RAG Eligibility Gate",
-      "聊天写法 / 聊天现实 + 用户消息",
-      "后端 Prompt 组装",
-      "流式输出、切分、发送",
-      "成功后状态写回",
-      "Memory Writer",
-      "Hidden-world 后续工序",
+      'title: "Profile"',
+      'title: "表达能力"',
+      'title: "长期记忆 (System Prompt)"',
+      'title: "Hidden-world 输出"',
+      'title: "RAG"',
+      'title: "聊天风格及现实"',
+      'title: "用户消息"',
+      'title: "模型调用与输出"',
+      'title: "Memory Update"',
     ];
 
     let last = -1;
@@ -33,18 +27,17 @@ describe("Prompts runtime pipeline UI", () => {
     }
   });
 
-  it("shows memory as a dynamic turn body prefix, not as stable system context", () => {
+  it("shows memory in stable system context before dynamic turn context", () => {
     const systemIdx = appJs.indexOf("阶段 1 — 稳定 System Context");
-    const bodyPrefixIdx = appJs.indexOf("阶段 2 — 主回复动态 Turn Body");
-    const memoryIdx = appJs.indexOf("长期记忆注入");
-    const modelIdx = appJs.indexOf("阶段 3 — 主模型轮次");
+    const memoryIdx = appJs.indexOf('title: "长期记忆 (System Prompt)"');
+    const dynamicIdx = appJs.indexOf("阶段 2 — 动态上下文");
+    const modelIdx = appJs.indexOf("阶段 3 — 输出及memory维护");
 
     assert.ok(systemIdx >= 0, "stable system phase should be present");
-    assert.ok(bodyPrefixIdx > systemIdx, "dynamic body prefix phase should appear after stable system phase");
-    assert.ok(memoryIdx > bodyPrefixIdx, "memory should be rendered inside the dynamic body prefix phase");
-    assert.ok(memoryIdx < modelIdx, "memory should appear before main model assembly");
-    assert.match(appJs, /稳定 system context 到这里结束；接下来组装主回复动态 turn body/);
-    assert.match(appJs, /memory snapshot 放在 turn body 最前面；不再进入稳定 system prompt/);
+    assert.ok(memoryIdx > systemIdx, "memory should be rendered inside stable system context");
+    assert.ok(memoryIdx < dynamicIdx, "memory should appear before dynamic context");
+    assert.ok(dynamicIdx < modelIdx, "dynamic context should appear before model output");
+    assert.match(appJs, /通过 --append-system-prompt-file 注入 system prompt/);
   });
 
   it("exposes editable controls used by the runtime prompt pipeline", () => {

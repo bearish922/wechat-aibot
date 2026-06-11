@@ -16,6 +16,9 @@ const CONFIG_FIELDS = {
   "proxy.claudeHttps": "string",
   "proxy.codexHttps": "string",
   "proxy.ragHttps": "string",
+  "api.baseUrl": "string",
+  "api.apiKey": "string",
+  "api.model": "string",
   "models.claudeFast": "string",
   "models.claudeFallback": "string",
   "timeouts.aiMs": "number",
@@ -84,7 +87,7 @@ function coerceConfigValue(value, type, currentValue) {
   return String(value ?? "");
 }
 
-function sanitizeConfigBody(body, current) {
+export function sanitizeConfigBody(body, current) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new Error("config body must be an object");
   }
@@ -92,12 +95,21 @@ function sanitizeConfigBody(body, current) {
   for (const [key, type] of Object.entries(CONFIG_FIELDS)) {
     let value = getNested(body, key);
     if (value === undefined) continue;
-    if (key === "vision.apiKey" && String(value).includes("****")) {
+    if ((key === "vision.apiKey" || key === "api.apiKey") && String(value).includes("****")) {
       value = getNested(current, key) || "";
     }
     setNested(next, key, coerceConfigValue(value, type, getNested(current, key)));
   }
   return next;
+}
+
+export function maskConfigSecrets(config) {
+  const masked = structuredClone(config || {});
+  for (const key of ["api.apiKey", "vision.apiKey"]) {
+    const value = getNested(masked, key);
+    if (value) setNested(masked, key, String(value).slice(0, 8) + "****");
+  }
+  return masked;
 }
 
 function writeConfigAtomic(config) {
@@ -116,11 +128,7 @@ function writeConfigAtomic(config) {
 export function registerConfigRoutes() {
   addRoute("GET", "/api/config", () => {
     try {
-      const raw = loadConfigForGui();
-      if (raw.vision?.apiKey) {
-        raw.vision.apiKey = raw.vision.apiKey.slice(0, 8) + "****";
-      }
-      return { ok: true, config: raw };
+      return { ok: true, config: maskConfigSecrets(loadConfigForGui()) };
     } catch (e) {
       return { ok: false, error: e.message };
     }

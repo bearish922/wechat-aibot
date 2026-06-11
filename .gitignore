@@ -22,6 +22,7 @@ data/inbound_media/
 
 # Dependencies
 app/node_modules/
+node_modules/
 **/__pycache__/
 
 # Model cache (downloaded at first run)

@@ -12,6 +12,11 @@
     "codexHttps": "",
     "ragHttps": ""
   },
+  "api": {
+    "baseUrl": "",
+    "apiKey": "",
+    "model": "deepseek-v4-pro"
+  },
   "models": {
     "claudeFast": "deepseek-v4-flash[1m]",
     "claudeFallback": "deepseek-v4-flash[1m]",

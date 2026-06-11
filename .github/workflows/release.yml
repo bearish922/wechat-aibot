@@ -23,13 +23,13 @@ jobs:
       - name: Create release archive
         run: |
           mkdir wechat-aibot
-          cp -r app/ scripts/ docs/ README.md launch.bat wechat-profiles.json wechat-memory.example.json wechat-aibot/
+          cp -r app/ scripts/ docs/ README.md launch.bat wechat-aibot/
           rm -rf wechat-aibot/app/node_modules wechat-aibot/app/__pycache__
           mkdir -p wechat-aibot/data/knowledge
           cp -r data/knowledge/* wechat-aibot/data/knowledge/
+          cp data/wechat-profiles.json data/wechat-memory.example.json data/prompts.json wechat-aibot/data/
           mkdir -p wechat-aibot/data/runtime wechat-aibot/data/logs wechat-aibot/data/inbound_media wechat-aibot/data/rag_vector_store
           cp app/config.example.json wechat-aibot/data/config.example.json
-          cp data/prompts.json wechat-aibot/data/prompts.json
           zip -r wechat-aibot-${{ github.ref_name }}.zip wechat-aibot/
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

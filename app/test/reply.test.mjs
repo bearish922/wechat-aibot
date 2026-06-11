@@ -37,7 +37,7 @@ describe("local chat reality", () => {
     assert.match(text, /当前用户侧时间：2026-05-28 02:13，星期四，凌晨（北京时间，Asia\/Shanghai）。/u);
     assert.match(text, /当前角色侧时间：2026-05-28 03:13，星期四，凌晨（东京时间，Asia\/Tokyo；角色所处时间以此为准）。/u);
     assert.match(text, /微信私聊/u);
-    assert.match(text, /当前时间\/日期已注入/u);
+    assert.match(text, /用户主动补充互动场景时，以其描述为准/u);
   });
 
   it("formats explicit Beijing and Tokyo time parts", () => {

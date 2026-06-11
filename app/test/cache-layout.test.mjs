@@ -13,9 +13,10 @@ describe("prompt cache layout", () => {
     assert.doesNotMatch(claudeRunner, /options\.includeMemoryInSystem !== false/);
   });
 
-  it("places memory at the front of the dynamic turn body", () => {
-    assert.match(prompts, /function buildTurnBody\(userBody, ragContext = "", sceneContext = ""\)/);
-    assert.match(prompts, /const sections = \[\];\s+const now = new Date\(\);\s+if \(sceneContext\) \{\s+sections\.push\(sceneContext\);/);
+  it("keeps memory out of the dynamic turn body and opts into the Claude system prompt", () => {
+    assert.match(prompts, /async function buildTurnBody\(userBody, ragContext = "", sceneContext = "", visibleHistory = \[\], sceneMemory = ""\)/);
+    assert.doesNotMatch(prompts, /buildTurnBody\([^)]*memoryPrompt/);
+    assert.match(bot, /includeMemoryInSystem: true/);
   });
 
   it("does not count memory as stable system prompt chars", () => {
