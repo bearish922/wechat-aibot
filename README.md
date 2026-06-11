@@ -1,223 +1,320 @@
 # WeChat AI Bot
 
-> v2.5.1 — Windows 本机运行的微信 AI 助手
+> v2.5.1 · 在 Windows 电脑上运行的微信 AI 助手
 
-WeChat AI Bot 监听微信消息，将文字、图片、语音、文件、视频交给 Claude Code 或 Codex 回复。它支持多线程会话、角色扮演、本地知识库、长期记忆、主动回复、可编辑 prompt 管线，以及本地 GUI。
+这个项目可以让 AI 在微信里和你聊天。
 
-需要 Node.js 22+，面向 Windows 本机运行。
+它不只是简单地把消息转发给 AI，还可以保存不同话题的聊天、扮演指定角色、理解图片和语音、记住长期信息，并在浏览器中查看聊天记录和调整设置。
 
-## 功能
+程序、配置和聊天记录主要保存在你自己的电脑上，管理页面也只在本机打开。聊天内容仍会发送给你选择的 AI 服务进行处理，因此不要发送不希望交给该服务的信息。
 
-- **双 AI 后端** — `/cc` `/codex` 随时切换，各自保留独立会话。
-- **多线程** — 创建、切换、重命名、关闭线程，状态持久化，重启可恢复。
-- **角色扮演** — 内置长崎素世、千早爱音、丸山彩、白鹭千圣四个 BangDream 角色，可自定义。
-- **隐藏 scenelet** — 角色回复前先生成隐藏的 `inner_scenelet` 和轻量 `scene_state`，让回复带有当前生活现场和连续性。
-- **可搜索 scenelet** — scenelet 默认运行在可用 `WebSearch/WebFetch` 的 Claude Code 环境中，遇到书、歌、作者、公开人物近况、截图 OCR 等可核验事实时可以先查再写。
-- **主动回复** — 角色可以生成一次性 proactive intent，包括 follow-up 和 daily share；到点后会二次判断是否发送。
-- **长期记忆** — 每个角色独立维护对用户的长期记忆，自动写入稳定信息，也支持 `/memory` 查看。
-- **知识库 RAG** — 本地 Markdown 知识库构建向量索引，角色对话时按触发条件检索。
-- **多媒体** — 图片/语音/文件/视频自动下载；图片和视频首帧可接视觉模型；微信 `.silk` 语音可通过 WhisperX 转写。
-- **聊天历史** — 持久化存储，GUI 内按对话浏览、搜索、展开 scenelet。
-- **Prompts GUI** — 运行时 prompt、RAG 触发词、scenelet/proactive/voice/vision 相关说明可在 GUI 中查看和编辑，默认 prompt 配置版本化保存在 `data/prompts.json`。
-- **本地 GUI** — `http://127.0.0.1:18720`，包含 Status / Sessions / Profiles / History / Config / Memory / Prompts / Proactive 等页面。
+## 它能做什么
 
-## 快速开始
+- 在微信里接收文字、图片、语音、文件和视频。
+- 使用 Claude Code、Codex 或单独配置的 AI 接口回复。
+- 为不同话题建立独立聊天，例如“日常聊天”“工作助手”“白鹭千圣”。
+- 使用长崎素世、千早爱音、丸山彩、白鹭千圣等角色，也可以自己添加角色。
+- 保存聊天记录、用户记忆和角色当前的生活状态。
+- 读取本地知识库，在遇到角色设定问题时查找资料。
+- 在合适的时候发送一次主动消息，而不是机械地定时刷屏。
+- 通过浏览器管理状态、角色、提示词、记忆和聊天历史。
 
-```bat
-scripts\setup.bat
-copy app\config.example.json data\config.json
-scripts\rebuild-rag.bat
-launch.bat
-```
+## 使用前准备
 
-启动后按终端提示扫码登录微信，浏览器会自动打开 GUI。
+本项目目前主要面向 Windows。
 
-## 依赖
+### 必须安装
 
-| 依赖 | 必需 | 用途 |
-|------|------|------|
-| Node.js 22+ | 是 | 运行 bot 和本地 GUI |
-| Python 3 + pip | 是 | RAG、文件文本提取 |
-| Claude Code 或 Codex | 至少一个 | AI 回复后端 |
-| ffmpeg | 否 | 视频首帧提取 |
-| OpenAI-compatible 视觉 API | 否 | 图片/视频描述 |
-| WhisperX | 否 | 更准确的语音转文字，尤其是日语语音 |
+1. [Node.js](https://nodejs.org/) 22 或更高版本
+2. [Python](https://www.python.org/downloads/) 3
+3. Claude Code 或 Codex，至少安装一个
 
-## 配置
-
-`data/config.json` 从 `app/config.example.json` 复制。`data/config.json` 是本地私有配置，不进入版本控制；仓库里的示例配置只保留通用占位。
-
-常用字段：
-
-```json
-{
-  "paths": {
-    "claude": "留空则自动从 PATH 查找",
-    "codex": "留空则自动从 PATH 查找",
-    "workDir": "Claude/Codex 工作目录，默认用户目录"
-  },
-  "proxy": {
-    "https": "共享代理，例如 http://127.0.0.1:7892",
-    "claudeHttps": "单独给 Claude Code 的代理",
-    "codexHttps": "单独给 Codex 的代理",
-    "ragHttps": "RAG 脚本代理"
-  },
-  "models": {
-    "claudeMain": "主回复模型",
-    "claudeFast": "快速模型",
-    "claudeFallback": "回退模型",
-    "scenelet": "scenelet / hidden call 模型"
-  },
-  "scene": {
-    "sceneletBare": false
-  },
-  "vision": {
-    "mode": "auto / external / native / off",
-    "apiKey": "外部视觉 API Key"
-  },
-  "voice": {
-    "enabled": true,
-    "whisperxPython": "WhisperX 虚拟环境里的 python.exe",
-    "language": "auto 或 ja/zh/en 等语言代码"
-  },
-  "rag": {
-    "knowledgeDir": "你的 Markdown 知识库目录",
-    "storeDir": "data/rag_vector_store"
-  }
-}
-```
-
-环境变量可覆盖配置：`WECHAT_CLAUDE_PATH`、`WECHAT_CODEX_PATH`、`WECHAT_AI_WORK_DIR`、`WECHAT_HTTPS_PROXY`、`WECHAT_CLAUDE_HTTPS_PROXY`、`WECHAT_CODEX_HTTPS_PROXY`、`WECHAT_RAG_HTTPS_PROXY`、`WECHAT_VISION_MODE`、`WECHAT_VISION_BASE_URL`、`WECHAT_VISION_API_KEY`、`WECHAT_VISION_MODEL`、`WECHAT_VOICE_WHISPERX_PYTHON`、`WECHAT_VOICE_LANGUAGE`、`WECHAT_LOG_RETENTION_DAYS`。
-
-### AI 后端登录
-
-安装 Claude Code 或 Codex 后，先在普通终端确认能正常进入：
+如果你第一次接触这些工具，推荐先使用 Claude Code。安装后打开一个普通命令行窗口，输入：
 
 ```bat
 claude
 ```
 
-或：
+确认它可以正常启动并完成登录。
 
-```bat
-codex
+### 可以以后再装
+
+- `ffmpeg`：用于读取视频画面。
+- WhisperX：用于更准确地识别微信语音。
+- 图片识别 API：让 AI 看懂图片和视频首帧。
+
+这些可选功能没有配置时，文字聊天仍然可以使用。
+
+## 第一次安装
+
+先下载项目并解压。下面所有命令都要在项目根目录运行，也就是能看到 `launch.bat` 的文件夹。
+
+### 1. 安装基础组件
+
+双击：
+
+```text
+scripts\setup.bat
 ```
 
-通常不需要手动填写路径；如果自动查找失败，再在 `data/config.json` 中配置 `paths.claude` 或 `paths.codex`。
+等待窗口显示安装完成。
 
-### 知识库
-
-默认示例知识库在 `data/knowledge/`。如果你有自己的 Markdown 知识库，把 `rag.knowledgeDir` 改成对应目录，例如 Obsidian vault 中的某个文件夹。
-
-修改知识库后运行：
+随后在项目根目录打开命令行，再运行一次：
 
 ```bat
+npm install
+```
+
+这一步会安装聊天记录功能需要的组件。
+
+### 2. 创建本机配置
+
+运行：
+
+```bat
+copy app\config.example.json data\config.json
+```
+
+大多数用户暂时不需要修改这个文件。程序会自动寻找已安装的 Claude Code、Codex 和 Python。
+
+配置文件可能包含本机路径、代理和 API Key，不要把自己的 `data\config.json` 发给别人。
+
+### 3. 建立知识库
+
+双击：
+
+```text
 scripts\rebuild-rag.bat
 ```
 
-向量索引默认写入 `data/rag_vector_store/`，这是本地生成物，不进入版本控制。
+第一次运行需要下载模型，可能会花几分钟。如果暂时只想测试普通聊天，也可以稍后再做这一步。
 
-### Prompts
+### 4. 启动
 
-GUI Prompts 页编辑的内容保存在 `data/prompts.json`。从 v2.5.0 开始，默认 prompts 会随仓库版本化，方便作为 prompt 管线示例分享；真实运行时仍可在 GUI 中继续编辑。
+双击：
 
-### 语音转文字
+```text
+launch.bat
+```
 
-微信语音会先保存为 `.silk`，bot 使用 `silk-wasm` 解码，再调用 WhisperX：
+第一次启动会在命令行里显示微信登录二维码。扫码后，浏览器会自动打开管理页面：
+
+```text
+http://127.0.0.1:18720
+```
+
+以后通常会自动沿用登录状态，不需要每次扫码。
+
+## 日常使用
+
+程序启动后，直接给已登录的微信机器人发送消息即可。
+
+### 普通聊天
+
+直接发送文字，AI 会在当前聊天中回复。
+
+如果回复还没有结束，后续消息会进入等待队列。发送 `/cancel` 可以取消当前任务和尚未处理的消息。
+
+### 使用角色
+
+发送：
+
+```text
+/profile
+```
+
+可以查看已有角色。
+
+最简单的角色使用方法，是用角色名创建一段新聊天。例如：
+
+```text
+/new 白鹭千圣
+```
+
+当新聊天的名称正好等于角色名时，程序会自动使用这个角色。不同角色和不同话题最好分开建立聊天，避免内容互相干扰。
+
+### 发送图片和补充文字
+
+发送图片、语音、文件或视频后，程序会等待约 30 秒。
+
+在这段时间里继续发送的文字，会和附件合并成同一轮。例如可以先发一张图片，再补一句“帮我看看这里有什么问题”。AI 只会统一回复一次。
+
+如果不想继续等待，可以发送其他命令；程序会先处理已经收到的附件内容。
+
+## 常用微信命令
+
+| 命令 | 用途 | 示例 |
+|---|---|---|
+| `/help` | 查看命令帮助 | `/help` |
+| `/new [名称]` | 新建一段独立聊天 | `/new 旅行计划` |
+| `/switch [序号或名称]` | 切换聊天 | `/switch 2` |
+| `/sessions` | 查看全部聊天 | `/sessions` |
+| `/rename <新名称>` | 重命名当前聊天 | `/rename 日常聊天` |
+| `/close [序号或名称]` | 关闭一段聊天 | `/close 2` |
+| `/status` | 查看当前 AI、角色和运行状态 | `/status` |
+| `/cancel` | 取消当前任务 | `/cancel` |
+| `/profile` | 查看已有角色 | `/profile` |
+| `/profile <角色名>` | 给当前空白聊天绑定角色 | `/profile 长崎素世` |
+| `/cc` | 切换到 Claude Code | `/cc` |
+| `/codex` | 切换到 Codex | `/codex` |
+| `/api` | 切换到已配置的独立 AI 接口 | `/api` |
+
+已经绑定角色的聊天不能直接换成另一个角色。需要换角色时，新建一段以目标角色命名的聊天即可。
+
+## 浏览器管理页面
+
+管理页面只在本机开放，默认地址是 `http://127.0.0.1:18720`。
+
+| 页面 | 可以做什么 |
+|---|---|
+| Status | 查看机器人是否在线、当前使用哪个 AI、聊天是否繁忙，以及上下文使用情况 |
+| Prompts | 查看回复流程、编辑角色、调整 AI 的说话和判断规则 |
+| Hidden World | 查看角色当前状态、生活事件和隐藏的连续性信息 |
+| History | 浏览和搜索聊天记录；使用 Direct API 时可以编辑或删除上下文消息 |
+| Proactive | 查看等待发送、已经发送或已经取消的主动消息 |
+| Memory | 查看和编辑用户记忆与世界资料 |
+| Config | 调整常用设置，例如路径、代理、图片识别、语音识别和知识库 |
+
+不确定某个选项有什么作用时，建议先保留默认值。角色和提示词的高级设置比较多，普通使用并不需要全部理解。
+
+## 记忆和聊天记录
+
+程序会在本机保存两类记忆：
+
+- **User Memory**：与用户有关、以后可能继续有用的信息。
+- **World Memory**：由你手动维护的世界设定或补充资料。
+
+角色聊天每积累一定轮数后，程序会整理最近对话，并更新长期记忆。你也可以在管理页面的 Memory 中直接查看和修改。
+
+聊天记录保存在本机数据库中，可以在 History 页面搜索。删除项目、覆盖 `data` 文件夹或清理这些文件前，请先做好备份。
+
+## 自定义角色
+
+打开管理页面的 Prompts，在角色区域可以新增或编辑角色。
+
+角色内容保存在：
+
+```text
+data\wechat-profiles.json
+```
+
+这个文件可能包含你自己编写的角色资料。公开分享项目或上传到 GitHub 前，请先检查里面是否有不希望公开的内容。
+
+## 自定义知识库
+
+默认资料位于：
+
+```text
+data\knowledge\
+```
+
+你可以把自己的 Markdown 文档放到这里，也可以在 `data\config.json` 中把知识库位置改成其他文件夹。
+
+修改资料后，需要重新双击：
+
+```text
+scripts\rebuild-rag.bat
+```
+
+知识库更适合保存人物设定、世界观、关系、时间线和地点资料。普通聊天记录不需要放进去。
+
+## 图片和语音
+
+### 图片
+
+如果 Claude Code 或 Codex 本身可以读取图片，可以在 Config 中使用 `Native` 模式。
+
+也可以配置外部图片识别服务。需要填写服务地址、API Key 和模型名。没有配置时，程序会尽量使用当前可用的方式处理图片。
+
+### 语音
+
+程序会优先保留微信提供的文字结果。安装并配置 WhisperX 后，可以进一步提高语音识别质量，尤其适合日语语音。
+
+WhisperX 没有安装成功时，启动窗口会显示提醒，但不会影响普通文字聊天。
+
+## 独立 AI 接口（可选）
+
+除了 Claude Code 和 Codex，也可以使用兼容 OpenAI Chat Completions 格式的服务。
+
+目前建议直接编辑 `data\config.json`，加入：
 
 ```json
 {
-  "voice": {
-    "enabled": true,
-    "whisperxPython": "path\\to\\whisper_env\\Scripts\\python.exe",
-    "language": "auto"
+  "api": {
+    "baseUrl": "https://你的服务地址",
+    "apiKey": "你的 API Key",
+    "model": "模型名称"
   }
 }
 ```
 
-如果未安装 WhisperX，启动时只会显示 warning，程序仍会使用微信自带转写作为 fallback。若完全不想启用 WhisperX：
+请把这段内容合并进原有 JSON，不要删除原来的其他设置。配置完成并重启程序后，在微信发送 `/api` 即可切换。
 
-```json
-{
-  "voice": {
-    "enabled": false
-  }
-}
+这是高级功能。第一次使用建议先完成 Claude Code 的基础聊天，确认机器人正常工作后再配置。
+
+## 重要数据与备份
+
+升级、移动或重新安装前，建议备份整个 `data` 文件夹。最重要的内容包括：
+
+| 路径 | 内容 |
+|---|---|
+| `data\config.json` | 本机设置和 API Key |
+| `data\wechat-token.json` | 微信登录状态 |
+| `data\wechat-sessions.json` | 聊天和当前状态 |
+| `data\wechat-worlds.json` | 角色状态和生活事件 |
+| `data\wechat-memory.md` | 用户长期记忆 |
+| `data\wechat-world-memory.md` | 手动维护的世界资料 |
+| `data\wechat-profiles.json` | 角色内容 |
+| `data\chat-history.db` | 聊天记录 |
+| `data\knowledge\` | 本地知识库 |
+
+`data\logs\` 和 `data\inbound_media\` 可能包含聊天内容和收到的附件，也要注意隐私。
+
+## 常见问题
+
+### 双击 `launch.bat` 后立刻关闭
+
+先确认已经安装 Node.js 22，并在命令行运行：
+
+```bat
+node --version
 ```
 
-## 微信命令
+如果无法显示版本号，请重新安装 Node.js，并勾选加入 PATH 的选项。
 
-| 命令 | 说明 |
-|------|------|
-| `/cc` `/codex` | 切换 AI 后端 |
-| `/new [名称]` | 创建新线程；名称匹配角色名时自动绑定角色 |
-| `/switch [序号\|名称]` | 切换活跃线程 |
-| `/rename [序号\|名称] <新名称>` | 重命名线程 |
-| `/close [序号\|名称]` | 关闭线程 |
-| `/sessions` | 查看所有线程 |
-| `/cancel` | 取消当前任务 |
-| `/status` | 当前状态：AI、模型、线程、角色 |
-| `/profile` | 查看所有角色 |
-| `/profile <名称>` | 绑定角色到当前线程 |
-| `/profile off` | 解除角色绑定 |
-| `/memory` | 当前角色记忆摘要 |
-| `/memory all` | 当前角色记忆全文 |
-| `/memory <角色名>` | 查看指定角色的记忆 |
-| `/memory 性格\|偏好\|事实` | 按分类查看 |
-| `/help` | 查看帮助 |
+### 提示找不到 Claude Code 或 Codex
 
-## 角色
+先在普通命令行中分别尝试 `claude` 或 `codex`。只有命令本身可以正常启动后，机器人才能调用它。
 
-角色模板保存在 `wechat-profiles.json`，可通过 GUI 或文本编辑器修改。线程绑定角色后，会持续使用对应 profile、长期记忆、可见上下文、scenelet 和 RAG 规则。
+### 浏览器没有自动打开
 
-每轮回复都会注入当前本地时间和时段，模型会据此调整语境。
+保持启动窗口运行，手动访问：
 
-## 长期记忆
+```text
+http://127.0.0.1:18720
+```
 
-每个角色独立维护 `wechat-memory.json`。记忆分 `trait` / `preference` / `fact` 三类，回合结束后由 memory writer 判断是否写入。当前消息优先于旧记忆。
+### 提示已有程序正在运行
 
-`wechat-memory.json` 是本地个人数据，不进入版本控制；新用户从 `wechat-memory.example.json` 开始。
+再次打开 `launch.bat` 后，可以选择：
 
-## 附件
+- `O`：打开现有管理页面
+- `R`：关闭并重新启动机器人
+- `Q`：退出
 
-- **图片** — 下载后按 `vision.mode` 调用外部视觉模型生成描述。
-- **语音** — 保存 `.silk`，优先使用 WhisperX 转写；失败时保留微信自带转写。
-- **文件** — 保存后提取 PDF / DOCX / PPTX / XLSX 文本预览。
-- **视频** — 保存后可用 ffmpeg 截取首帧描述。
+### 知识库第一次建立很慢
 
-发送附件后有 30 秒合并窗口，期间追加的文字会作为附件补充说明一起进入同一轮。
+第一次需要下载模型。请保持网络连接并等待完成，之后重新建立通常会更快。
 
-## 本地数据
+### 修改设置后没有生效
 
-| 路径 | 内容 | 是否版本化 |
-|------|------|------|
-| `data/config.json` | 本机配置、路径、API key | 否 |
-| `data/prompts.json` | 默认 prompt 管线配置 | 是 |
-| `data/wechat-token.json` | 微信登录态 | 否 |
-| `data/wechat-sessions.json` | 会话状态 | 否 |
-| `wechat-profiles.json` | 角色模板 | 是 |
-| `wechat-memory.json` | 长期记忆 | 否 |
-| `data/chat-history.json` | 聊天历史 | 否 |
-| `data/logs/` | AI 调用日志 | 否 |
-| `data/inbound_media/` | 收到的附件 | 否 |
-| `data/rag_vector_store*/` | 知识库向量索引 | 否 |
+部分设置只在启动时读取。关闭启动窗口，再重新运行 `launch.bat`。
 
-升级时通常保留 `data/config.json`、`data/wechat-token.json`、`data/wechat-sessions.json`、`wechat-profiles.json`、`wechat-memory.json` 和自定义知识库即可。
+## 隐私提醒
 
-## GUI
+这个项目会在本机保存微信登录信息、聊天记录、角色资料、记忆、日志和附件。
 
-`http://127.0.0.1:18720`，仅监听本机。
-
-| 页面 | 功能 |
-|------|------|
-| Status | 在线状态、当前 AI、模型、启动检查 |
-| Sessions | 线程列表、CLI 恢复指令 |
-| Profiles | 编辑/新增/删除角色模板 |
-| History | 聊天历史、搜索、scenelet 展开 |
-| Config | 编辑 `data/config.json` |
-| Memory | 查看长期记忆 |
-| Prompts | 查看和编辑 prompt 管线、RAG 关键词与阈值 |
-| Proactive | 查看主动回复候选、发送/取消状态和 inner scenelet |
+请不要公开上传自己的 `data\config.json`、登录文件、聊天数据库、日志、附件或个人记忆。分享项目前，务必检查 `data\wechat-profiles.json` 和 `data\prompts.json` 中是否包含私人内容。
 
 ## 许可
 
