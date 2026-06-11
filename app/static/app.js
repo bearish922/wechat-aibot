@@ -144,7 +144,12 @@ async function pollStatusUpdate() {
   } catch {} // swallow poll errors
 }
 
-function ctxPct(ctx) { if (!ctx) return '-'; const pct = ctx.max ? (ctx.tokens / ctx.max * 100).toFixed(1) : 0; return `${(ctx.tokens / 1000).toFixed(0)}k / 1M (${pct}%)`; }
+function ctxPct(ctx) {
+  if (!ctx) return '-';
+  const pct = ctx.max ? (ctx.tokens / ctx.max * 100).toFixed(1) : 0;
+  const turns = ctx.turns ? ` · ${ctx.turns} turns` : "";
+  return `${Number(ctx.tokens || 0).toLocaleString()} / ${Number(ctx.max || 0).toLocaleString()} (${pct}%)${turns}`;
+}
 
 function startStatusPoll() {
   clearStatusPoll();

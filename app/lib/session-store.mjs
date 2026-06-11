@@ -300,6 +300,7 @@ export function sessionsListText(userId) {
 export function clearPendingInput(userId) {
   const pending = pendingInputs.get(userId);
   if (!pending) return false;
+  if (typeof pending.cancel === "function") return pending.cancel();
   clearTimeout(pending.timer);
   pendingInputs.delete(userId);
   return true;

@@ -2,6 +2,14 @@ import { addRoute } from "./server.mjs";
 import { token, activeAI, sessions, modelNames } from "./state.mjs";
 import { sessionProfile, getRoleWorld } from "./world-state.mjs";
 import { getSceneConfig } from "./normalize.mjs";
+import { readClaudeSessionContext } from "./claude-context.mjs";
+
+function contextTokens(usage) {
+  return (usage?.input_tokens || 0)
+    + (usage?.cache_read_input_tokens || 0)
+    + (usage?.cache_creation_input_tokens || 0)
+    + (usage?.output_tokens || 0);
+}
 
 export function registerStatusRoutes() {
   addRoute("GET", "/api/status", () => {
@@ -33,15 +41,17 @@ export function registerStatusRoutes() {
         const profile = sessionProfile(activeSess);
         const roleWorld = profile ? getRoleWorld(profile) : null;
         const cfg = getSceneConfig();
-        const userTokens = activeSess._lastUsage?.input_tokens || 0;
-        const hwTokens = roleWorld?._worldSession?.lastUsage?.input_tokens || 0;
+        const userTranscript = readClaudeSessionContext(activeSess.sid);
+        const hwTranscript = readClaudeSessionContext(roleWorld?._worldSession?.sid);
+        const userTokens = userTranscript?.tokens ?? contextTokens(activeSess._lastUsage);
+        const hwTokens = hwTranscript?.tokens ?? contextTokens(roleWorld?._worldSession?.lastUsage);
         const CTX_MAX = 1_000_000;
         ccContext = {
           profile: profile || "",
           turnCount: activeSess._turnCount || 0,
           turnThreshold: cfg.turnResetThreshold,
-          userCtx: { tokens: userTokens, max: CTX_MAX },
-          hwCtx: { tokens: hwTokens, max: CTX_MAX },
+          userCtx: { tokens: userTokens, max: CTX_MAX, turns: userTranscript?.promptCount || 0 },
+          hwCtx: { tokens: hwTokens, max: CTX_MAX, turns: hwTranscript?.promptCount || 0 },
           sceneMemory: roleWorld?._sceneMemory || "",
         };
       }

@@ -49,6 +49,7 @@ import { registerMemoryRoutes } from "./lib/gui-memory.mjs";
 import { registerPromptsRoutes } from "./lib/gui-prompts.mjs";
 import { registerWorldRoutes } from "./lib/gui-world.mjs";
 import { extractInboundPayload, isDuplicateInput, shouldUseExternalVision, hasExternalVisionConfig, VOICE_ASR_ENABLED, VOICE_WHISPERX_PYTHON, VISION_MODE, VISION_MODEL, VISION_BASE_URL } from "./lib/media.mjs";
+import { InputBatcher, messageHasBatchableMedia } from "./lib/input-batcher.mjs";
 
 // ─── STATE（全局状态管理）──────────────────────────────────────
 import { getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
@@ -835,11 +836,14 @@ function enqueueUserBody(messageAI, userId, body, ctx, opts = {}) {
 // 用途：取消定时器，将累积中的待处理消息立即提交处理（不走批合并逻辑）
 // 输入：userId - 用户 ID
 // 输出：无
+const inputBatcher = new InputBatcher({
+  pendingInputs,
+  delayMs: INPUT_BATCH_MS,
+  onFlush: (messageAI, userId, body, ctx) => enqueueUserBody(messageAI, userId, body, ctx),
+});
+
 function flushPendingInput(userId) {
-  const pending = pendingInputs.get(userId);
-  if (!pending) return;
-  pendingInputs.delete(userId); clearTimeout(pending.timer);
-  enqueueUserBody(pending.messageAI, userId, pending.body, pending.ctx);
+  return inputBatcher.flush(userId);
 }
 
 
@@ -858,11 +862,39 @@ async function handleMessage(msg) {
   const userId = msg.from_user_id;       // 发送者微信 ID
   const ctx = msg.context_token;         // 微信上下文 token
   const contextToken = msg.context_token;
+  const arrivalOrder = inputBatcher.nextOrder();
+  const arrivalAI = activeAI;
+  const mediaRef = messageHasBatchableMedia(msg)
+    ? inputBatcher.reserveMedia({
+        userId,
+        messageAI: arrivalAI,
+        ctx: { context_token: contextToken },
+        order: arrivalOrder,
+      })
+    : null;
 
   // 提取消息有效载荷（文本、附件、媒体等）
-  const payload = await extractInboundPayload(msg);
+  let payload;
+  try {
+    payload = await extractInboundPayload(msg);
+  } catch (error) {
+    if (mediaRef) {
+      inputBatcher.completeMedia(mediaRef, {
+        body: `[媒体：下载或解析失败：${error.message}]`,
+        ctx: { context_token: contextToken },
+      });
+    }
+    throw error;
+  }
   let body = payload.body;               // 提取后的消息正文
-  const { shouldBatch, canAppendToBatch } = payload;  // 批处理标志
+  const { canAppendToBatch } = payload;  // 批处理标志
+  if (mediaRef) {
+    inputBatcher.completeMedia(mediaRef, {
+      body,
+      ctx: { context_token: contextToken },
+    });
+    return;
+  }
   if (!body.trim()) return;              // 空消息直接忽略
 
   const messageAI = activeAI;            // 当前活跃的 AI 后端
@@ -871,7 +903,7 @@ async function handleMessage(msg) {
   const isCommand = /^\/\S+/.test(body); // 是否为斜杠命令
   // 非 /cancel 的命令都会先 flush 待处理的批量输入
   if (isCommand && !/^\/cancel$/.test(body)) {
-    flushPendingInput(userId);
+    await flushPendingInput(userId);
   }
 
   // /help —— 显示命令列表与使用帮助
@@ -912,36 +944,19 @@ async function handleMessage(msg) {
 
   // ── route to active session（普通消息路由至活跃会话）───────
   const messageAIFinal = activeAI;
-  if (shouldBatch) {
-    // 需要批处理合并（如附件分片发送）：累积到 pendingInputs，定时后统一提交
-    const pending = pendingInputs.get(userId);
-    if (pending && body === (pending.body || (pending.parts && pending.parts.join("\n\n")))) {
-      clearTimeout(pending.timer);  // 相同消息直接重置定时器
-    }
-    const combinedBody = pending && pending.messageAI === messageAIFinal
-      ? `${pending.body || (pending.parts && pending.parts.join("\n\n"))}\n---\n${body}`
-      : body;
-    clearPendingInput(userId);
-    pendingInputs.set(userId, {
-      messageAI: messageAIFinal,
-      ctx: { context_token: contextToken },
-      body: combinedBody,
-      timer: setTimeout(() => flushPendingInput(userId), INPUT_BATCH_MS),  // 定时提交
-    });
-  } else if (canAppendToBatch) {
+  if (canAppendToBatch) {
     // 可以追加到已有的批量消息中
-    const pending = pendingInputs.get(userId);
-    if (pending && pending.messageAI === messageAIFinal) {
-      clearTimeout(pending.timer);
-      pending.body = `${pending.body || (pending.parts && pending.parts.join("\n\n"))}\n${body}`;
-      pending.timer = setTimeout(() => flushPendingInput(userId), INPUT_BATCH_MS);
-    } else {
-      clearPendingInput(userId);
-      enqueueUserBody(messageAIFinal, userId, body, { context_token: contextToken });
-    }
+    const appended = inputBatcher.appendText({
+      userId,
+      messageAI: messageAIFinal,
+      body,
+      ctx: { context_token: contextToken },
+      order: arrivalOrder,
+    });
+    if (!appended) enqueueUserBody(messageAIFinal, userId, body, { context_token: contextToken });
   } else {
-    // 普通消息：清除待处理后直接入队
-    clearPendingInput(userId);
+    // 其他消息先提交已有批次，避免跨类型乱序
+    await flushPendingInput(userId);
     enqueueUserBody(messageAIFinal, userId, body, { context_token: contextToken });
   }
 }
