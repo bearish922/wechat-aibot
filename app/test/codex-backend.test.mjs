@@ -122,9 +122,14 @@ describe("Codex backend contract", () => {
     assert.doesNotMatch(historySource, /sessions\.cc/);
   });
 
-  it("restarts only a missing, silent Claude conversation once", () => {
+  it("does not replace a missing Claude conversation outside reset", () => {
     assert.match(botSource, /ai === "cc"[\s\S]*!assistantFullText[\s\S]*!streamResult\?\.text/);
     assert.match(botSource, /No conversation found with session ID/i);
-    assert.match(botSource, /activeSid = uuid\(\)[\s\S]*startChatAttempt\(activeSid, true\)/);
+    assert.match(botSource, /CC conversation is missing; reset the session before retrying/);
+    const missingSessionBlock = botSource.slice(
+      botSource.indexOf("const missingCcSession"),
+      botSource.indexOf("if (!assistantFullText && streamResult?.text)"),
+    );
+    assert.doesNotMatch(missingSessionBlock, /uuid\(|_firstTurn\s*=|startChatAttempt\(/);
   });
 });

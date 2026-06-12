@@ -47,7 +47,7 @@ export async function generateSceneletForTurn({ ai, userId, sess, profile, userB
     worldSession: world,
   });
   // 仅在 world session 的首轮带入场景记忆系统块
-  const sceneMemoryBlock = world.firstTurn || ai === "api" ? getSceneMemorySystemBlock(roleWorld, ai) : "";
+  const sceneMemoryBlock = world.firstTurn || ai === "api" ? getSceneMemorySystemBlock(roleWorld, ai, profile) : "";
   // 调用隐藏世界模型（首次尝试）
   let raw = await runBackendStructured(prompt, {
     backend: ai,
@@ -62,14 +62,9 @@ export async function generateSceneletForTurn({ ai, userId, sess, profile, userB
   });
   let result = normalizeSceneletResult(raw);
   const firstAttemptToolUsage = result?.toolUsage;
-  // 隐藏世界调用失败或只返回 thinking、没有有效 scenelet：重置 world session 并重试
-  if (!result?.innerScenelet) {
-    // 重置会话标识和首轮标记
-    world.sid = uuid();
-    world.firstTurn = true;
-    world.startedAt = new Date().toISOString();
-    world.resetReason = "hidden world retry after failed attempt";
-    // 使用全新的会话参数重试
+  // 隐藏世界调用失败或只返回 thinking、没有有效 scene_state：
+  // 在同一个 world session 内重试。retry 不能丢弃隐形上下文或伪装成 reset。
+  if (!result?.sceneState) {
     raw = await runBackendStructured(prompt, {
       backend: ai,
       label: "hidden_world_retry",
@@ -77,15 +72,16 @@ export async function generateSceneletForTurn({ ai, userId, sess, profile, userB
       persist: true,
       sessionName: `hidden-world-${roleWorldKey(profile)}`,
       sessionId: world.sid,
-      firstTurn: true,
+      // 首次尝试已经占用了该 session；重试必须 resume 同一个 ID。
+      firstTurn: false,
       model: world.model || backendModel(ai),
-      systemPrompt: buildHiddenWorldSystemPrompt(profile, getSceneMemorySystemBlock(roleWorld, ai), memoryPrompt),
+      systemPrompt: buildHiddenWorldSystemPrompt(profile, sceneMemoryBlock, memoryPrompt),
     });
     result = normalizeSceneletResult(raw);
     if (result) result.toolUsage = mergeToolUsage(firstAttemptToolUsage, result.toolUsage);
   }
-  // 两次都没有有效的 innerScenelet，交给上层记录明确错误
-  if (!result?.innerScenelet) throw new Error("hidden world returned no valid inner_scenelet");
+  // 两次都没有有效的 sceneState，交给上层记录明确错误
+  if (!result?.sceneState) throw new Error("hidden world returned no valid scene_state");
   // 如果 API 路径返回了 session_id，更新 world session 标识
   if (raw?._hiddenCall?.session_id) world.sid = raw._hiddenCall.session_id;
   // 更新 world session 的使用状态
@@ -107,8 +103,8 @@ export async function generateSceneletForTurn({ ai, userId, sess, profile, userB
 // @param {object} sceneletResult - 标准化后的 scenelet 结果（包含 innerScenelet 等字段）
 // @returns {string} 拼接好的场景上下文文本块
 export function buildSceneContextBlock(sess, sceneletResult) {
-  const cfg = loadPrompts();
   const profile = sessionProfile(sess);
+  const cfg = loadPrompts(profile);
   // 提取 lifeArc 的简化信息（仅保留标题、进度、类型、时间范围）
   const lifeArcSummary = profile ? lifeArcPromptItems(getRoleWorld(profile)).map(arc => ({
     title: arc.title,
@@ -124,13 +120,13 @@ export function buildSceneContextBlock(sess, sceneletResult) {
       `${profile}生活中跨越多天的安排，只作为时间参考和自然接话线索，不要主动复述。`,
       JSON.stringify(lifeArcSummary, null, 2),
     ].join("\n") : "",
-    // 如果有 inner_scenelet，拼入隐藏中间层叙事及桥接说明
-    sceneletResult?.innerScenelet ? [
-      "【隐藏中间层：inner_scenelet】",
+    // 如果有 scene_state，拼入场景状态及桥接说明（inner_scenelet 不注入主回复）
+    sceneletResult?.sceneState ? [
+      "【角色场景状态：scene_state】",
       cfg.innerSceneletIntro,
-      sceneletResult.innerScenelet,
+      sceneletResult.sceneState,
       cfg.sceneletReplyBridgeInstruction ? [
-        "【从 inner_scenelet 到微信回复】",
+        "【从 scene_state 到微信回复】",
         cfg.sceneletReplyBridgeInstruction,
       ].join("\n") : "",
     ].filter(Boolean).join("\n") : "",
@@ -174,9 +170,9 @@ export async function addFollowUpCandidates(sess, sceneletResult, userBody, role
 //   toolUsage - 工具调用信息
 //   ragUsage - RAG 检索使用情况
 //   timestamp - 事件时间戳
-export async function recordChatHistory({ ai, userId, sess, role, kind = "chat", text, scenelet = "", sceneletStatus = "", sceneletError = "", proactiveIntentId = "", toolUsage = null, ragUsage = null, timestamp = new Date().toISOString() }) {
+export async function recordChatHistory({ ai, userId, sess, role, kind = "chat", text, sceneState = "", scenelet = "", sceneletStatus = "", sceneletError = "", proactiveIntentId = "", toolUsage = null, ragUsage = null, timestamp = new Date().toISOString() }) {
   // 文本和 scenelet 都为空时不记录
-  if (!sess || (!text?.trim() && !scenelet?.trim())) return;
+  if (!sess || (!text?.trim() && !sceneState?.trim() && !scenelet?.trim())) return;
   // 将丰富字段封装后追加到聊天历史
   await appendChatEvent({
     timestamp,
@@ -188,6 +184,7 @@ export async function recordChatHistory({ ai, userId, sess, role, kind = "chat",
     role,
     kind,
     text,
+    sceneState,
     scenelet,
     sceneletStatus,
     sceneletError,
@@ -302,7 +299,7 @@ async function evaluateProactiveIntent({ ai, userId, sess, profile, intent }) {
 // @returns {boolean} 是否成功推进了状态
 async function advanceWorldState({ ai, roleWorld, profile, now }) {
   const cfg = getSceneConfig();
-  const prompt = loadPrompts().timeAdvancementPrompt;
+  const prompt = loadPrompts(profile).timeAdvancementPrompt;
   // 未配置时间推进提示词模板则跳过
   if (!prompt) return false;
 
@@ -385,7 +382,7 @@ async function runDailyShareSeed({ ai, sess, profile }) {
 
   // 构建生成提示词输入：当前时间、位置、活动、清醒状态
   const promptParts = [
-    loadPrompts().dailyShareSeedPrompt || "",
+    loadPrompts(profile).dailyShareSeedPrompt || "",
     "",
     "当前状态：",
     JSON.stringify({
@@ -503,7 +500,7 @@ export async function runScheduleExtractor({ ai, userBody, scenelet, assistantRe
   const arcs = Array.isArray(activeSchedules) ? activeSchedules.filter(a => a.status === "active" && a.kind) : [];
   // 构建提取提示词：提供当前日程、用户消息、AI 回复和内心叙事
   const prompt = [
-    loadPrompts().scheduleExtractorPrompt || "",
+    loadPrompts(profile).scheduleExtractorPrompt || "",
     "",
     "当前活跃 life_arcs：",
     arcs.length
@@ -572,6 +569,7 @@ export async function maybeCreateScheduleEntry({ ai, sess, profile }) {
 
   // 构建日程确认提示词
   const prompt = buildScheduleFinalizationPrompt({
+    profile,
     candidates,
     activeSchedules: activeSchedules.length
       ? activeSchedules.map(a => `- [${a.kind}] ${a.title || ""} (${a.timeStart || "?"} ~ ${a.timeEnd || "?"}) id:${a.id}`).join("\n")
@@ -874,7 +872,7 @@ export async function batchUpdateMemory({ ai, userId, userMessages, profile }) {
 
   // 对比写入前后的文档大小，记录变更
   const before = loadMemoryDocument();
-  await updateMemoryDocument(msgs, ai);
+  await updateMemoryDocument(msgs, ai, profile);
   const after = loadMemoryDocument();
   const changed = before !== after;
   if (changed) log("🧠", `memory ${before.length}→${after.length}B`);

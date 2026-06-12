@@ -11,8 +11,27 @@ const put = (path, body) => api("PUT", path, body);
 
 let activeTab = "status";
 let _statusPollTimer = null;
+let selectedRoleProfile = "";
 const content = document.getElementById("content");
 const tabs = document.querySelectorAll("nav button");
+
+async function resolveSelectedRole(profiles = []) {
+  const names = profiles.map(p => typeof p === "string" ? p : p.name).filter(Boolean);
+  if (selectedRoleProfile && names.includes(selectedRoleProfile)) return selectedRoleProfile;
+  const status = await get("/api/status").catch(() => ({}));
+  const active = status.activeProfile || status.ccContext?.profile || "";
+  selectedRoleProfile = names.includes(active)
+    ? active
+    : (names.find(name => name !== "默认") || names[0] || "");
+  return selectedRoleProfile;
+}
+
+function roleSelectOptions(profiles = []) {
+  return profiles.map(profile => {
+    const name = typeof profile === "string" ? profile : profile.name;
+    return `<option value="${escAttr(name)}"${name === selectedRoleProfile ? " selected" : ""}>${escHtml(name)}</option>`;
+  }).join("");
+}
 
 tabs.forEach(btn => {
   btn.addEventListener("click", () => {
@@ -59,7 +78,6 @@ async function render() {
     switch (activeTab) {
       case "status": await renderStatus(); break;
       case "prompts": await renderPrompts(); break;
-      case "world": await renderWorld(); break;
       case "history": await renderHistory(); break;
       case "proactive": await renderProactive(); break;
       case "memory": await renderMemory(); break;
@@ -324,7 +342,7 @@ function debounce(fn, ms) {
 
 async function savePromptField(key, value, silent = false) {
   try {
-    const body = { [key]: value };
+    const body = { profile: selectedRoleProfile, [key]: value };
     const r = await api("PUT", "/api/prompts", body);
     if (!r.ok) {
       toast(r.error || `保存失败: ${key}`, false);
@@ -339,32 +357,35 @@ async function savePromptField(key, value, silent = false) {
 }
 
 async function renderPrompts() {
-  const [pd, pf] = await Promise.all([get("/api/prompts"), get("/api/profiles")]);
-  const p = pd.prompts || {};
+  const [pf, wd] = await Promise.all([get("/api/profiles"), get("/api/world/roles")]);
   const profiles = pf.profiles || [];
+  await resolveSelectedRole(profiles);
+  const pd = await get(`/api/prompts/${encodeURIComponent(selectedRoleProfile)}`);
+  const p = pd.prompts || {};
+  const selectedProfile = profiles.find(pr => pr.name === selectedRoleProfile) || {};
+  const role = (wd.roles || []).find(item => item.profile === selectedRoleProfile) || { profile: selectedRoleProfile };
   // Always initialize RAG keyword edits from fresh server data
   window._ragKwEdits = JSON.parse(JSON.stringify(p.ragKeywords || {}));
 
-  const profileRows = profiles.map(pr => `
-    <tr>
-      <td class="profile-name"><strong>${escHtml(pr.name)}</strong></td>
-      <td class="prompt-preview"><span class="prompt-preview-text">${escHtml(pr.prompt)}</span></td>
-      <td>${Number(pr.bindings)} 个会话</td>
-      <td class="actions-cell">
-        <button class="btn" data-action="edit-profile" data-profile="${escAttr(pr.name)}">编辑</button>
-        ${pr.name !== '默认' ? `<button class="btn btn-danger" data-action="delete-profile" data-profile="${escAttr(pr.name)}">删除</button>` : ''}
-      </td>
-    </tr>
-  `).join("");
+  content.innerHTML = [
+    renderPromptsPipeline(p, selectedProfile, profiles),
+    `<div class="panel" id="hiddenWorldPromptSection">
+      <div class="panel-head">
+        <div>
+          <h2>Hidden World 与主动子系统</h2>
+          <p class="panel-subtitle">当前角色的场景生成、世界状态和主动消息配置。</p>
+        </div>
+      </div>
+    </div>`,
+    renderWorldPipeline(role, p),
+  ].join("");
 
-  content.innerHTML = renderPromptsPipeline(p, profileRows);
-
-  content.querySelectorAll('[data-action="edit-profile"]').forEach(btn => {
-    btn.addEventListener("click", () => editProfile(btn.dataset.profile));
+  content.querySelector("#promptProfileSelect")?.addEventListener("change", e => {
+    selectedRoleProfile = e.target.value;
+    promptsEditing = {};
+    renderPrompts();
   });
-  content.querySelectorAll('[data-action="delete-profile"]').forEach(btn => {
-    btn.addEventListener("click", () => deleteProfile(btn.dataset.profile));
-  });
+  content.querySelector("#manageProfilesBtn")?.addEventListener("click", () => openRoleManager());
 
   // Number inputs: auto-save on change with debounce
   const debouncedSaveNum = debounce(async (el) => {
@@ -480,6 +501,8 @@ async function renderPrompts() {
       }
     });
   });
+  bindWorldEvents();
+  bindSeasonalEditorEvents();
 }
 
 
@@ -493,24 +516,23 @@ function switchTab(name) {
 
 let promptsEditing = {};
 
-function renderPromptsPipeline(p, profileRows) {
-  const profileTable = `
-    <div class="pipeline-embedded-table">
-      <div class="table-wrap"><table>
-        <thead><tr><th>名称</th><th>Prompt 预览</th><th>绑定会话</th><th></th></tr></thead>
-        <tbody>${profileRows || '<tr><td colspan="4">暂无 profiles</td></tr>'}</tbody>
-      </table></div>
-      <div class="pipeline-table-actions">
-        <button class="btn btn-primary" onclick="showAddProfile()">+ 新增 Profile</button>
-        <div id="profileForm"></div>
-      </div>
+function renderPromptsPipeline(p, profile, profiles) {
+  const profileBody = `
+    <div class="pipeline-preview">
+      <span class="pipeline-preview-text">${escHtml(profile.prompt || "(empty)")}</span>
+    </div>
+    <div class="pipeline-table-actions" style="margin-top:8px">
+      <span style="color:var(--muted);font-size:12px">${Number(profile.bindings || 0)} 个绑定会话 · 通过右上角“管理角色”编辑 Profile</span>
     </div>`;
 
   return `
     <div class="panel">
       <div class="panel-head">
-        <h2>运行时 Prompt Pipeline</h2>
-        <span class="status-pill online">实时配置</span>
+        <h2>角色 Prompt 管理</h2>
+        <div class="memory-toolbar">
+          <button class="btn" id="manageProfilesBtn">管理角色</button>
+          <select id="promptProfileSelect">${roleSelectOptions(profiles)}</select>
+        </div>
       </div>
     </div>
 
@@ -522,7 +544,7 @@ function renderPromptsPipeline(p, profileRows) {
           title: "Profile",
           desc: "",
           wide: true,
-          body: profileTable,
+          body: profileBody,
         })}
         ${renderPipelineStep({
           n: 2,
@@ -557,7 +579,7 @@ function renderPromptsPipeline(p, profileRows) {
             <label class="pipeline-sub-label">Inner Scenelet 引导说明</label>
             ${renderTextPreview("innerSceneletIntro", p.innerSceneletIntro)}
             <label class="pipeline-sub-label">Inner Scenelet 正文</label>
-            <button class="btn" onclick="switchTab('world')" style="margin:8px 0">前往 Hidden World 页配置 →</button>
+            <a href="#hiddenWorldPromptSection" class="btn" style="margin:8px 0">查看下方 Hidden World 配置</a>
             <label class="pipeline-sub-label">Scenelet 到回复桥接指令</label>
             ${renderTextPreview("sceneletReplyBridgeInstruction", p.sceneletReplyBridgeInstruction)}
           `,
@@ -742,85 +764,98 @@ function renderPipelineArrow(text) {
   return "";
 }
 
-window.editProfile = async (name) => {
-  const d = await get("/api/profiles");
-  const p = d.profiles.find(x => x.name === name);
-  if (!p) return;
-  document.getElementById("profileForm").innerHTML = `
-    <div class="profile-editor">
-    <div class="editor-head">
-      <h3>编辑：${escHtml(name)}</h3>
-      <span>${p.prompt.length.toLocaleString()} chars</span>
-    </div>
-    <div class="form-group"><label>Prompt</label><textarea id="editPrompt" class="profile-prompt-editor" spellcheck="false">${escHtml(p.prompt)}</textarea></div>
-    <div class="editor-actions"><button class="btn btn-primary" id="saveProfileBtn">保存</button></div>
-    </div>
-  `;
-  document.getElementById("saveProfileBtn").addEventListener("click", () => saveProfile(name));
-  document.getElementById("editPrompt").focus();
-};
+async function openRoleManager(initialName = selectedRoleProfile) {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal-box modal-box-wide role-manager-modal">
+      <div class="modal-head"><h3>管理角色</h3><button class="btn modal-close">&times;</button></div>
+      <div class="modal-body" id="roleManagerBody"></div>
+    </div>`;
+  document.body.appendChild(overlay);
 
-window.saveProfile = async (name) => {
-  const prompt = document.getElementById("editPrompt").value;
-  const r = await api("PUT", "/api/profiles", { name, prompt });
-  toast(r.ok ? "已保存" : r.error, r.ok);
-  if (r.ok) render();
-};
+  let editingName = initialName || "";
+  let adding = false;
+  let changed = false;
 
-window.showAddProfile = () => {
-  document.getElementById("profileForm").innerHTML = `
-    <div class="profile-editor">
-    <div class="editor-head"><h3>新增 Profile</h3></div>
-    <div class="form-grid one"><div class="form-group"><label>名称</label><input id="newName"></div></div>
-    <div class="form-group"><label>Prompt</label><textarea id="newPrompt" class="profile-prompt-editor" spellcheck="false"></textarea></div>
-    <div class="editor-actions"><button class="btn btn-primary" onclick="addProfile()">新增</button></div>
-    </div>
-  `;
-  document.getElementById("newName").focus();
-};
+  const close = () => {
+    overlay.remove();
+    if (changed && activeTab === "prompts") renderPrompts();
+  };
+  overlay.querySelector(".modal-close").addEventListener("click", close);
+  overlay.addEventListener("click", e => { if (e.target === overlay) close(); });
 
-window.addProfile = async () => {
-  const name = document.getElementById("newName").value.trim();
-  const prompt = document.getElementById("newPrompt").value.trim();
-  if (!name || !prompt) { toast("名称和 prompt 不能为空", false); return; }
-  const r = await post("/api/profiles", { name, prompt });
-  toast(r.ok ? "已新增" : r.error, r.ok);
-  if (r.ok) render();
-};
+  const refresh = async () => {
+    const data = await get("/api/profiles");
+    const profiles = data.profiles || [];
+    if (!adding && !profiles.some(item => item.name === editingName)) editingName = profiles[0]?.name || "";
+    const current = profiles.find(item => item.name === editingName) || null;
+    const body = overlay.querySelector("#roleManagerBody");
+    body.innerHTML = `
+      <div class="role-manager-layout">
+        <aside class="role-manager-list">
+          <button class="btn btn-primary role-manager-add" data-action="role-add">+ 新增角色</button>
+          ${profiles.map(item => `
+            <button class="role-manager-item${!adding && item.name === editingName ? " active" : ""}" data-role-name="${escAttr(item.name)}">
+              <strong>${escHtml(item.name)}</strong><span>${Number(item.bindings || 0)} 个会话</span>
+            </button>`).join("")}
+        </aside>
+        <section class="role-manager-editor">
+          ${adding ? `
+            <div class="editor-head"><h3>新增角色</h3></div>
+            <div class="form-group"><label>角色名称</label><input id="roleManagerName" autocomplete="off"></div>
+            <div class="form-group"><label>Profile Prompt</label><textarea id="roleManagerPrompt" class="profile-prompt-editor" spellcheck="false"></textarea></div>
+            <div class="editor-actions"><button class="btn btn-primary" data-action="role-create">创建角色</button><button class="btn" data-action="role-cancel-add">取消</button></div>
+          ` : current ? `
+            <div class="editor-head"><h3>${escHtml(current.name)}</h3><span>${String(current.prompt || "").length.toLocaleString()} chars</span></div>
+            <div class="form-group"><label>Profile Prompt</label><textarea id="roleManagerPrompt" class="profile-prompt-editor" spellcheck="false">${escHtml(current.prompt || "")}</textarea></div>
+            <div class="editor-actions">
+              <button class="btn btn-primary" data-action="role-save" data-role-name="${escAttr(current.name)}">保存 Profile</button>
+              ${current.name !== "默认" ? `<button class="btn btn-danger" data-action="role-delete" data-role-name="${escAttr(current.name)}">删除角色</button>` : ""}
+            </div>
+          ` : '<p class="empty-text">暂无角色</p>'}
+        </section>
+      </div>`;
 
-window.deleteProfile = async (name) => {
-  if (!confirm(`删除 profile "${name}"？`)) return;
-  const r = await del("/api/profiles", { name });
-  toast(r.ok ? `已删除（${r.reverted} 个会话已回退）` : r.error, r.ok);
-  if (r.ok) render();
-};
+    body.querySelector('[data-action="role-add"]')?.addEventListener("click", () => { adding = true; refresh(); });
+    body.querySelector('[data-action="role-cancel-add"]')?.addEventListener("click", () => { adding = false; refresh(); });
+    body.querySelectorAll("[data-role-name].role-manager-item").forEach(button => {
+      button.addEventListener("click", () => { adding = false; editingName = button.dataset.roleName; refresh(); });
+    });
+    body.querySelector('[data-action="role-create"]')?.addEventListener("click", async () => {
+      const name = body.querySelector("#roleManagerName")?.value.trim() || "";
+      const prompt = body.querySelector("#roleManagerPrompt")?.value.trim() || "";
+      if (!name || !prompt) return toast("名称和 Profile Prompt 不能为空", false);
+      const result = await post("/api/profiles", { name, prompt });
+      toast(result.ok ? "角色已创建" : result.error, result.ok);
+      if (!result.ok) return;
+      selectedRoleProfile = name;
+      editingName = name;
+      adding = false;
+      changed = true;
+      await refresh();
+    });
+    body.querySelector('[data-action="role-save"]')?.addEventListener("click", async event => {
+      const name = event.currentTarget.dataset.roleName;
+      const prompt = body.querySelector("#roleManagerPrompt")?.value || "";
+      const result = await put("/api/profiles", { name, prompt });
+      toast(result.ok ? "Profile 已保存" : result.error, result.ok);
+      if (result.ok) { changed = true; await refresh(); }
+    });
+    body.querySelector('[data-action="role-delete"]')?.addEventListener("click", async event => {
+      const name = event.currentTarget.dataset.roleName;
+      if (!confirm(`删除角色 "${name}"？其角色 Prompt 套件也会一并删除。`)) return;
+      const result = await del("/api/profiles", { name });
+      toast(result.ok ? `角色已删除（${result.reverted} 个会话已回退）` : result.error, result.ok);
+      if (!result.ok) return;
+      if (selectedRoleProfile === name) selectedRoleProfile = "";
+      editingName = "";
+      changed = true;
+      await refresh();
+    });
+  };
 
-// Hidden World
-let worldState = { profile: "" };
-
-async function renderWorld() {
-  const [wd, pd] = await Promise.all([get("/api/world/roles"), get("/api/prompts")]);
-  const profiles = wd.profiles || [];
-  if (!worldState.profile && profiles.length) worldState.profile = profiles.includes("白鹭千圣") ? "白鹭千圣" : profiles[0];
-  const role = (wd.roles || []).find(r => r.profile === worldState.profile) || wd.roles?.[0] || {};
-  const p = pd.prompts || {};
-
-  content.innerHTML = `
-    <div class="panel">
-      <div class="panel-head">
-        <h2>Hidden World Pipeline</h2>
-        <div class="memory-toolbar">
-          <select id="worldProfileSelect">${profiles.map(name => `<option value="${escAttr(name)}"${name === role.profile ? " selected" : ""}>${escHtml(name)}</option>`).join("")}</select>
-        </div>
-      </div>
-	    </div>
-
-    ${renderWorldPipeline(role, p)}
-
-  `;
-  bindWorldEvents();
-  bindSeasonalEditorEvents();
-  bindPromptEditorEvents(renderWorld);
+  await refresh();
 }
 
 function renderWorldPipeline(role, p) {
@@ -860,10 +895,7 @@ function renderWorldPipeline(role, p) {
           n: 4,
           title: "长期记忆 (System Prompt)",
           desc: "通过 --append-system-prompt-file 注入 system prompt，自动缓存。",
-          body: `
-            <label class="pipeline-sub-label">记忆上下文指令</label>
-            ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
-          `,
+          body: `<p style="color:var(--muted);font-size:13px;margin:0">与上方主回复 Pipeline 共用同一份角色记忆上下文指令。</p>`,
         })}
       </div>
     </div>
@@ -1508,11 +1540,6 @@ function renderWorldBox(title, rows) {
 }
 
 function bindWorldEvents() {
-  content.querySelector("#worldProfileSelect")?.addEventListener("change", e => {
-    worldState.profile = e.target.value;
-    renderWorld();
-  });
-
   // Schedule Calendar events
   const scOpen = content.querySelector('#openScheduleCalendar');
   const scClose = content.querySelector('#closeScheduleCalendar');
@@ -1558,52 +1585,6 @@ function bindWorldEvents() {
       scRefreshCalendar();
     });
   }
-}
-
-function bindPromptEditorEvents(afterSave = render) {
-  // Number inputs: auto-save on change with debounce
-  const debouncedSaveNum = debounce(async (el) => {
-    const key = el.dataset.key;
-    if (!key) return;
-    let val = Number(el.value);
-    if (el.dataset.ms === 'h') val = fromH(val);
-    else if (el.dataset.ms === 'd') val = fromD(val);
-    else if (el.dataset.ms === '1') val = fromS(val);
-    await savePromptField(key, val, true);
-  }, 300);
-
-  content.querySelectorAll('.prompts-editable').forEach(el => {
-    if (el.classList.contains('prompts-num')) {
-      el.addEventListener('change', () => debouncedSaveNum(el));
-    } else if (el.tagName === 'TEXTAREA' && !el.classList.contains('prompts-textarea')) {
-      const debouncedSaveArr = debounce(async (ta) => {
-        const key = ta.dataset.key;
-        if (!key) return;
-        const lines = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
-        await savePromptField(key, lines, true);
-      }, 300);
-      el.addEventListener('change', () => debouncedSaveArr(el));
-    }
-  });
-  content.querySelectorAll('[data-action="edit-text"]').forEach(btn => {
-    btn.addEventListener("click", () => { promptsEditing[btn.dataset.key] = true; afterSave(); });
-  });
-  content.querySelectorAll('[data-action="cancel-text"]').forEach(btn => {
-    btn.addEventListener("click", () => {
-      promptsEditing[btn.dataset.key] = false;
-      afterSave();
-    });
-  });
-  content.querySelectorAll('[data-action="save-text"]').forEach(btn => {
-    btn.addEventListener("click", async () => {
-      const key = btn.dataset.key;
-      const el = content.querySelector(`#prompt_${key}`);
-      const val = el ? el.value : '';
-      promptsEditing[key] = false;
-      await savePromptField(key, val);
-      afterSave();
-    });
-  });
 }
 
 // History
@@ -1789,6 +1770,7 @@ function renderHistoryMessages(messages) {
       <div class="history-text" data-eid="${escAttr(item.id)}">${escHtml(item.text || "")}</div>
       ${renderHistorySceneletNote(item)}
       ${renderHistoryToolNote(item)}
+      ${item.sceneState ? `<details class="scenelet-details"><summary>scene state</summary><pre>${escHtml(item.sceneState)}</pre></details>` : ""}
       ${item.scenelet ? `<details class="scenelet-details"><summary>inner scenelet</summary><pre>${escHtml(item.scenelet)}</pre></details>` : ""}
     </article>
   `).join("");

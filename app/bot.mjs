@@ -360,7 +360,7 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
     const userItems = loadMemoryDocument();
     const worldItems = loadWorldMemoryDocument();
     if (!userItems && !worldItems) return "";
-    const instruction = loadPrompts().memoryContextInstruction || "";
+    const instruction = loadPrompts(turnProfile).memoryContextInstruction || "";
     const parts = [];
     if (userItems) parts.push(instruction ? `${instruction}\n\n${userItems}` : userItems);
     if (worldItems) parts.push(`【关于世界 — 用户记录】\n${worldItems}`);
@@ -381,7 +381,7 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
   }
 
   // 构建日志条目基础信息
-  const logEntry = { ts: new Date().toISOString(), ai, userId, sessionName, sid, firstTurn: styleState._firstTurn, isProfileChat, profile: turnProfile || "默认", bodyChars: String(body || "").length, sceneletChars: sceneletResult?.innerScenelet?.length || 0, sceneletError: sceneletError || null };
+  const logEntry = { ts: new Date().toISOString(), ai, userId, sessionName, sid, firstTurn: styleState._firstTurn, isProfileChat, profile: turnProfile || "默认", bodyChars: String(body || "").length, sceneletChars: sceneletResult?.sceneState?.length || 0, sceneletError: sceneletError || null };
   const safeName = sessionName.replace(/[<>:"/\\|?*]/g, "_");  // 文件系统安全的名称
   const logFile = path.join(LOGS_DIR, `${safeName}-${ai}.jsonl`);   // 结构化日志
   const txtLogFile = path.join(LOGS_DIR, `${safeName}-${ai}.txt`);  // 人类可读日志
@@ -398,6 +398,7 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
   // 记录用户原始消息和上下文到日志
   writeTxtLog("USER MESSAGE", body);
   if (memoryPrompt) writeTxtLog("MEMORY SNAPSHOT", memoryPrompt);
+  if (sceneletResult?.sceneState) writeTxtLog("SCENE STATE", sceneletResult.sceneState);
   if (sceneletResult?.innerScenelet) writeTxtLog("INNER SCENELET", sceneletResult.innerScenelet);
 
 
@@ -436,15 +437,15 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
     const ragContext = ragEligible ? queryRag(body, turnProfile) : "";
     ragUsage = { eligible: ragEligible, used: Boolean(ragContext), chars: ragContext.length };
     // 稳定风格提示
-    const stableStyle = isProfileChat ? expressionCapabilityPrompt() : "";
+    const stableStyle = isProfileChat ? expressionCapabilityPrompt(turnProfile) : "";
     // 构建场景上下文块
     const ctxParts = [];
     if (sceneletResult) ctxParts.push(buildSceneContextBlock(styleState, sceneletResult));
     const sceneContext = ctxParts.join("\n\n---\n\n");
     // 场景记忆块（仅角色扮演模式的首轮）
-    const sceneMemoryBlock = (isProfileChat && firstTurn) ? getSceneMemorySystemBlock(roleWorld, ai) : "";
+    const sceneMemoryBlock = (isProfileChat && firstTurn) ? getSceneMemorySystemBlock(roleWorld, ai, turnProfile) : "";
     // 组装发送给 AI 的完整消息体
-    const turnBody = await buildTurnBody(body, ragContext, sceneContext, recentVisibleContext(styleState), sceneMemoryBlock);
+    const turnBody = await buildTurnBody(body, ragContext, sceneContext, recentVisibleContext(styleState), sceneMemoryBlock, turnProfile);
 
     writeTxtLog("TURN BODY", turnBody);
     if (stableStyle) writeTxtLog("STABLE STYLE", stableStyle);
@@ -457,8 +458,8 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
     const apiSystemParts = [];
     if (turnProfile && profileTemplates[turnProfile]) apiSystemParts.push(profileTemplates[turnProfile]);
     if (memoryPrompt) apiSystemParts.push(memoryPrompt);
-    if (isProfileChat && getChatStyle()) apiSystemParts.push(getChatStyle());
-    if (isProfileChat && formatLocalChatReality()) apiSystemParts.push(formatLocalChatReality());
+    if (isProfileChat && getChatStyle(turnProfile)) apiSystemParts.push(getChatStyle(turnProfile));
+    if (isProfileChat && formatLocalChatReality(new Date(), turnProfile)) apiSystemParts.push(formatLocalChatReality(new Date(), turnProfile));
     if (stableStyle) apiSystemParts.push(stableStyle);
     if (ai === "api" && !styleState._apiMessages) styleState._apiMessages = [];
     const apiMessages = ai === "api" ? [
@@ -484,9 +485,9 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
       },
     });
 
-    let chatTask = startChatAttempt(activeSid, firstTurn);
+    const chatTask = startChatAttempt(activeSid, firstTurn);
     styleState._lastProc = chatTask.proc || null;
-    let streamResult = await chatTask;
+    const streamResult = await chatTask;
     styleState._lastProc = null;
     const missingCcSession = ai === "cc"
       && streamResult?.code !== 0
@@ -494,14 +495,7 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
       && !streamResult?.text
       && /No conversation found with session ID/i.test(streamResult?.stderr || "");
     if (missingCcSession) {
-      activeSid = uuid();
-      styleState.sid = activeSid;
-      styleState._firstTurn = true;
-      log("↻", `[${sessionName}] CC session missing; retrying with a new session`);
-      chatTask = startChatAttempt(activeSid, true);
-      styleState._lastProc = chatTask.proc || null;
-      streamResult = await chatTask;
-      styleState._lastProc = null;
+      throw new Error("CC conversation is missing; reset the session before retrying");
     }
     if (!assistantFullText && streamResult?.text) assistantFullText = streamResult.text;
     if (streamResult?.threadId && streamResult.threadId !== styleState.sid) styleState.sid = streamResult.threadId;
@@ -591,9 +585,18 @@ async function finalizeTurnSuccess(params) {
   appendVisibleHistory(styleState, "user", body, "chat", userAt);
   appendVisibleHistory(styleState, "assistant", cleanText, "chat", assistantAt);
 
-  // 持久化对话历史到数据库
-  await recordChatHistory({ ai, userId, sess: styleState, role: "user", kind: "chat", text: body, timestamp: userAt });
-  await recordChatHistory({ ai, userId, sess: styleState, role: "assistant", kind: "chat", text: cleanText, scenelet: sceneletResult?.innerScenelet || "", sceneletStatus: sceneletResult ? "ok" : (sceneletError ? "error" : "skipped"), sceneletError: sceneletError || "", toolUsage, ragUsage, timestamp: assistantAt });
+  // 持久化对话历史到数据库（失败时写入日志便于恢复）
+  try {
+    await recordChatHistory({ ai, userId, sess: styleState, role: "user", kind: "chat", text: body, timestamp: userAt });
+    await recordChatHistory({ ai, userId, sess: styleState, role: "assistant", kind: "chat", text: cleanText, sceneState: sceneletResult?.sceneState || "", scenelet: sceneletResult?.innerScenelet || "", sceneletStatus: sceneletResult ? "ok" : (sceneletError ? "error" : "skipped"), sceneletError: sceneletError || "", toolUsage, ragUsage, timestamp: assistantAt });
+  } catch (e) {
+    writeTxtLog("DB WRITE ERROR", e.message);
+    // fallback: 将历史数据以 JSON 写入日志，方便手动恢复
+    writeTxtLog("HISTORY FALLBACK", JSON.stringify({
+      user: { role: "user", kind: "chat", text: body, timestamp: userAt },
+      assistant: { role: "assistant", kind: "chat", text: cleanText, sceneState: sceneletResult?.sceneState || "", scenelet: sceneletResult?.innerScenelet || "", sceneletStatus: sceneletResult ? "ok" : (sceneletError ? "error" : "skipped"), timestamp: assistantAt },
+    }, null, 2));
+  }
 
   // 角色扮演模式的额外后处理
   if (isProfileChat && cleanText) {

@@ -610,9 +610,9 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
 // 将知识库检索结果与配置中的引导指令拼接为结构化文本块
 // 参数: ragContext - RAG 检索结果文本（可为空）
 // 返回: 格式化后的上下文块字符串，ragContext 为空时返回空字符串
-function buildRagContextBlock(ragContext) {
+function buildRagContextBlock(ragContext, profile = "") {
   if (!ragContext) return "";
-  const cfg = loadPrompts();
+  const cfg = loadPrompts(profile);
   return [
     "【本轮知识库检索结果】",
     cfg.ragContextInstruction,
@@ -629,12 +629,12 @@ function buildRagContextBlock(ragContext) {
 //   stylePrompt - 风格提示词
 //   profileOverride - 角色配置文件覆盖
 // 返回: 拼接完成的完整提示文本
-function buildCodexPrompt(ai, userBody, ragContext) {
+function buildCodexPrompt(ai, userBody, ragContext, profile = "") {
   let prompt = userBody;
   // 如果有 RAG 检索结果，将其作为最高优先级的上下文块前置
   if (ragContext) {
     prompt = [
-      buildRagContextBlock(ragContext),
+      buildRagContextBlock(ragContext, profile),
       "",
       "---",
       "",
@@ -1017,7 +1017,7 @@ function runCodexExec(prompt, {
 //   options - 额外选项（如 noSessionPersistence）
 // 返回: Promise，resolve 时返回 { code, stderr, killed }；promise 上挂载 .proc 引用
 function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragContext, stylePrompt, memoryPrompt = "", profileOverride = null, options = {}) {
-  const prompt = buildCodexPrompt(ai, body, ragContext);
+  const prompt = buildCodexPrompt(ai, body, ragContext, profileOverride);
   return runCodexAppServer(prompt, {
     sessionId: (!firstTurn && !options.noSessionPersistence) ? sid : "",
     persist: !options.noSessionPersistence,

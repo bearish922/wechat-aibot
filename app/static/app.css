@@ -2828,3 +2828,20 @@ p {
 .cc-toolbar .btn-reset { background: #fff0f0; color: #c62828; border-color: #ef9a9a; }
 .cc-toolbar .btn-reset:hover { background: #ffebee; }
 .modal-body { padding: 18px; overflow: auto; }
+.role-manager-modal { max-width: 1040px; height: min(780px, 88vh); }
+.role-manager-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 18px; min-height: 0; }
+.role-manager-list { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.role-manager-add { width: 100%; margin-bottom: 4px; }
+.role-manager-item { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--text); text-align: left; cursor: pointer; }
+.role-manager-item strong, .role-manager-item span { display: block; }
+.role-manager-item span { margin-top: 3px; color: var(--muted); font-size: 11px; }
+.role-manager-item:hover { border-color: var(--line-strong); background: #f8fafc; }
+.role-manager-item.active { border-color: var(--primary); background: var(--primary-soft); }
+.role-manager-editor { min-width: 0; }
+.role-manager-editor .profile-prompt-editor { min-height: 480px; max-height: calc(88vh - 210px); }
+.panel-subtitle { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+@media (max-width: 760px) {
+  .role-manager-layout { grid-template-columns: 1fr; }
+  .role-manager-list { max-height: 180px; overflow: auto; }
+  .role-manager-editor .profile-prompt-editor { min-height: 300px; }
+}

@@ -3,6 +3,7 @@ import { addRoute } from "./server.mjs";
 import { profileTemplates, sessions } from "./state.mjs";
 import { log } from "./utils.mjs";
 import { dataPath } from "./paths.mjs";
+import { deleteRolePromptSuite } from "./gui-prompts.mjs";
 
 const PROFILE_FILE = dataPath("wechat-profiles.json");
 
@@ -52,6 +53,7 @@ export function registerProfileRoutes() {
       }
     }
     delete profileTemplates[name];
+    deleteRolePromptSuite(name);
     saveToDisk();
     log("\u{1F464}", `profile deleted: ${name} (${reverted} sessions reverted)`);
     return { ok: true, reverted };

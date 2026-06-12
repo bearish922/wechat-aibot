@@ -51,7 +51,8 @@ async function getDb() {
       sceneletError TEXT NOT NULL DEFAULT '',
       proactiveIntentId TEXT NOT NULL DEFAULT '',
       toolUsage TEXT NOT NULL DEFAULT '{}',
-      ragUsage TEXT NOT NULL DEFAULT '{}'
+      ragUsage TEXT NOT NULL DEFAULT '{}',
+      sceneState TEXT NOT NULL DEFAULT ''
     )`);
     _db.run(`CREATE INDEX IF NOT EXISTS idx_events_ts ON events(timestamp)`);
     _db.run(`CREATE INDEX IF NOT EXISTS idx_events_session ON events(sessionKey)`);
@@ -62,6 +63,8 @@ async function getDb() {
     migrateSessionKeyColumn(_db);
     // 迁移：将 sessionKey 从 userId|sessionId 改为 userId|profile
     migrateSessionKeyToProfile(_db);
+    // 迁移：添加 sceneState 列（双输出架构新增）
+    migrateAddSceneStateColumn(_db);
     _dbReady = true;
     // 数据库为空且存在旧 JSON 文件时，执行数据迁移
     const cnt = _db.exec("SELECT COUNT(*) as c FROM events")[0]?.values[0]?.[0] || 0;
@@ -158,15 +161,16 @@ function migrateSessionKeyColumn(db) {
       sceneletError TEXT NOT NULL DEFAULT '',
       proactiveIntentId TEXT NOT NULL DEFAULT '',
       toolUsage TEXT NOT NULL DEFAULT '{}',
-      ragUsage TEXT NOT NULL DEFAULT '{}'
+      ragUsage TEXT NOT NULL DEFAULT '{}',
+      sceneState TEXT NOT NULL DEFAULT ''
     )`);
 
     // 2. 从旧表复制数据，sessionKey 手动计算
     db.run(`INSERT INTO events_new
-      (id,timestamp,userId,ai,sessionId,sessionName,sessionKey,profile,role,kind,text,scenelet,sceneletStatus,sceneletError,proactiveIntentId,toolUsage,ragUsage)
+      (id,timestamp,userId,ai,sessionId,sessionName,sessionKey,profile,role,kind,text,scenelet,sceneletStatus,sceneletError,proactiveIntentId,toolUsage,ragUsage,sceneState)
       SELECT id,timestamp,userId,ai,sessionId,sessionName,
              userId || '|' || sessionId,
-             profile,role,kind,text,scenelet,sceneletStatus,sceneletError,proactiveIntentId,toolUsage,ragUsage
+             profile,role,kind,text,scenelet,sceneletStatus,sceneletError,proactiveIntentId,toolUsage,ragUsage,'' as sceneState
       FROM events`);
 
     // 3. 替换旧表
@@ -203,6 +207,21 @@ function migrateSessionKeyToProfile(db) {
   }
 }
 
+// 为已有数据库添加 sceneState 列（双输出架构新增字段）
+function migrateAddSceneStateColumn(db) {
+  try {
+    const info = db.exec("PRAGMA table_info(events)");
+    const cols = info.length ? info[0].values.map(v => v[1]) : [];
+    if (cols.includes("sceneState")) return;
+    console.log("[chat-history] adding sceneState column...");
+    db.run("ALTER TABLE events ADD COLUMN sceneState TEXT NOT NULL DEFAULT ''");
+    saveDb();
+    console.log("[chat-history] sceneState column added");
+  } catch (e) {
+    console.error("[chat-history] sceneState migration failed:", e.message);
+  }
+}
+
 // 写入 SQLite 数据库到磁盘: tmp -> bak -> copy
 function saveDb() {
   if (!_db) throw new Error("[chat-history] saveDb: _db is null");
@@ -235,8 +254,8 @@ function migrateJsonToDb(db) {
   }
   if (rows.length) {
     const stmt = db.prepare(`INSERT OR IGNORE INTO events
-      (id,timestamp,userId,ai,sessionId,sessionName,sessionKey,profile,role,kind,text,scenelet,sceneletStatus,sceneletError,proactiveIntentId,toolUsage,ragUsage)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      (id,timestamp,userId,ai,sessionId,sessionName,sessionKey,profile,role,kind,text,scenelet,sceneletStatus,sceneletError,proactiveIntentId,toolUsage,ragUsage,sceneState)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     for (const r of rows) {
       stmt.run(r);
     }
@@ -266,6 +285,7 @@ function rowFromEvent(ev) {
     ev.proactiveIntentId || "",
     JSON.stringify(ev.toolUsage || {}),
     JSON.stringify(ev.ragUsage || {}),
+    ev.sceneState ? String(ev.sceneState) : "",
   ];
 }
 
@@ -292,6 +312,7 @@ function eventFromRow(row) {
     // JSON 字符串反序列化
     toolUsage: parseJsonField(row[15]),
     ragUsage: parseJsonField(row[16]),
+    sceneState: row[17] || "",
   };
 }
 
@@ -357,6 +378,7 @@ export async function appendChatEvent(event) {
     role: event.role || "assistant",
     kind: event.kind || "chat",
     text: String(event.text || ""),
+    sceneState: event.sceneState ? String(event.sceneState) : "",
     scenelet: event.scenelet ? String(event.scenelet) : "",
     sceneletStatus: event.sceneletStatus ? String(event.sceneletStatus) : "",
     sceneletError: event.sceneletError ? String(event.sceneletError) : "",
@@ -366,21 +388,24 @@ export async function appendChatEvent(event) {
   };
   const row = rowFromEvent(item);
   db.run(`INSERT INTO events
-    (id,timestamp,userId,ai,sessionId,sessionName,sessionKey,profile,role,kind,text,scenelet,sceneletStatus,sceneletError,proactiveIntentId,toolUsage,ragUsage)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, row);
+    (id,timestamp,userId,ai,sessionId,sessionName,sessionKey,profile,role,kind,text,scenelet,sceneletStatus,sceneletError,proactiveIntentId,toolUsage,ragUsage,sceneState)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, row);
   // 写入后立即持久化
   saveDb();
   return item;
 }
 
-// 更新指定事件的 text 和/或 scenelet 字段
-// 参数: eventId - 事件 ID; updates - { text?, scenelet? } 更新对象
+// 更新指定事件的 text / sceneState / scenelet 字段
+// 参数: eventId - 事件 ID; updates - { text?, sceneState?, scenelet? } 更新对象
 // 返回: true 有行被修改，false 未匹配到事件
 export async function updateChatEvent(eventId, updates) {
   const db = await getDb();
   // 仅当字段被明确传入时才更新
   if (updates.text !== undefined) {
     db.run("UPDATE events SET text = ? WHERE id = ?", [String(updates.text), eventId]);
+  }
+  if (updates.sceneState !== undefined) {
+    db.run("UPDATE events SET sceneState = ? WHERE id = ?", [String(updates.sceneState), eventId]);
   }
   if (updates.scenelet !== undefined) {
     db.run("UPDATE events SET scenelet = ? WHERE id = ?", [String(updates.scenelet), eventId]);
@@ -427,8 +452,8 @@ export async function listChatEvents(options = {}) {
   if (q) {
     const escaped = escapeLike(q);
     const likeQ = `%${escaped}%`;
-    conditions.push("(text LIKE ? ESCAPE '\\' OR scenelet LIKE ? ESCAPE '\\' OR sessionName LIKE ? ESCAPE '\\' OR profile LIKE ? ESCAPE '\\' OR userId LIKE ? ESCAPE '\\')");
-    params.push(likeQ, likeQ, likeQ, likeQ, likeQ);
+    conditions.push("(text LIKE ? ESCAPE '\\' OR sceneState LIKE ? ESCAPE '\\' OR scenelet LIKE ? ESCAPE '\\' OR sessionName LIKE ? ESCAPE '\\' OR profile LIKE ? ESCAPE '\\' OR userId LIKE ? ESCAPE '\\')");
+    params.push(likeQ, likeQ, likeQ, likeQ, likeQ, likeQ);
   }
   const where = conditions.length ? "WHERE " + conditions.join(" AND ") : "";
 
@@ -506,8 +531,8 @@ export async function listConversations(options = {}) {
   if (q) {
     const escaped = escapeLike(q);
     const likeQ = `%${escaped}%`;
-    conditions.push("(text LIKE ? ESCAPE '\\' OR scenelet LIKE ? ESCAPE '\\' OR sessionName LIKE ? ESCAPE '\\' OR profile LIKE ? ESCAPE '\\' OR userId LIKE ? ESCAPE '\\')");
-    params.push(likeQ, likeQ, likeQ, likeQ, likeQ);
+    conditions.push("(text LIKE ? ESCAPE '\\' OR sceneState LIKE ? ESCAPE '\\' OR scenelet LIKE ? ESCAPE '\\' OR sessionName LIKE ? ESCAPE '\\' OR profile LIKE ? ESCAPE '\\' OR userId LIKE ? ESCAPE '\\')");
+    params.push(likeQ, likeQ, likeQ, likeQ, likeQ, likeQ);
   }
   const where = conditions.length ? "WHERE " + conditions.join(" AND ") : "";
 
@@ -525,7 +550,7 @@ export async function listConversations(options = {}) {
     e1.profile,
     MAX(e1.timestamp) as lastTs,
     COUNT(*) as cnt,
-    SUM(CASE WHEN e1.scenelet != '' THEN 1 ELSE 0 END) as sceneletCnt,
+    SUM(CASE WHEN e1.scenelet != '' OR e1.sceneState != '' THEN 1 ELSE 0 END) as sceneletCnt,
     (SELECT e2.text FROM events e2 WHERE e2.sessionKey = e1.sessionKey ${latestOrder}) as lastText
     FROM events e1 ${where}
     GROUP BY e1.sessionKey

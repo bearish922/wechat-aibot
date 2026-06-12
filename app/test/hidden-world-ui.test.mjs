@@ -10,7 +10,7 @@ const claudeRunner = readFileSync(join(import.meta.dirname, "..", "lib", "claude
 const guiWorld = readFileSync(join(import.meta.dirname, "..", "lib", "gui-world.mjs"), "utf-8");
 
 describe("Hidden World pipeline UI", () => {
-  it("exposes hidden-world prompts and parameters outside the main reply page", () => {
+  it("exposes hidden-world prompts and parameters inside the combined prompt page", () => {
     for (const key of [
       "sceneletInstructions",
       "proactiveInstructions",

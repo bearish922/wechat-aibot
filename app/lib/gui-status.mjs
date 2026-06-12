@@ -6,11 +6,21 @@ import { configNumber } from "./config.mjs";
 import { readClaudeSessionContext } from "./claude-context.mjs";
 
 function activeSessionForBackend(backend) {
+  let newest = null;
+  let newestAt = -1;
   for (const [, user] of sessions[backend] || new Map()) {
     const active = (user.list || []).find(session => session.id === user.activeId);
-    if (active) return active;
+    if (!active) continue;
+    const at = Math.max(
+      new Date(active._lastUserAt || 0).getTime() || 0,
+      new Date(active._lastAssistantAt || 0).getTime() || 0,
+    );
+    if (!newest || at > newestAt) {
+      newest = active;
+      newestAt = at;
+    }
   }
-  return null;
+  return newest;
 }
 
 function contextTokens(usage, backend) {
@@ -37,6 +47,7 @@ export function registerStatusRoutes() {
     }
 
     const activeSess = activeSessionForBackend(activeAI);
+    const activeProfile = activeSess ? sessionProfile(activeSess) : "";
     const activeApiMsgs = activeAI === "api" ? activeSess?._apiMessages?.length || 0 : 0;
     const activeApiTurns = activeAI === "api" ? activeSess?._turnCount || 0 : 0;
 
@@ -76,6 +87,7 @@ export function registerStatusRoutes() {
       online: Boolean(token),
       currentAI: activeAI,
       currentModel: modelNames[activeAI] || "unknown",
+      activeProfile: activeProfile || "",
       sessions: counts,
       apiContext: activeAI === "api" ? { messages: activeApiMsgs, turns: activeApiTurns } : null,
       ccContext,

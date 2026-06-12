@@ -72,4 +72,23 @@ describe("Prompts runtime pipeline UI", () => {
     assert.match(appJs, /\{ key: "names", label: "Names" \}/);
     assert.doesNotMatch(appJs, /questionSubjects|questionContents|dailyMinLen|questionMinLen/);
   });
+
+  it("combines Prompts and Hidden World under one selected role", () => {
+    assert.match(appJs, /id="promptProfileSelect"/);
+    assert.doesNotMatch(appJs, /id="worldProfileSelect"/);
+    assert.match(appJs, /selectedRoleProfile = e\.target\.value/);
+    assert.match(appJs, /\/api\/prompts\/\$\{encodeURIComponent\(selectedRoleProfile\)\}/);
+    assert.match(appJs, /renderWorldPipeline\(role, p\)/);
+    assert.match(appJs, /Hidden World 与主动子系统/);
+    assert.doesNotMatch(appJs, /<thead><tr><th>名称<\/th><th>Prompt 预览/);
+  });
+
+  it("manages role creation, editing and deletion in a modal", () => {
+    assert.match(appJs, /id="manageProfilesBtn"/);
+    assert.match(appJs, /async function openRoleManager/);
+    assert.match(appJs, /class="modal-box modal-box-wide role-manager-modal"/);
+    assert.match(appJs, /data-action="role-create"/);
+    assert.match(appJs, /data-action="role-save"/);
+    assert.match(appJs, /data-action="role-delete"/);
+  });
 });

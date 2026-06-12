@@ -9,11 +9,11 @@ import { normalizeBackend } from "./backend-adapter.mjs";
 // 参数：
 //   ragContext - RAG 检索到的上下文文本，如果为空则返回空字符串
 // 返回：格式化后的 RAG 上下文字符串（包含标题、指令和正文）
-function buildRagContextBlock(ragContext) {
+function buildRagContextBlock(ragContext, profile = "") {
   // 如果没有 RAG 上下文，直接返回空字符串
   if (!ragContext) return "";
   // 加载提示词配置
-  const cfg = loadPrompts();
+  const cfg = loadPrompts(profile);
   return [
     // 固定标题
     "【关于角色自己】",
@@ -47,7 +47,7 @@ function buildVisibleHistoryBlock(history) {
 //   visibleHistory - recentVisibleContext 返回的数组（可选）
 //   sceneMemory    - 情景记忆/对话摘要文本（可选，仅 reset 后首轮注入）
 // 返回：拼接好的多段落 prompt 字符串，各段以 "\n\n---\n\n" 分隔
-async function buildTurnBody(userBody, ragContext = "", sceneContext = "", visibleHistory = [], sceneMemory = "") {
+async function buildTurnBody(userBody, ragContext = "", sceneContext = "", visibleHistory = [], sceneMemory = "", profile = "") {
   // 存储各段内容的数组
   const sections = [];
   const now = new Date();
@@ -66,12 +66,12 @@ async function buildTurnBody(userBody, ragContext = "", sceneContext = "", visib
   }
   // RAG 上下文块
   if (ragContext) {
-    sections.push(buildRagContextBlock(ragContext));
+    sections.push(buildRagContextBlock(ragContext, profile));
   }
   // 聊天风格指令
-  sections.push(getChatStyle());
+  sections.push(getChatStyle(profile));
   // 本地时间现实描述（日期、星期、节日等）
-  sections.push(formatLocalChatReality(now));
+  sections.push(formatLocalChatReality(now, profile));
   // 实时天气（失败时静默降级为空字符串）
   const weather = await getWeatherReality();
   if (weather) sections.push(weather);
@@ -173,12 +173,12 @@ function appendVisibleHistory(sess, role, text, kind = "chat", timestamp = new D
 // 参数：
 //   roleWorld - 角色世界对象，可能包含 _sceneMemory / sceneMemory / updatedAt 等字段
 // 返回：格式化的情景记忆字符串（含标题、时效提示和正文）；无记忆时返回空字符串
-function getSceneMemorySystemBlock(roleWorld, backend = "cc") {
+function getSceneMemorySystemBlock(roleWorld, backend = "cc", profile = "") {
   const b = normalizeBackend(backend);
   const map = roleWorld?._sceneMemory;
   const text = (map && typeof map === "object") ? (map[b] || "") : "";
   if (!text) return "";
-  const cfg = loadPrompts();
+  const cfg = loadPrompts(profile);
   const intro = cfg.sceneMemorySystemBlockIntro || "【情景记忆】";
   const atMap = roleWorld?._sceneMemoryAt;
   const generatedAt = (atMap && typeof atMap === "object") ? (atMap[b] || "") : "";
@@ -211,7 +211,7 @@ function getSceneMemorySystemBlock(roleWorld, backend = "cc") {
 // 返回：完整的场景记忆摘要生成 prompt 字符串
 function buildSceneMemorySummaryPrompt({ chatHistory, recentScenelets, worldState, lifeArcs, profile }) {
   // 加载提示词配置
-  const cfg = loadPrompts();
+  const cfg = loadPrompts(profile);
   // 获取情景记忆摘要的指令模板
   const instructions = cfg.sceneMemoryPromptInstructions || "";
   const now = new Date();
@@ -248,7 +248,7 @@ function buildSceneMemorySummaryPrompt({ chatHistory, recentScenelets, worldStat
 // 返回：完整的 hidden-world system prompt 字符串
 function buildHiddenWorldSystemPrompt(profile, sceneMemory = "", memoryPrompt = "") {
   // 加载提示词配置
-  const cfg = loadPrompts();
+  const cfg = loadPrompts(profile);
   // 第一部分：角色人设 prompt
   const parts = [
     "角色 prompt：",
@@ -302,7 +302,7 @@ function buildHiddenWorldSystemPrompt(profile, sceneMemory = "", memoryPrompt = 
 async function buildHiddenWorldPrompt({ userId, sessionName, profile, userBody, lifeArcs = [], visibleContext, memoryPrompt, worldState = null, proactiveIntents = [], worldSession = null }) {
   const now = new Date();
   // 加载提示词配置
-  const cfg = loadPrompts();
+  const cfg = loadPrompts(profile);
   // 实时天气（失败时静默降级为空）
   const weather = await getWeatherReality();
   return [
@@ -356,7 +356,7 @@ async function buildHiddenWorldPrompt({ userId, sessionName, profile, userBody, 
 function buildProactivePrompt({ userId, sessionName, profile, intent, visibleContext, sess }) {
   const now = new Date();
   // 加载提示词配置
-  const cfg = loadPrompts();
+  const cfg = loadPrompts(profile);
   // 获取主动消息的决策指令模板
   const instr = cfg.proactiveInstructions || "";
   return [
@@ -421,9 +421,10 @@ function buildScheduleFinalizationPrompt({
   activeSchedules,
   recentKindsHint,
   visibleContext,
+  profile,
 }) {
   // 加载提示词配置
-  const cfg = loadPrompts();
+  const cfg = loadPrompts(profile);
   // 获取日程创建/确认的指令模板
   const instr = cfg.scheduleCreatorInstructions || "";
   const sections = [

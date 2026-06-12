@@ -17,6 +17,16 @@ describe("core runtime invariants", () => {
     assert.doesNotMatch(bot, /failedBody === body/);
   });
 
+  it("keeps hidden-world retries in the existing session", () => {
+    const retryStart = turn.indexOf('label: "hidden_world_retry"');
+    const retryEnd = turn.indexOf("if (!result?.sceneState) throw", retryStart);
+    const retryBlock = turn.slice(retryStart, retryEnd);
+    assert.ok(retryStart >= 0 && retryEnd > retryStart);
+    assert.match(retryBlock, /sessionId: world\.sid/);
+    assert.match(retryBlock, /firstTurn: false/);
+    assert.doesNotMatch(retryBlock, /world\.sid\s*=\s*uuid\(|world\.firstTurn\s*=\s*true/);
+  });
+
   it("persists a normal turn only after the complete reply was sent", () => {
     const sendAt = bot.indexOf("const sent = await sendFinalAssistantMessage");
     const successAt = bot.indexOf("turnSucceeded = true", sendAt);

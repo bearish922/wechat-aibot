@@ -3,32 +3,14 @@
 
 import { readFileSync } from "node:fs";
 import { rootPath } from "./paths.mjs";
+import { mergeRolePrompts } from "./role-prompts.mjs";
 export { getWeatherReality, formatWeatherReality } from "./weather.mjs";
 
 // 运行时 prompt 配置文件路径
 const PROMPTS_FILE = rootPath("data/prompts.json");
 
 import {
-  DEFAULT_CHAT_STYLE,
-  DEFAULT_HIDDEN_WORLD_CHAT_STYLE,
-  DEFAULT_EXPRESSION_CAPABILITY,
-  DEFAULT_CHAT_REALITY_INSTRUCTIONS,
-  DEFAULT_SCENELET_INSTRUCTIONS,
-  DEFAULT_PROACTIVE_INSTRUCTIONS,
-  DEFAULT_SCHEDULE_CREATOR_INSTRUCTIONS,
-  DEFAULT_SCHEDULE_SPECIAL_DATES,
   DEFAULT_VISION_CAPTION_PROMPT,
-  DEFAULT_MEMORY_UPDATE_PROMPT,
-  DEFAULT_RAG_CONTEXT_INSTRUCTION,
-  DEFAULT_CHAT_HISTORY_INTRO,
-  DEFAULT_INNER_SCENELET_INTRO,
-  DEFAULT_SCENELET_REPLY_BRIDGE_INSTRUCTION,
-  DEFAULT_MEMORY_CONTEXT_INSTRUCTION,
-  DEFAULT_SCENE_MEMORY_SYSTEM_BLOCK_INTRO,
-  DEFAULT_SCENE_MEMORY_PROMPT_INSTRUCTIONS,
-  DEFAULT_DAILY_SHARE_SEED_PROMPT,
-  DEFAULT_TIME_ADVANCEMENT_PROMPT,
-  DEFAULT_SCHEDULE_EXTRACTOR_PROMPT,
   DEFAULT_SEASONAL_MONTHLY_NOTES,
   DEFAULT_VISIBLE_CONTEXT_TURNS,
   DEFAULT_PROACTIVE_CHECK_INTERVAL_MS,
@@ -59,17 +41,24 @@ import {
   normalizeRagKeywords,
 } from "./default-prompts.mjs";
 
-// 从 data/prompts.json 加载运行时配置，文件缺失或解析失败时退回到 DEFAULT_* 默认值
+// 从 data/prompts.json 加载运行时配置。角色文本由 role-prompts.mjs 提供完整基线，
+// 全局参数在文件缺失或解析失败时退回到本模块导入的 DEFAULT_* 默认值。
 // 返回的配置对象被多处引用（send-reply、claude-runner、state 等），每次调用都会重新读取文件
-export function loadPrompts() {
+export function loadPromptDocument() {
   let data;
   try { data = JSON.parse(readFileSync(PROMPTS_FILE, "utf-8")); } catch { data = {}; }
+  return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+}
+
+export function loadPrompts(profile = "") {
+  const data = loadPromptDocument();
+  const role = mergeRolePrompts(data, profile);
   return {
     // ── 角色人设 prompt ──
-    chatStyle: data.chatStyle || DEFAULT_CHAT_STYLE,
-    hiddenWorldChatStyle: data.hiddenWorldChatStyle || DEFAULT_HIDDEN_WORLD_CHAT_STYLE,
-    expressionCapability: data.expressionCapability || DEFAULT_EXPRESSION_CAPABILITY,
-    chatRealityInstructions: data.chatRealityInstructions || DEFAULT_CHAT_REALITY_INSTRUCTIONS,
+    chatStyle: role.chatStyle,
+    hiddenWorldChatStyle: role.hiddenWorldChatStyle,
+    expressionCapability: role.expressionCapability,
+    chatRealityInstructions: role.chatRealityInstructions,
     // ── 行为控制参数 ──
     visibleContextTurns: Number.isFinite(data.visibleContextTurns) ? data.visibleContextTurns : DEFAULT_VISIBLE_CONTEXT_TURNS,
     proactiveCheckIntervalMs: Number.isFinite(data.proactiveCheckIntervalMs) ? data.proactiveCheckIntervalMs : DEFAULT_PROACTIVE_CHECK_INTERVAL_MS,
@@ -83,14 +72,14 @@ export function loadPrompts() {
     ragResultMaxChars: Number.isFinite(data.ragResultMaxChars) ? data.ragResultMaxChars : DEFAULT_RAG_RESULT_MAX_CHARS,
     ragTimeoutMs: Number.isFinite(data.ragTimeoutMs) ? data.ragTimeoutMs : DEFAULT_RAG_TIMEOUT_MS,
     // ── 各功能模块的 system prompt ──
-    sceneletInstructions: data.sceneletInstructions || DEFAULT_SCENELET_INSTRUCTIONS,
-    memoryUpdatePrompt: data.memoryUpdatePrompt || DEFAULT_MEMORY_UPDATE_PROMPT,
-    proactiveInstructions: data.proactiveInstructions || DEFAULT_PROACTIVE_INSTRUCTIONS,
-    scheduleCreatorInstructions: data.scheduleCreatorInstructions || DEFAULT_SCHEDULE_CREATOR_INSTRUCTIONS,
+    sceneletInstructions: role.sceneletInstructions,
+    memoryUpdatePrompt: role.memoryUpdatePrompt,
+    proactiveInstructions: role.proactiveInstructions,
+    scheduleCreatorInstructions: role.scheduleCreatorInstructions,
     // ── 日本季节/月历知识库（按月索引）──
     seasonalMonthlyNotes: data.seasonalMonthlyNotes || DEFAULT_SEASONAL_MONTHLY_NOTES,
     // ── 日程/计划相关参数 ──
-    scheduleSpecialDates: data.scheduleSpecialDates || DEFAULT_SCHEDULE_SPECIAL_DATES,
+    scheduleSpecialDates: role.scheduleSpecialDates,
     scheduleCheckIntervalMs: Number.isFinite(data.scheduleCheckIntervalMs) ? data.scheduleCheckIntervalMs : DEFAULT_SCHEDULE_CHECK_INTERVAL_MS,
     // ── 隐藏世界 + follow-up ──
     hiddenWorldMaxPendingIntents: Number.isFinite(data.hiddenWorldMaxPendingIntents) ? data.hiddenWorldMaxPendingIntents : DEFAULT_HIDDEN_WORLD_MAX_PENDING_INTENTS,
@@ -111,25 +100,25 @@ export function loadPrompts() {
     maxCancelReasonLength: Number.isFinite(data.maxCancelReasonLength) ? data.maxCancelReasonLength : DEFAULT_MAX_CANCEL_REASON_LENGTH,
     // ── prompt 文本 ──
     visionCaptionPrompt: data.visionCaptionPrompt || DEFAULT_VISION_CAPTION_PROMPT,
-    ragContextInstruction: data.ragContextInstruction || DEFAULT_RAG_CONTEXT_INSTRUCTION,
-    chatHistoryIntro: data.chatHistoryIntro || DEFAULT_CHAT_HISTORY_INTRO,
-    innerSceneletIntro: data.innerSceneletIntro || DEFAULT_INNER_SCENELET_INTRO,
-    sceneletReplyBridgeInstruction: data.sceneletReplyBridgeInstruction || DEFAULT_SCENELET_REPLY_BRIDGE_INSTRUCTION,
-    memoryContextInstruction: data.memoryContextInstruction || DEFAULT_MEMORY_CONTEXT_INSTRUCTION,
+    ragContextInstruction: role.ragContextInstruction,
+    chatHistoryIntro: role.chatHistoryIntro,
+    innerSceneletIntro: role.innerSceneletIntro,
+    sceneletReplyBridgeInstruction: role.sceneletReplyBridgeInstruction,
+    memoryContextInstruction: role.memoryContextInstruction,
     ragKeywords: normalizeRagKeywords(data.ragKeywords),
     turnResetThreshold: Number.isFinite(data.turnResetThreshold) ? data.turnResetThreshold : DEFAULT_TURN_RESET_THRESHOLD,
-    sceneMemorySystemBlockIntro: data.sceneMemorySystemBlockIntro || DEFAULT_SCENE_MEMORY_SYSTEM_BLOCK_INTRO,
-    sceneMemoryPromptInstructions: data.sceneMemoryPromptInstructions || DEFAULT_SCENE_MEMORY_PROMPT_INSTRUCTIONS,
-    dailyShareSeedPrompt: data.dailyShareSeedPrompt || DEFAULT_DAILY_SHARE_SEED_PROMPT,
-    timeAdvancementPrompt: data.timeAdvancementPrompt || DEFAULT_TIME_ADVANCEMENT_PROMPT,
+    sceneMemorySystemBlockIntro: role.sceneMemorySystemBlockIntro,
+    sceneMemoryPromptInstructions: role.sceneMemoryPromptInstructions,
+    dailyShareSeedPrompt: role.dailyShareSeedPrompt,
+    timeAdvancementPrompt: role.timeAdvancementPrompt,
     stateStaleThresholdMs: Number.isFinite(data.stateStaleThresholdMs) ? data.stateStaleThresholdMs : DEFAULT_STATE_STALE_THRESHOLD_MS,
-    scheduleExtractorPrompt: data.scheduleExtractorPrompt || DEFAULT_SCHEDULE_EXTRACTOR_PROMPT,
+    scheduleExtractorPrompt: role.scheduleExtractorPrompt,
   };
 }
 
 // 获取聊天风格 prompt（便捷访问器）
-export function getChatStyle() {
-  return loadPrompts().chatStyle;
+export function getChatStyle(profile = "") {
+  return loadPrompts(profile).chatStyle;
 }
 
 // WeChat ilink API 单条消息字节上限约 2048 字节，留安全余量设为 1800
@@ -173,19 +162,19 @@ export function formatZonedTimeParts(date = new Date(), timeZone = "Asia/Shangha
 }
 
 // 生成双时区时间感知文本：用户侧北京时间 + 角色侧东京时间
-export function formatLocalChatReality(date = new Date()) {
+export function formatLocalChatReality(date = new Date(), profile = "") {
   const beijing = formatZonedTimeParts(date, "Asia/Shanghai");
   const tokyo = formatZonedTimeParts(date, "Asia/Tokyo");
   return [
     `当前用户侧时间：${beijing.stamp}，${beijing.weekday}，${beijing.period}（北京时间，Asia/Shanghai）。`,
     `当前角色侧时间：${tokyo.stamp}，${tokyo.weekday}，${tokyo.period}（东京时间，Asia/Tokyo；角色所处时间以此为准）。`,
     "",
-    loadPrompts().chatRealityInstructions,
+    loadPrompts(profile).chatRealityInstructions,
   ].join("\n");
 }
 
-export function expressionCapabilityPrompt() {
-  return loadPrompts().expressionCapability;
+export function expressionCapabilityPrompt(profile = "") {
+  return loadPrompts(profile).expressionCapability;
 }
 
 // ─── 消息拆分 ────────────────────────────────────────────────

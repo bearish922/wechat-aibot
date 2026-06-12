@@ -55,13 +55,13 @@ export function saveMemoryDocument(text) {
 // 调用 LLM 根据用户最近消息更新长期记忆文档(Markdown 格式)
 // 参数: userMessages - 用户最近消息文本数组
 // 返回: 更新后的记忆文档完整文本
-export async function updateMemoryDocument(userMessages, backend = "cc") {
+export async function updateMemoryDocument(userMessages, backend = "cc", profile = "") {
   const msgs = (userMessages || []).filter(Boolean);
   // 无消息时不更新
   if (!msgs.length) return loadMemoryDocument();
 
   // 加载记忆更新 Prompt 模板
-  const prompt = loadPrompts().memoryUpdatePrompt;
+  const prompt = loadPrompts(profile).memoryUpdatePrompt;
   if (!prompt) return loadMemoryDocument();
 
   // 构建 LLM 输入：Prompt 模板 + 当前记忆 + 用户最新消息

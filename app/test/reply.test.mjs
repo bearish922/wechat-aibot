@@ -33,7 +33,7 @@ describe("hasInboundAttachment", () => {
 
 describe("local chat reality", () => {
   it("formats local time and action guidance", () => {
-    const text = formatLocalChatReality(new Date(2026, 4, 28, 2, 13));
+    const text = formatLocalChatReality(new Date(2026, 4, 28, 2, 13), "白鹭千圣");
     assert.match(text, /当前用户侧时间：2026-05-28 02:13，星期四，凌晨（北京时间，Asia\/Shanghai）。/u);
     assert.match(text, /当前角色侧时间：2026-05-28 03:13，星期四，凌晨（东京时间，Asia\/Tokyo；角色所处时间以此为准）。/u);
     assert.match(text, /微信私聊/u);
@@ -61,7 +61,7 @@ describe("local chat reality", () => {
 
 describe("expression capability", () => {
   it("describes allowed expression surface", () => {
-    const text = expressionCapabilityPrompt();
+    const text = expressionCapabilityPrompt("白鹭千圣");
     assert.match(text, /\[旺柴\]/u);
     assert.match(text, /不能发送微信原生表情包/u);
   });
