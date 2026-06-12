@@ -77,6 +77,31 @@
 
 当前推荐方向是完全删除独立 `scene_state`：它与 world state 的物理连续性职责重复，又容易重新承担心理压缩。Finalizer 使用本轮开始状态与候选 patch 合并后的有效状态。该方向等待讨论确认。
 
+### 5.1 World State 不是永久事实
+
+`world_state` 是唯一运行时状态源，但其中不同字段必须具有不同生命周期。不能因为字段被持久化到磁盘，就把它解释为数小时后仍然成立。
+
+候选分层：
+
+- `anchor_state`：相对稳定的当前锚点，例如位置、清醒状态、当前主活动。它持续有效，直到后续状态推进或新一轮 Actor 明确更新。
+- `transient_context`：只在很短窗口内有效的现场，例如“Leo 正在催出门”“水壶刚响”“电车即将进站”。必须带 `observed_at` 和 `expires_at`，过期后不得注入 Actor 或 Finalizer。
+- `body_state`：疲惫、困倦、冷、饿等短时状态，应带时间或 TTL；经过较长时间后由时间推进器重新判断，不能无限沿用。
+- `current_plan`：近几小时已经决定执行的计划，不包括暂时考虑。应具有预计时间范围；过时后由推进器完成、更新或清除。
+- `open_threads`：跨轮但未确定完成时间的轻量事项，使用独立生命周期和操作式管理。
+
+例如“Leo 正在催出门”可以在本轮结束后的短时间内写入 `transient_context`，但若用户四小时后才回复，该字段已经过期。新的 Actor 输入只应看到经过时间推进后的有效状态，而不是原样读取旧快照。
+
+由此，删除 `scene_state` 不意味着把所有场景细节永久塞进 world state；短时事实可以被存储用于近距离连续性，但必须自动失效。
+
+当前实现核查：现有时间推进器只在生成 daily share 前检查 `stateStaleThresholdMs`，普通入站消息不会先推进过期 world state。因此新架构需要增加入站前的 state reconciliation：
+
+1. 确定性清除已经超过 `expires_at` 的 `transient_context` 和 body state。
+2. 完成或移除已经超过时间范围的 `current_plan`。
+3. 若 anchor state 距离当前时间超过 stale threshold，再调用现有时间推进模块，根据经过时间和 life arcs 更新位置、活动、清醒状态和短期计划。
+4. 只有协调后的有效状态才能进入 Actor turn body。
+
+这一流程属于 Actor 前置状态准备，不应让 Actor 在生成 inner/reply 时顺便承担。
+
 ## 6. Open Threads：待优化
 
 当前 `openThreads` 是最多八条无 ID 字符串，存在以下问题：
@@ -117,28 +142,63 @@
 - 调用次数应按候选架构真实计算：双调用候选每个样本两次模型调用；单调用候选一次。历史基线不产生新调用。
 - 主评价对象是 inner 和微信回复；状态、threads、follow-up 等作为次级诊断指标。
 - 模型不参与自评，最终样本匿名、打乱后由人工评价。
+- 第一阶段只测试核心角色生成，不运行新的 postprocessor。双调用组只生成 Actor 的 inner/seed 和 Finalizer 回复；单调用组只生成 inner/reply。
+- 第一阶段冻结全部核心输出后，再使用同一批冻结结果测试 postprocessor，避免辅助任务反向污染 Actor，也避免重复生成造成比较条件变化。
 
 ### 8.1 两个新的高诊断候选案例
 
-候选一：2026-06-12 12:13，用户说要直接去问小彩此前的暧昧问题，并强调不把截图发给千圣。
+正式案例一：2026-06-12 12:13，用户说要直接去问小彩此前的暧昧问题，并强调不把截图发给千圣。
 
 - 原 inner 准确形成了“真正难受的是不知道小彩会怎么回答”的心理核心，并出现“说随你，但其实不随”的表达边界。
 - 原回复隐藏了在意，但仍残留引用战报、武器、口说无凭等攻防语汇。
 - 用于评价：细微在意、控制感与不确定性是否能自然进入回复，而不泄漏全部内心，也不写成语言竞技。
 
-候选二：2026-06-12 23:24（东京时间），用户在拿到鞋码后说国际物流方便，让千圣等着。
+正式案例二：2026-06-12 23:24（东京时间），用户在拿到鞋码后说国际物流方便，让千圣等着。
 
 - 原 inner 已经承认尺码给出去就等于答应，并自然产生了对礼物款式的期待和“即使不合适也会穿”的柔软念头。
 - 原回复却以“输了”开头，把接受礼物重新编码成胜负，并追加不必要的管理式收束。
 - 用于评价：inner 的柔软接受能否以千圣式克制自然导出，而不是被固定的输赢/攻防模板覆盖。
 
-这两个案例目前是候选，不视为最终锁定。正式实验还应补充普通日常、说教、轻量闲聊、强情绪、物理连续性和计划承诺等类型。
+用户已于 2026-06-13 确认这两个案例通过，纳入正式扩大实验。实验仍应补充普通日常、说教、轻量闲聊、强情绪、物理连续性和计划承诺等类型。
+
+### 8.2 Postprocessor 后续实验
+
+第一阶段不运行 postprocessor。核心架构选型完成后，再设计并测试以下候选：
+
+1. 单一 postprocessor：一次读取已冻结的 user message、inner、最终回复、开始状态和有效上下文，同时输出：
+   - `world_state_patch`
+   - `open_thread_ops`
+   - `follow_up_candidates`
+   - 可选的 schedule candidates
+2. 状态 postprocessor 与主动联系模块分离：前者只更新 world state/open threads，后者只判断 follow-up。
+3. 轻量规则先过滤，再由一个模型处理剩余字段。
+
+优先测试合并版，因为这些输出都属于“回复已经确定后的本轮后处理”，共享大量输入。是否最终拆分取决于：
+
+- follow-up 任务是否会诱导 postprocessor 过度创造未来剧情。
+- 合并后 world state/open threads 的准确性是否下降。
+- schedule candidates 是否因任务稀疏而被硬填。
+- 成本与延迟是否显著改善。
+
+无论采用哪种形式，postprocessor 只能读取并解释冻结后的角色输出，不能修改 inner 或最终回复；所有更新只在消息成功发送后提交。
+
+当前优先候选是将 `world_state_patch`、`open_thread_ops` 与 `follow_up_candidates` 合并到一次 postprocessor 调用：
+
+- 三者共享用户消息、inner、最终回复、开始状态、时间和 life arcs。
+- 输出顺序固定为 state patch、thread ops、follow-up；先记录已经成立的结果，最后才考虑未来联系。
+- follow-up 默认为空，不能为了字段完整而生成。
+- follow-up 只产生候选，不直接修改 world state，也不把候选中的未来事件写成已经决定的计划。
+- 三类输出分别规范化和验证；某一部分无效时不应丢弃其他有效部分。
+
+Schedule candidate 暂不建议无条件并入同一调用。它稀疏、规则复杂、对长期状态影响更大，优先保留为显式时间信号触发的独立模块。后续可以测试受门控的合并形式：只有冻结输入中检测到未来时间锚点时，才要求同一个 postprocessor 额外输出 schedule candidates。
 
 ## 9. 尚未解决的问题
 
 - 是否完全删除 `scene_state`，由 world state 前态与 patch 承担全部物理连续性。
 - `world_state_patch` 应由 Actor 直接生成，还是在 reply 确定后由便宜的独立 extractor 生成，以减少多任务干扰。
+- `transient_context`、`body_state` 和 `current_plan` 的准确 TTL、过期清理及时间推进规则。
 - 双调用 Finalizer 的最小输入和允许改写范围。
 - Open thread 的精确 schema、生命周期和提交规则。
 - 扩大实验的新案例选择、样本规模、重复次数和多轮脚本。
 - RAG/搜索是否必须前移到 Actor 之前，以及无法预判检索需求时如何补救。
+- Postprocessor 最终采用合并还是拆分，以及是否包含 schedule candidate 提取。
