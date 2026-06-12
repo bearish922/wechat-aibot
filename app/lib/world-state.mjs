@@ -5,7 +5,50 @@ import { log } from "./utils.mjs";
 import { DATA_DIR, dataPath, ensureDir } from "./paths.mjs";
 import { sessions, profileTemplates } from "./state.mjs";
 import { normalizeWorldState, normalizeWorldSession, normalizeLifeArcs, getSceneConfig } from "./normalize.mjs";
-import { CLAUDE_MAIN_MODEL } from "./claude-runner.mjs";
+import { backendModel, normalizeBackend } from "./backend-adapter.mjs";
+
+function normalizeSceneMemoryMap(raw) {
+  const out = { cc: "", codex: "", api: "" };
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    for (const k of ["cc", "codex", "api"]) {
+      out[k] = typeof raw[k] === "string" ? raw[k].slice(0, 8000) : "";
+    }
+  } else if (typeof raw === "string" && raw.trim()) {
+    out.cc = raw.slice(0, 8000);
+  }
+  return out;
+}
+
+function migrateProactiveIntentsFromSessions(worlds) {
+  if (!sessions) return;
+  let migrated = 0;
+  for (const [, map] of Object.entries(sessions)) {
+    for (const [, u] of map) {
+      for (const s of u.list) {
+        const intents = s._proactiveIntents;
+        if (!Array.isArray(intents) || !intents.length) continue;
+        const profile = s._profile || "默认";
+        const world = worlds.get(roleWorldKey(profile)) || getRoleWorld(profile);
+        const existing = new Map();
+        for (const i of (world._proactiveIntents || [])) {
+          if (i?.id) existing.set(i.id, i);
+        }
+        for (const i of intents) {
+          if (!i?.id) continue;
+          const prev = existing.get(i.id);
+          if (!prev || new Date(i.sentAt || i.cancelledAt || 0) > new Date(prev.sentAt || prev.cancelledAt || 0)) {
+            existing.set(i.id, i);
+          }
+        }
+        world._proactiveIntents = [...existing.values()];
+        migrated += intents.length;
+      }
+    }
+  }
+  if (migrated > 0) {
+    console.log(`[world-state] migrated ${migrated} proactive intents from sessions to roleWorlds`);
+  }
+}
 
 // 从 session 对象中提取 profile 字段，若不存在则返回 null
 function sessionProfile(sess) {
@@ -15,32 +58,48 @@ function sessionProfile(sess) {
 // 确保 session 拥有一个有效的 worldSession 对象，不存在则创建，已存在则规范化并补全缺失字段
 // 参数: sess - session 对象
 // 返回: 规范化后的 worldSession 对象
-function ensureWorldSession(sess) {
-  if (!sess._worldSession) {
+function ensureWorldSession(sess, backend = "cc") {
+  const provider = normalizeBackend(backend);
+  if (!sess._worldSessions || typeof sess._worldSessions !== "object") sess._worldSessions = {};
+  if (!sess._worldSessions[provider]) {
     // 首次创建 worldSession
     const nowIso = new Date().toISOString();
-    sess._worldSession = {
+    sess._worldSessions[provider] = {
       sid: uuid(),
       firstTurn: true,
-      model: CLAUDE_MAIN_MODEL,
+      model: backendModel(provider),
       startedAt: nowIso,
       lastUsedAt: null,
       resetReason: "",
       lastUsage: null,
+      turnCount: 0,
     };
   } else {
     // 已有则通过规范化器清洗，若清洗失败则递归重建
-    sess._worldSession = normalizeWorldSession(sess._worldSession) || null;
-    if (!sess._worldSession) return ensureWorldSession(sess);
+    sess._worldSessions[provider] = normalizeWorldSession(sess._worldSessions[provider]) || null;
+    if (!sess._worldSessions[provider]) return ensureWorldSession(sess, provider);
     // 缺少 sid 时重新生成
-    if (!sess._worldSession.sid) {
-      sess._worldSession.sid = uuid();
-      sess._worldSession.firstTurn = true;
+    if (!sess._worldSessions[provider].sid) {
+      sess._worldSessions[provider].sid = uuid();
+      sess._worldSessions[provider].firstTurn = true;
     }
     // 缺少 model 时补默认值
-    if (!sess._worldSession.model) sess._worldSession.model = CLAUDE_MAIN_MODEL;
+    if (!sess._worldSessions[provider].model) sess._worldSessions[provider].model = backendModel(provider);
   }
-  return sess._worldSession;
+  return sess._worldSessions[provider];
+}
+
+function normalizeWorldSessions(raw = {}) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const sessionsByBackend = {};
+  for (const backend of ["cc", "codex", "api"]) {
+    const normalized = normalizeWorldSession(source[backend]);
+    if (normalized) {
+      if (!source[backend]?.model) normalized.model = backendModel(backend);
+      sessionsByBackend[backend] = normalized;
+    }
+  }
+  return sessionsByBackend;
 }
 
 // 根据 profile 名称生成角色世界状态的唯一 key，空值回退为 "默认"
@@ -53,21 +112,16 @@ function roleWorldKey(profile) {
 // 返回: 规范化后的角色世界对象(包含 _worldState、_worldSession、_lifeArcs 等)
 function normalizeRoleWorld(raw = {}, profile = "默认") {
   const nowIso = new Date().toISOString();
+  const worldSessions = normalizeWorldSessions(raw._worldSessions || raw.worldSessions);
+  const legacyWorldSession = normalizeWorldSession(raw._worldSession || raw.worldSession);
+  if (legacyWorldSession && !worldSessions.cc) worldSessions.cc = legacyWorldSession;
   return {
     profile: roleWorldKey(raw.profile || profile),
     // 规范化角色当前状态(位置、活动等)
     _worldState: normalizeWorldState(raw._worldState || raw.worldState),
-    // 规范化世界会话，若缺失则创建默认会话
-    _worldSession: normalizeWorldSession(raw._worldSession || raw.worldSession) || {
-      sid: uuid(),
-      firstTurn: true,
-      model: CLAUDE_MAIN_MODEL,
-      startedAt: nowIso,
-      lastUsedAt: null,
-      resetReason: "",
-      lastUsage: null,
-    },
-    // 规范化生活弧线，只保留 active 和 expired
+    // 世界内容跨后端共享；模型线程按后端分别续接
+    _worldSessions: worldSessions,
+    // 运行时默认只保留仍有效的 active life arcs；关闭项仅在显式查询时读取。
     _lifeArcs: normalizeLifeArcs(raw._lifeArcs || raw.lifeArcs),
     // 上次每日分享种子时间戳
     _lastDailyShareSeedAt: raw._lastDailyShareSeedAt ? String(raw._lastDailyShareSeedAt) : null,
@@ -75,9 +129,12 @@ function normalizeRoleWorld(raw = {}, profile = "默认") {
     _lastScheduleCheckAt: raw._lastScheduleCheckAt ? String(raw._lastScheduleCheckAt) : null,
     // 待处理的日程候选列表
     _pendingScheduleCandidates: Array.isArray(raw._pendingScheduleCandidates) ? raw._pendingScheduleCandidates : [],
-    // scene 记忆文本，上限 8000 字符
-    _sceneMemory: typeof raw._sceneMemory === "string" ? raw._sceneMemory.slice(0, 8000) : "",
-    _sceneMemoryAt: raw._sceneMemoryAt ? String(raw._sceneMemoryAt) : null,
+    // scene 记忆按后端隔离
+    _sceneMemory: normalizeSceneMemoryMap(raw._sceneMemory),
+    _sceneMemoryAt: normalizeSceneMemoryMap(raw._sceneMemoryAt),
+    // 主动意图列表（跨后端共享）
+    _proactiveIntents: Array.isArray(raw._proactiveIntents) ? raw._proactiveIntents : [],
+    _lastProactiveAt: raw._lastProactiveAt ? String(raw._lastProactiveAt) : null,
     // 更新时间
     updatedAt: raw.updatedAt ? String(raw.updatedAt) : nowIso,
   };
@@ -90,28 +147,17 @@ function roleWorldSnapshot(world) {
   return {
     profile: roleWorldKey(world?.profile),
     _worldState: normalizeWorldState(world?._worldState),
-    _worldSession: normalizeWorldSession(world?._worldSession),
+    _worldSessions: normalizeWorldSessions(world?._worldSessions),
     _lifeArcs: normalizeLifeArcs(world?._lifeArcs),
     _lastDailyShareSeedAt: world?._lastDailyShareSeedAt || null,
     _lastScheduleCheckAt: world?._lastScheduleCheckAt || null,
     _pendingScheduleCandidates: Array.isArray(world?._pendingScheduleCandidates) ? world._pendingScheduleCandidates : [],
-    _sceneMemory: world?._sceneMemory || "",
-    _sceneMemoryAt: world?._sceneMemoryAt || null,
+    _sceneMemory: normalizeSceneMemoryMap(world?._sceneMemory),
+    _sceneMemoryAt: normalizeSceneMemoryMap(world?._sceneMemoryAt),
+    _proactiveIntents: Array.isArray(world?._proactiveIntents) ? world._proactiveIntents : [],
+    _lastProactiveAt: world?._lastProactiveAt || null,
     updatedAt: world?.updatedAt || new Date().toISOString(),
   };
-}
-
-// 记录隐藏调用中的工具使用统计，更新 usage 对象中的 tools 列表和各类计数器
-// 参数: usage - 工具使用统计对象; name - 工具名称; count - 使用次数(默认1)
-function markToolUsage(usage, name, count = 1) {
-  if (!usage || !name) return;
-  const tool = String(name);
-  const lower = tool.toLowerCase();
-  // 将工具名加入已使用工具列表(去重)
-  if (!usage.tools.includes(tool)) usage.tools.push(tool);
-  // 根据工具名模式判断类型并累加计数
-  if (/web[_-]?search|websearch/i.test(lower)) usage.webSearch += count;
-  if (/web[_-]?fetch|webfetch/i.test(lower)) usage.webFetch += count;
 }
 
 // 从角色世界中提取生活弧线的 Prompt 友好摘要列表，用于注入 LLM 上下文
@@ -151,21 +197,23 @@ export function getRoleWorld(profile) {
   return worlds.get(key);
 }
 
-// 读取角色世界的 scene 记忆文本
-// 参数: roleWorld - 角色世界对象
-// 返回: scene 记忆字符串(可能为空)
-export function getSceneMemory(roleWorld) {
-  return roleWorld?._sceneMemory || "";
+export function getSceneMemory(roleWorld, backend = "cc") {
+  const map = roleWorld?._sceneMemory;
+  if (map && typeof map === "object") return map[normalizeBackend(backend)] || "";
+  return "";
 }
 
-// 写入角色世界的 scene 记忆文本，同时更新 _sceneMemoryAt 和 updatedAt 时间戳
-// 参数: roleWorld - 角色世界对象; text - 新的 scene 记忆文本(上限 8000 字符)
-export function setSceneMemory(roleWorld, text) {
+export function setSceneMemory(roleWorld, text, backend = "cc") {
   if (!roleWorld) return;
-  // 截断到 8000 字符上限
-  roleWorld._sceneMemory = typeof text === "string" ? text.slice(0, 8000) : "";
-  // 记录 scene 记忆更新时间
-  roleWorld._sceneMemoryAt = new Date().toISOString();
+  const b = normalizeBackend(backend);
+  if (!roleWorld._sceneMemory || typeof roleWorld._sceneMemory !== "object") {
+    roleWorld._sceneMemory = { cc: "", codex: "", api: "" };
+  }
+  roleWorld._sceneMemory[b] = typeof text === "string" ? text.slice(0, 8000) : "";
+  if (!roleWorld._sceneMemoryAt || typeof roleWorld._sceneMemoryAt !== "object") {
+    roleWorld._sceneMemoryAt = { cc: null, codex: null, api: null };
+  }
+  roleWorld._sceneMemoryAt[b] = new Date().toISOString();
   roleWorld.updatedAt = new Date().toISOString();
 }
 
@@ -209,6 +257,8 @@ export function loadRoleWorlds() {
   }
   // 确保所有已注册的 profile 模板都有对应的世界对象
   for (const profile of Object.keys(profileTemplates || {})) getRoleWorld(profile);
+  // 迁移：将旧版 session 级 _proactiveIntents 合并到 roleWorld
+  migrateProactiveIntentsFromSessions(worlds);
   // 加载完成后保存一次以确保文件与内存一致
   saveRoleWorlds();
 }
@@ -302,6 +352,5 @@ export {
   sessionProfile,
   ensureWorldSession,
   roleWorldKey,
-  markToolUsage,
   lifeArcPromptItems,
 };

@@ -2,17 +2,17 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// Legacy one-off importer: rebuild data/chat-history.json from old JSONL logs.
+// The application only consumes this file when initializing an empty SQLite history DB.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const DATA_DIR = path.join(ROOT, "data");
 const LOGS_DIR = path.join(DATA_DIR, "logs");
 const SESSION_FILE = path.join(DATA_DIR, "wechat-sessions.json");
-const PROFILE_FILE = path.join(ROOT, "wechat-profiles.json");
 const HISTORY_FILE = path.join(DATA_DIR, "chat-history.json");
 
 // Load session info
 const sessionsRaw = JSON.parse(fs.readFileSync(SESSION_FILE, "utf-8"));
-const profilesRaw = JSON.parse(fs.readFileSync(PROFILE_FILE, "utf-8"));
 
 // Build session lookup: sessionName -> { ai, userId, sessionId, sessionName, profile }
 const sessionMap = new Map();
@@ -29,13 +29,6 @@ for (const [ai, userMap] of Object.entries(sessionsRaw)) {
       });
     }
   }
-}
-
-// Profile name normalization
-const profileNames = Object.keys(profilesRaw.templates || {});
-function findProfile(name) {
-  const lower = name.toLowerCase();
-  return profileNames.find(p => p.toLowerCase() === lower) || null;
 }
 
 // Collect all JSONL files

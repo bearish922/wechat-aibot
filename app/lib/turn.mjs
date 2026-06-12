@@ -1,10 +1,10 @@
 ﻿import { uuid, log, sleep } from "./utils.mjs";
-import { sessions, profileTemplates, pendingInputs } from "./state.mjs";
-import { SCENELET_BARE, CLAUDE_MAIN_MODEL, runHiddenCall } from "./claude-runner.mjs";
+import { sessions, activeAI, profileTemplates, pendingInputs } from "./state.mjs";
+import { SCENELET_BARE } from "./claude-runner.mjs";
+import { backendModel, runBackendStructured } from "./backend-adapter.mjs";
 import { loadPrompts, MAX_REPLY_LEN, splitText, splitSocialReply } from "./reply.mjs";
-import { getSceneConfig, takeLastRounds, normalizeProactiveIntents, normalizeToolUsage, normalizeWorldState, applyWorldStatePatch, normalizeLifeArcs, normalizeSceneletResult, normalizeRawProactiveCandidate, normalizeScheduleCandidates, normalizeProactiveDecision, sanitizeVisibleReplyText, proactiveSentToday, lastConversationActivityMs } from "./normalize.mjs";
+import { getSceneConfig, takeLastRounds, normalizeProactiveIntents, normalizeToolUsage, mergeToolUsage, normalizeWorldState, applyWorldStatePatch, normalizeLifeArcs, normalizeSceneletResult, normalizeRawProactiveCandidate, normalizeScheduleCandidates, normalizeProactiveDecision, sanitizeVisibleReplyText, proactiveSentToday, lastConversationActivityMs } from "./normalize.mjs";
 import { sessionProfile, roleWorldKey, ensureWorldSession, getRoleWorld, saveRoleWorlds, applyLifeArcOps, lifeArcPromptItems } from "./world-state.mjs";
-import { saveSessions } from "./session-store.mjs";
 import { getSceneMemorySystemBlock, buildSceneMemorySummaryPrompt, buildHiddenWorldSystemPrompt, buildHiddenWorldPrompt, buildProactivePrompt, buildScheduleFinalizationPrompt, recentVisibleContext, appendVisibleHistory } from "./prompts.mjs";
 import { isMemoryEnabled, shouldRunMemoryWriter, loadMemoryDocument, updateMemoryDocument } from "./memory.mjs";
 import { appendChatEvent, loadAllEvents } from "./chat-history.mjs";
@@ -25,13 +25,13 @@ let lastProactiveCheckAt = 0;
 //   userBody - 用户发送的消息文本
 //   memoryPrompt - 记忆文档内容注入的提示词片段
 // @returns {object|null} 标准化后的 scenelet 结果对象，包含 innerScenelet、worldStatePatch 等字段；失败返回 null
-export async function generateSceneletForTurn({ userId, sess, profile, userBody, memoryPrompt }) {
+export async function generateSceneletForTurn({ ai, userId, sess, profile, userBody, memoryPrompt }) {
   // 如果 profile 无效或未注册，跳过
   if (!profile || !profileTemplates[profile]) return null;
   // 获取角色的世界状态对象
   const roleWorld = getRoleWorld(profile);
   // 确保当前 profile 有一个活跃的 world session，并返回其引用
-  const world = ensureWorldSession(roleWorld);
+  const world = ensureWorldSession(roleWorld, ai);
   // 构建发送给隐藏世界模型的提示词
   const prompt = await buildHiddenWorldPrompt({
     userId,
@@ -43,51 +43,56 @@ export async function generateSceneletForTurn({ userId, sess, profile, userBody,
     memoryPrompt,
     worldState: normalizeWorldState(roleWorld._worldState),
     // 带入待处理的主动意图，数量受配置上限约束
-    proactiveIntents: normalizeProactiveIntents(sess._proactiveIntents).filter(i => i.status === "pending").slice(-getSceneConfig().hiddenWorldMaxPendingIntents),
+    proactiveIntents: normalizeProactiveIntents(roleWorld._proactiveIntents).filter(i => i.status === "pending").slice(-getSceneConfig().hiddenWorldMaxPendingIntents),
     worldSession: world,
   });
   // 仅在 world session 的首轮带入场景记忆系统块
-  const sceneMemoryBlock = world.firstTurn ? getSceneMemorySystemBlock(roleWorld) : "";
+  const sceneMemoryBlock = world.firstTurn || ai === "api" ? getSceneMemorySystemBlock(roleWorld, ai) : "";
   // 调用隐藏世界模型（首次尝试）
-  let raw = await runHiddenCall(prompt, {
+  let raw = await runBackendStructured(prompt, {
+    backend: ai,
     label: "hidden_world",
     bare: SCENELET_BARE,
     persist: true,
     sessionName: `hidden-world-${roleWorldKey(profile)}`,
     sessionId: world.sid,
     firstTurn: world.firstTurn,
-    model: world.model || CLAUDE_MAIN_MODEL,
+    model: world.model || backendModel(ai),
     systemPrompt: buildHiddenWorldSystemPrompt(profile, sceneMemoryBlock, memoryPrompt),
   });
-  // 隐藏世界调用失败：重置 world session 并重试
-  if (!raw) {
+  let result = normalizeSceneletResult(raw);
+  const firstAttemptToolUsage = result?.toolUsage;
+  // 隐藏世界调用失败或只返回 thinking、没有有效 scenelet：重置 world session 并重试
+  if (!result?.innerScenelet) {
     // 重置会话标识和首轮标记
     world.sid = uuid();
     world.firstTurn = true;
     world.startedAt = new Date().toISOString();
     world.resetReason = "hidden world retry after failed attempt";
     // 使用全新的会话参数重试
-    raw = await runHiddenCall(prompt, {
+    raw = await runBackendStructured(prompt, {
+      backend: ai,
       label: "hidden_world_retry",
       bare: SCENELET_BARE,
       persist: true,
       sessionName: `hidden-world-${roleWorldKey(profile)}`,
       sessionId: world.sid,
       firstTurn: true,
-      model: world.model || CLAUDE_MAIN_MODEL,
-      systemPrompt: buildHiddenWorldSystemPrompt(profile, getSceneMemorySystemBlock(roleWorld), memoryPrompt),
+      model: world.model || backendModel(ai),
+      systemPrompt: buildHiddenWorldSystemPrompt(profile, getSceneMemorySystemBlock(roleWorld, ai), memoryPrompt),
     });
+    result = normalizeSceneletResult(raw);
+    if (result) result.toolUsage = mergeToolUsage(firstAttemptToolUsage, result.toolUsage);
   }
-  // 标准化模型返回的原始数据
-  const result = normalizeSceneletResult(raw);
-  // 如果没有有效的 innerScenelet，返回 null
-  if (!result?.innerScenelet) return null;
+  // 两次都没有有效的 innerScenelet，交给上层记录明确错误
+  if (!result?.innerScenelet) throw new Error("hidden world returned no valid inner_scenelet");
   // 如果 API 路径返回了 session_id，更新 world session 标识
   if (raw?._hiddenCall?.session_id) world.sid = raw._hiddenCall.session_id;
   // 更新 world session 的使用状态
   world.firstTurn = false;
   world.lastUsedAt = new Date().toISOString();
   world.lastUsage = result.hiddenCall || null;
+  world.turnCount = (world.turnCount || 0) + 1;
   // 将模型输出的 worldStatePatch 应用到角色世界状态
   applyWorldStatePatch(roleWorld, result.worldStatePatch);
   roleWorld.updatedAt = world.lastUsedAt;
@@ -116,7 +121,7 @@ export function buildSceneContextBlock(sess, sceneletResult) {
     // 如果有活跃的 lifeArc，拼入"正在发生的事"段落
     lifeArcSummary.length ? [
       "【正在发生的事】",
-      "千圣生活中跨越多天的安排，只作为时间参考和自然接话线索，不要主动复述。",
+      `${profile}生活中跨越多天的安排，只作为时间参考和自然接话线索，不要主动复述。`,
       JSON.stringify(lifeArcSummary, null, 2),
     ].join("\n") : "",
     // 如果有 inner_scenelet，拼入隐藏中间层叙事及桥接说明
@@ -135,10 +140,11 @@ export function buildSceneContextBlock(sess, sceneletResult) {
 
 // 将 scenelet 生成的 follow_up 候选追加到会话的主动意图列表中。
 // 每轮最多取 1 条，去重由 scenelet prompt 中 pending_proactive_intents 保证。
-export async function addFollowUpCandidates(sess, sceneletResult, userBody) {
-  if (!sess || !sceneletResult?.followUpCandidates?.length) return;
+export async function addFollowUpCandidates(sess, sceneletResult, userBody, roleWorld) {
+  if (!sceneletResult?.followUpCandidates?.length) return;
+  if (!roleWorld) return;
   const nowIso = new Date().toISOString();
-  const existing = normalizeProactiveIntents(sess._proactiveIntents);
+  const existing = normalizeProactiveIntents(roleWorld._proactiveIntents);
   for (const raw of sceneletResult.followUpCandidates.slice(0, 1)) {
     const candidate = normalizeRawProactiveCandidate(raw, {
       nowIso,
@@ -148,7 +154,7 @@ export async function addFollowUpCandidates(sess, sceneletResult, userBody) {
     if (!candidate) continue;
     existing.push(candidate);
   }
-  sess._proactiveIntents = normalizeProactiveIntents(existing);
+  roleWorld._proactiveIntents = normalizeProactiveIntents(existing);
 }
 
 // 将本轮对话事件写入聊天历史数据库。
@@ -233,6 +239,7 @@ export async function sendFinalAssistantMessage(userId, text, contextToken, pref
 function activeProfileSessionEntries() {
   const entries = [];
   for (const [ai, map] of Object.entries(sessions)) {
+    if (ai !== activeAI) continue;
     for (const [userId, userData] of map) {
       // 找到该用户当前激活的会话
       const sess = (userData.list || []).find(s => s.id === userData.activeId);
@@ -280,7 +287,7 @@ async function evaluateProactiveIntent({ ai, userId, sess, profile, intent }) {
     sess,
   });
   // 调用 AI 做出决策，并标准化返回结果
-  const raw = await runHiddenCall(prompt, { label: "proactive" });
+  const raw = await runBackendStructured(prompt, { backend: ai, label: "proactive" });
   return normalizeProactiveDecision(raw);
 }
 
@@ -293,7 +300,7 @@ async function evaluateProactiveIntent({ ai, userId, sess, profile, intent }) {
 //   profile - 角色 profile 名称
 //   now - 当前 Date 对象
 // @returns {boolean} 是否成功推进了状态
-async function advanceWorldState({ roleWorld, profile, now }) {
+async function advanceWorldState({ ai, roleWorld, profile, now }) {
   const cfg = getSceneConfig();
   const prompt = loadPrompts().timeAdvancementPrompt;
   // 未配置时间推进提示词模板则跳过
@@ -334,10 +341,11 @@ async function advanceWorldState({ roleWorld, profile, now }) {
   ].join("\n");
 
   // 调用 AI 根据时间上下文推断角色新状态
-  const raw = await runHiddenCall(input, {
+  const raw = await runBackendStructured(input, {
+    backend: ai,
     label: "time_advance",
     bare: true,
-    model: CLAUDE_MAIN_MODEL,
+    model: backendModel(ai),
     timeoutMs: 30000,
   });
 
@@ -369,7 +377,7 @@ async function advanceWorldState({ roleWorld, profile, now }) {
 //   sess - 当前会话对象
 //   profile - 角色 profile 名称
 // @returns {object|null} 标准化后的候选项意图对象，或 null 表示模型认为不需要分享
-async function runDailyShareSeed({ sess, profile }) {
+async function runDailyShareSeed({ ai, sess, profile }) {
   const cfg = getSceneConfig();
   const roleWorld = getRoleWorld(profile);
   const now = new Date();
@@ -392,10 +400,26 @@ async function runDailyShareSeed({ sess, profile }) {
     }, null, 2),
   ];
 
-  const raw = await runHiddenCall(promptParts.join("\n"), {
+  // 注入最近几次已发送 daily share 的风格，帮助模型切换风格
+  const recentIntents = (roleWorld._proactiveIntents || [])
+    .filter(p => p.status === "sent" && p.kind === "daily_share" && p.message_intent)
+    .sort((a, b) => (new Date(b.sentAt || 0)) - (new Date(a.sentAt || 0)))
+    .slice(0, 3)
+    .map(p => p.message_intent);
+  if (recentIntents.length) {
+    promptParts.push(
+      "",
+      "最近几次分享的风格：",
+      ...recentIntents.map(i => `- ${i}`),
+      "请在风格上与上述有所区分，避免连续同一种情绪走向（尤其是抱怨/不耐烦类的连续出现）。",
+    );
+  }
+
+  const raw = await runBackendStructured(promptParts.join("\n"), {
+    backend: ai,
     label: "daily_share_seed",
     bare: true,
-    model: CLAUDE_MAIN_MODEL,
+    model: backendModel(ai),
     timeoutMs: 60000,
     systemPrompt: profileTemplates[profile] || "",
   });
@@ -454,13 +478,13 @@ async function maybeSeedDailyShareIntent({ ai, userId, sess, profile }) {
   // 如果 world event 时间戳太旧（超过阈值），先推进世界状态
   const lastEventMs = Date.parse(roleWorld._worldState?.lastWorldEventAt || "");
   if (!Number.isFinite(lastEventMs) || nowMs - lastEventMs >= (cfg.stateStaleThresholdMs || 1800000)) {
-    await advanceWorldState({ roleWorld, profile, now: new Date(nowMs) }).catch(() => {});
+    await advanceWorldState({ ai, roleWorld, profile, now: new Date(nowMs) }).catch(() => {});
   }
 
   saveRoleWorlds();
 
   // 生成日常分享意图
-  const intent = await runDailyShareSeed({ sess, profile });
+  const intent = await runDailyShareSeed({ ai, sess, profile });
   return { changed: true, intent };
 }
 
@@ -475,7 +499,7 @@ async function maybeSeedDailyShareIntent({ ai, userId, sess, profile }) {
 //   profile - 角色 profile 名称
 //   activeSchedules - 当前活跃的日程列表
 // @returns {Array} 提取到的候选 life_arc 对象数组
-export async function runScheduleExtractor({ userBody, scenelet, assistantReply, profile, activeSchedules }) {
+export async function runScheduleExtractor({ ai, userBody, scenelet, assistantReply, profile, activeSchedules }) {
   const arcs = Array.isArray(activeSchedules) ? activeSchedules.filter(a => a.status === "active" && a.kind) : [];
   // 构建提取提示词：提供当前日程、用户消息、AI 回复和内心叙事
   const prompt = [
@@ -489,20 +513,21 @@ export async function runScheduleExtractor({ userBody, scenelet, assistantReply,
     "本轮用户消息：",
     userBody || "",
     "",
-    "千圣的实际回复：",
+    `${profile || "角色"}的实际回复：`,
     assistantReply || "",
     "",
-    "千圣的内心叙事：",
+    `${profile || "角色"}的内心叙事：`,
     scenelet || "",
     "",
     "角色profile：", profile,
   ].join("\n");
 
   // 调用 AI 提取日程候选项
-  const raw = await runHiddenCall(prompt, {
+  const raw = await runBackendStructured(prompt, {
+    backend: ai,
     label: "schedule_extractor",
     bare: true,
-    model: CLAUDE_MAIN_MODEL,
+    model: backendModel(ai),
     timeoutMs: 45000,
   });
 
@@ -518,7 +543,7 @@ export async function runScheduleExtractor({ userBody, scenelet, assistantReply,
 //   sess - 当前会话对象
 //   profile - 角色 profile 名称
 // @returns {boolean} 是否执行了确认检查（无论是否有候选项被应用）
-export async function maybeCreateScheduleEntry({ sess, profile }) {
+export async function maybeCreateScheduleEntry({ ai, sess, profile }) {
   const cfg = getSceneConfig();
   const roleWorld = getRoleWorld(profile);
   // 当前活跃的日程列表
@@ -526,6 +551,8 @@ export async function maybeCreateScheduleEntry({ sess, profile }) {
   // 标准化 pending 候选项
   const candidates = normalizeScheduleCandidates(roleWorld._pendingScheduleCandidates || []);
   if (!candidates.length) return false;
+  // 后续 selected_index 以这份规范化数组为准；先回写可避免原始无效项造成索引错位。
+  roleWorld._pendingScheduleCandidates = candidates;
 
   const nowMs = Date.now();
   // 检查距离上次日程确认是否已过最小间隔
@@ -535,7 +562,6 @@ export async function maybeCreateScheduleEntry({ sess, profile }) {
   // 记录本次检查时间
   const nowIso = new Date(nowMs).toISOString();
   roleWorld._lastScheduleCheckAt = nowIso;
-  sess._lastScheduleCheckAt = nowIso;
   saveRoleWorlds();
 
   // 获取最近 N 种日程类型，用于避免短期内重复同类安排
@@ -554,10 +580,11 @@ export async function maybeCreateScheduleEntry({ sess, profile }) {
   });
 
   // 调用 AI 审阅候选项并做出最终决定
-  const result = await runHiddenCall(prompt, {
+  const result = await runBackendStructured(prompt, {
+    backend: ai,
     label: "schedule_finalization",
     bare: false,
-    model: CLAUDE_MAIN_MODEL,
+    model: backendModel(ai),
     timeoutMs: cfg.scheduleFinalizationTimeoutMs,
   });
 
@@ -640,12 +667,13 @@ export async function checkProactiveIntents() {
   for (const { ai, userId, sess, profile } of activeProfileSessionEntries()) {
     // 跳过正忙、有排队消息或有待处理输入的会话
     if (sess.busy || sess.queue?.length || pendingInputs.has(userId)) continue;
-    let allIntents = normalizeProactiveIntents(sess._proactiveIntents);
+    const roleWorld = getRoleWorld(profile);
+    let allIntents = normalizeProactiveIntents(roleWorld._proactiveIntents);
     let pending = allIntents.filter(x => x.status === "pending");
     let changed = false;
 
     // 步骤 1：尝试确认日程候选项
-    const scheduleChanged = await maybeCreateScheduleEntry({ sess, profile }).catch(e => {
+    const scheduleChanged = await maybeCreateScheduleEntry({ ai, sess, profile }).catch(e => {
       log("⚠", `schedule creator fail: ${e.message}`);
       return false;
     });
@@ -660,7 +688,7 @@ export async function checkProactiveIntents() {
     }
     // 无待处理意图则跳过后续处理
     if (!pending.length) {
-      if (changed) saveSessions();
+      if (changed) { roleWorld._proactiveIntents = normalizeProactiveIntents(allIntents); saveRoleWorlds(); }
       continue;
     }
 
@@ -683,24 +711,24 @@ export async function checkProactiveIntents() {
       // 尚未到预定发送时间
       if (nowMs < scheduled) continue;
       // 检查今日主动发送是否已达上限
-      if (proactiveSentToday(sess) >= getSceneConfig().proactiveDailyMax) {
+      if (proactiveSentToday(roleWorld) >= getSceneConfig().proactiveDailyMax) {
         markProactiveIntent(intent, "cancelled", "daily proactive limit reached");
         changed = true;
         continue;
       }
       // 检查冷却时间内是否有其他主动消息刚发送
-      if (sess._lastProactiveAt && nowMs - Date.parse(sess._lastProactiveAt) < getSceneConfig().proactiveCooldownMs) continue;
+      if (roleWorld._lastProactiveAt && nowMs - Date.parse(roleWorld._lastProactiveAt) < getSceneConfig().proactiveCooldownMs) continue;
 
       intent.lastCheckedAt = new Date().toISOString();
       // 防止并发：在开始异步门控评估前先设置 _lastProactiveAt，
       // 这样如果另一个并发检查同时运行，冷却守卫会看到此时间戳并跳过。
-      const prevLastProactiveAt = sess._lastProactiveAt;
-      sess._lastProactiveAt = new Date().toISOString();
+      const prevLastProactiveAt = roleWorld._lastProactiveAt;
+      roleWorld._lastProactiveAt = new Date().toISOString();
       // 步骤 4：二次门控——AI 判断该意图是否真的应该发送
       const decision = await evaluateProactiveIntent({ ai, userId, sess, profile, intent });
       if (!decision?.shouldSend || !decision.visibleReply) {
         // 门控拒绝：恢复上次主动时间，标记取消
-        sess._lastProactiveAt = prevLastProactiveAt;
+        roleWorld._lastProactiveAt = prevLastProactiveAt;
         markProactiveIntent(intent, "cancelled", decision?.cancelReason || "second check declined");
         changed = true;
         continue;
@@ -709,7 +737,7 @@ export async function checkProactiveIntents() {
       // 步骤 5：发送主动消息到微信
       const sent = await sendFinalAssistantMessage(userId, decision.visibleReply, sess._lastContextToken, replyPrefix(sess.name, ai));
       if (!sent) {
-        sess._lastProactiveAt = prevLastProactiveAt;
+        roleWorld._lastProactiveAt = prevLastProactiveAt;
         markProactiveIntent(intent, "cancelled", "send failed");
         changed = true;
         continue;
@@ -718,9 +746,9 @@ export async function checkProactiveIntents() {
       // 步骤 6：发送成功后的善后处理
       const sentAt = new Date().toISOString();
       markProactiveIntent(intent, "sent");
-      sess._lastProactiveAt = sentAt;
+      roleWorld._lastProactiveAt = sentAt;
       // 立即持久化意图状态变更，防止并发调用将此意图再次视为 pending
-      sess._proactiveIntents = normalizeProactiveIntents(allIntents);
+      roleWorld._proactiveIntents = normalizeProactiveIntents(allIntents);
       sess._lastAssistantAt = sentAt;
       const replyBytes = Buffer.byteLength(decision.visibleReply, "utf-8");
       log(">>", `[${sess.name}] ${intent.kind} (${replyBytes}B) "${intent.messageIntent.slice(0, 50)}"`);
@@ -741,9 +769,9 @@ export async function checkProactiveIntents() {
       });
       // 从已发送的主动消息中再次提取日程候选项
       try {
-        const roleWorld = getRoleWorld(profile);
         const activeSchedules = normalizeLifeArcs(roleWorld._lifeArcs).filter(a => a.status === "active" && a.kind);
         const newCandidates = await runScheduleExtractor({
+          ai,
           userBody: decision.visibleReply,
           scenelet: decision.innerScenelet || "",
           assistantReply: "",
@@ -768,10 +796,10 @@ export async function checkProactiveIntents() {
       changed = true;
     }
 
-    // 如果有变更，持久化会话状态
+    // 如果有变更，持久化到角色世界
     if (changed) {
-      sess._proactiveIntents = normalizeProactiveIntents(allIntents);
-      saveSessions();
+      roleWorld._proactiveIntents = normalizeProactiveIntents(allIntents);
+      saveRoleWorlds();
     }
   }
 }
@@ -789,11 +817,11 @@ export async function checkProactiveIntents() {
 //   profile - 角色 profile 名称
 //   roleWorld - 角色世界状态对象
 // @returns {string} 生成的场景记忆摘要文本
-export async function generateSceneMemory({ userId, sess, profile, roleWorld }) {
+export async function generateSceneMemory({ ai, userId, sess, profile, roleWorld }) {
   const allEvents = await loadAllEvents();
-  // 筛选当前会话的历史对话事件（当前 sid 即为上次 reset 后分配，天然划定 reset 边界）
-  const sessionEvents = allEvents.filter(e => e.userId === userId && e.sessionId === sess.id && e.role && e.text);
-  // 从上次 reset 起全部事件，最多 40 轮（assistant 消息 = 1 轮，含 proactive）
+  // 场景记忆按 user + profile 聚合，允许同一角色的多个会话共享连续性。
+  const sessionEvents = allEvents.filter(e => e.userId === userId && e.profile === profile && e.role && e.text);
+  // 只保留最近 40 轮，避免长期历史无限增长。
   const chatHistory = takeLastRounds(sessionEvents, 40).map(e => ({
     role: e.role === "assistant" ? "assistant" : "user",
     time: e.timestamp || "",
@@ -802,7 +830,7 @@ export async function generateSceneMemory({ userId, sess, profile, roleWorld }) 
   }));
   // 取最近 5 条 assistant 消息的 scenelet 供参考
   const recentScenelets = allEvents
-    .filter(e => e.userId === userId && e.sessionId === sess.id && e.role === "assistant" && e.scenelet)
+    .filter(e => e.userId === userId && e.profile === profile && e.role === "assistant" && e.scenelet)
     .slice(-5)
     .map(e => e.scenelet);
   const worldState = normalizeWorldState(roleWorld._worldState);
@@ -816,10 +844,11 @@ export async function generateSceneMemory({ userId, sess, profile, roleWorld }) 
     profile,
   });
   // 调用 AI 生成摘要
-  const raw = await runHiddenCall(prompt, {
+  const raw = await runBackendStructured(prompt, {
+    backend: ai,
     label: "scene_memory",
     bare: true,
-    model: CLAUDE_MAIN_MODEL,
+    model: backendModel(ai),
     timeoutMs: 240000,
   });
   // 兼容多种返回格式：纯字符串、summary 字段、scene_memory 字段、inner_scenelet 字段
@@ -834,7 +863,7 @@ export async function generateSceneMemory({ userId, sess, profile, roleWorld }) 
 //   userId - 微信用户 ID
 //   userMessages - 用户消息文本数组
 //   profile - 角色 profile 名称（未直接使用，保留接口一致性）
-export async function batchUpdateMemory({ userId, userMessages, profile }) {
+export async function batchUpdateMemory({ ai, userId, userMessages, profile }) {
   if (!isMemoryEnabled(userId)) return;
   const msgs = (userMessages || []).filter(Boolean);
   if (!msgs.length) return;
@@ -845,7 +874,7 @@ export async function batchUpdateMemory({ userId, userMessages, profile }) {
 
   // 对比写入前后的文档大小，记录变更
   const before = loadMemoryDocument();
-  await updateMemoryDocument(msgs);
+  await updateMemoryDocument(msgs, ai);
   const after = loadMemoryDocument();
   const changed = before !== after;
   if (changed) log("🧠", `memory ${before.length}→${after.length}B`);
@@ -858,6 +887,6 @@ export async function batchUpdateMemory({ userId, userMessages, profile }) {
 // @param {string} ai - AI 标识（"cc" 或 "codex"），默认 "cc"
 // @returns {string} 格式化的消息前缀
 export function replyPrefix(sessionName, ai = "cc") {
-  const label = ai === "codex" ? "Codex" : "CC";
+  const label = ai === "codex" ? "Codex" : ai === "api" ? "API" : "CC";
   return `[${label}] ${sessionName}`;
 }

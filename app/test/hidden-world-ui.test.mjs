@@ -68,7 +68,15 @@ describe("Hidden World pipeline UI", () => {
     assert.deepEqual(activeSessionEntriesForProfile(sessionMap, "白鹭千圣"), [
       { userId: "user-a", user: sessionMap.get("user-a"), session: activeTarget },
     ]);
-    assert.match(guiWorld, /activeSessionEntriesForProfile\(sessions\.cc, profile\)/);
+    assert.match(guiWorld, /Object\.entries\(sessions\)\.flatMap/);
+    assert.match(guiWorld, /Object\.entries\(roleWorld\?\._worldSessions \|\| \{\}\)/);
     assert.doesNotMatch(guiWorld, /if \(!s\.active\) continue;/);
+  });
+
+  it("blocks the reset UI until scene memory generation finishes", () => {
+    assert.match(appJs, /showBlockingModal\(/);
+    assert.match(appJs, /完成提示出现前，请暂时不要向机器人发送新的消息/);
+    assert.match(appJs, /button\.disabled = true/);
+    assert.match(appJs, /await renderStatus\(\)/);
   });
 });

@@ -40,6 +40,14 @@ function showModal(title, body) {
   document.body.appendChild(overlay);
 }
 
+function showBlockingModal(title, body) {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `<div class="modal-box" role="status" aria-live="polite"><div class="modal-head"><h3>${escHtml(title)}</h3></div><div class="modal-body"><pre style="white-space:pre-wrap;font-size:13px;line-height:1.5">${escHtml(body)}</pre></div></div>`;
+  document.body.appendChild(overlay);
+  return () => overlay.remove();
+}
+
 function clearStatusPoll() {
   if (_statusPollTimer) { clearInterval(_statusPollTimer); _statusPollTimer = null; }
 }
@@ -181,14 +189,28 @@ function renderCCContext(s) {
 }
 
 function bindCCContextEvents() {
-  content.querySelector('[data-action="reset-cc"]')?.addEventListener("click", async () => {
+  content.querySelector('[data-action="reset-cc"]')?.addEventListener("click", async function () {
+    const button = this;
     if (!confirm("确认手动 reset？将归零轮次计数并重置会话和 HW session。")) return;
+    button.disabled = true;
+    const closeModal = showBlockingModal("正在 Reset", "正在生成 scene memory，完成提示出现前，请暂时不要向机器人发送新的消息。");
     try {
       const st = await get("/api/status");
-      if (!st.ccContext?.profile) return toast("无活跃 CC 会话", false);
+      if (!st.ccContext?.profile) {
+        closeModal();
+        button.disabled = false;
+        return toast("无活跃 CC 会话", false);
+      }
       const r = await post("/api/world/reset", { profile: st.ccContext.profile });
+      closeModal();
+      button.disabled = false;
       toast(r.ok ? "Reset 成功" : r.error, r.ok);
-    } catch (e) { toast("Reset 失败: " + e.message, false); }
+      await renderStatus();
+    } catch (e) {
+      closeModal();
+      button.disabled = false;
+      toast("Reset 失败: " + e.message, false);
+    }
   });
   content.querySelector('[data-action="show-cc-scene"]')?.addEventListener("click", async () => {
     try {
@@ -1743,10 +1765,9 @@ function renderHistoryConversations(conversations) {
   return conversations.map(item => `
     <button class="history-conv ${item.key === historyState.sessionKey ? "active" : ""}" data-history-session="${escAttr(item.key)}">
       <span class="history-conv-top">
-        <strong>${escHtml(item.sessionName || "Session")}</strong>
-        <span class="badge badge-${item.ai === "cc" ? "cc" : "codex"}">${item.ai === "cc" ? "CC" : item.ai === "api" ? "API" : "Codex"}</span>
+        <strong>${escHtml(item.profile || item.sessionName || "Session")}</strong>
       </span>
-      <span class="history-conv-meta">${escHtml(item.profile || "default")} · ${Number(item.count || 0)} msgs · ${Number(item.sceneletCount || 0)} scenelets</span>
+      <span class="history-conv-meta">${Number(item.count || 0)} msgs · ${Number(item.sceneletCount || 0)} scenelets</span>
       <span class="history-conv-last">${escHtml(item.lastText || "")}</span>
       <time>${formatTime(item.lastTimestamp)}</time>
     </button>
@@ -2023,9 +2044,7 @@ function renderProactiveSession(session, now) {
     <div class="proactive-session-card">
       <div class="proactive-session-head">
         <div class="session-info">
-          <span class="badge badge-${session.ai === 'cc' ? 'cc' : 'codex'}">${session.ai === 'cc' ? 'CC' : 'Codex'}</span>
-          <strong>${escHtml(session.sessionName)}</strong>
-          <span class="badge badge-default">${escHtml(session.profile)}</span>
+          <strong>${escHtml(session.profile || session.sessionName)}</strong>
           ${session.active ? '<span class="resume-current">Active</span>' : ''}
         </div>
         <span style="font-size:12px;color:var(--muted)">${total} intent${total !== 1 ? 's' : ''} · ${lifeArcs.length} life line${lifeArcs.length !== 1 ? 's' : ''}</span>

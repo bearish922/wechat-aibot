@@ -1,9 +1,8 @@
 import { createServer } from "node:http";
 import { readFileSync, statSync } from "node:fs";
-import { join, extname, resolve, relative, sep } from "node:path";
+import { extname, resolve, relative, sep } from "node:path";
 import { exec } from "node:child_process";
 import { log } from "./utils.mjs";
-import { configValue } from "./config.mjs";
 import { appPath } from "./paths.mjs";
 
 const STATIC_DIR = appPath("static");
@@ -109,7 +108,9 @@ export function startServer(port = 18720) {
         try {
           const body = method === "GET" ? null : await readBody(req);
           const result = await route.handler({ req, res, body, params, json: (d, s) => json(res, d, s) });
-          if (result !== undefined) json(res, result);
+          // Route handlers may return { status } so callers receive the intended HTTP status,
+          // not a misleading 200 response containing an error body.
+          if (result !== undefined) json(res, result, Number(result?.status) || 200);
         } catch (e) {
           json(res, { ok: false, error: e.message }, 500);
         }

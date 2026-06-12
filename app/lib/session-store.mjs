@@ -159,7 +159,7 @@ export function loadSessions() {
       const data = JSON.parse(fs.readFileSync(SESSION_FILE, "utf-8"));
       const topKeys = Object.keys(data);
       // 通过顶层 key 判断是新格式还是旧格式
-      const isNewFormat = topKeys.includes("cc") || topKeys.includes("codex");
+      const isNewFormat = topKeys.includes("cc") || topKeys.includes("codex") || topKeys.includes("api");
       if (!isNewFormat) {
         // 旧格式: 顶层键为 userId，所有数据归到 cc 后端
         const ccMap = new Map();
@@ -172,9 +172,10 @@ export function loadSessions() {
         sessions.cc = ccMap;
         // codex 初始化为空 Map
         sessions.codex = new Map();
+        sessions.api = new Map();
       } else {
         // 新格式: 顶层键为 "cc" / "codex"
-        for (const ai of ["cc", "codex"]) {
+        for (const ai of ["cc", "codex", "api"]) {
           const aiData = data[ai] || {};
           const map = new Map();
           for (const [userId, u] of Object.entries(aiData)) {
@@ -195,10 +196,10 @@ export function loadSessions() {
 // ═══════════════════════════════════════════════════════════════
 // sessionMap() —— 获取指定 AI 后端的会话映射表
 // ═══════════════════════════════════════════════════════════════
-// 用途：API 和 Claude Code 共享 sessions.cc 存储，Codex 使用独立的 sessions.codex
+// 用途：每个后端拥有独立线程；角色级记忆和世界状态在 world-state 中共享
 // 输入：ai - AI 后端标识 ("cc"/"api"/"codex")，默认使用全局 activeAI
 // 输出：Map<userId, userSessionStore>
-export function sessionMap(ai) { const k = (ai || activeAI) === "api" ? "cc" : (ai || activeAI); return sessions[k] || sessions.cc; }
+export function sessionMap(ai) { const k = ai || activeAI; return sessions[k] || sessions.cc; }
 
 // ═══════════════════════════════════════════════════════════════
 // ensureUser() —— 确保用户存在于会话映射中

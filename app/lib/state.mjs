@@ -4,10 +4,10 @@
 
 export let token = null;
 export let getUpdatesBuf = "";
-export const sessions = { cc: new Map(), codex: new Map() };
+export const sessions = { cc: new Map(), codex: new Map(), api: new Map() };
 export let activeAI = "cc";
 export let profileTemplates = {};
-export let modelNames = { cc: "unknown", codex: "unknown" };
+export let modelNames = { cc: "unknown", codex: "unknown", api: "unknown" };
 export const pendingInputs = new Map();
 export const recentInputs = new Map();
 
@@ -15,4 +15,3 @@ export const recentInputs = new Map();
 export function setToken(v) { token = v; }
 export function setSyncBuf(v) { getUpdatesBuf = v; }
 export function setActiveAI(v) { activeAI = v; }
-

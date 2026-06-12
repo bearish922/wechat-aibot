@@ -9,10 +9,12 @@ const statusSource = readFileSync(join(import.meta.dirname, "..", "lib", "gui-st
 describe("GUI context status", () => {
   it("uses the Claude transcript as the primary accumulated context source", () => {
     assert.match(statusSource, /readClaudeSessionContext\(activeSess\.sid\)/);
-    assert.match(statusSource, /usage\?\.input_tokens/);
-    assert.match(statusSource, /usage\?\.cache_read_input_tokens/);
-    assert.match(statusSource, /usage\?\.cache_creation_input_tokens/);
-    assert.match(statusSource, /usage\?\.output_tokens/);
+    assert.match(statusSource, /usage\.input_tokens/);
+    assert.match(statusSource, /usage\.cache_read_input_tokens/);
+    assert.match(statusSource, /usage\.cache_creation_input_tokens/);
+    assert.match(statusSource, /usage\.output_tokens/);
+    assert.match(statusSource, /activeAI === "codex"/);
+    assert.match(statusSource, /roleWorld\?\._worldSessions\?\.\[activeAI\]/);
   });
 
   it("reports the completed-turn context and transcript prompt count", () => {

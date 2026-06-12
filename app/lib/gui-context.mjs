@@ -5,8 +5,7 @@ import { isApiConfigured } from "./api-client.mjs";
 import { uuid } from "./utils.mjs";
 
 function sessionStore() {
-  const key = activeAI === "api" ? "cc" : activeAI;
-  return sessions[key] || sessions.cc;
+  return sessions[activeAI] || sessions.cc;
 }
 
 export function registerGuiContext() {

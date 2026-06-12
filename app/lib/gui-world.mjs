@@ -18,13 +18,13 @@ function roleKey(profile) {
   return String(profile || "默认").trim() || "默认";
 }
 
-export function activeSessionEntriesForProfile(sessionMap, profile) {
+export function activeSessionEntriesForProfile(sessionMap, profile, ai = null) {
   const key = roleKey(profile);
   const entries = [];
   for (const [userId, u] of sessionMap || new Map()) {
     const active = (u.list || []).find(s => s.id === u.activeId);
     if (!active || roleKey(active._profile || "默认") !== key) continue;
-    entries.push({ userId, user: u, session: active });
+    entries.push({ ...(ai ? { ai } : {}), userId, user: u, session: active });
   }
   return entries;
 }
@@ -37,6 +37,8 @@ function saveSessions() {
 
 function sessionRowsForProfile(profile) {
   const key = roleKey(profile);
+  const world = worldsMap()?.get?.(key) || {};
+  const sharedIntents = world._proactiveIntents || [];
   const rows = [];
   for (const [ai, map] of Object.entries(sessions)) {
     for (const [userId, u] of map) {
@@ -53,8 +55,8 @@ function sessionRowsForProfile(profile) {
           firstTurn: Boolean(s._firstTurn),
           turnCount: s._turnCount || 0,
           visibleTurns: Array.isArray(s._visibleHistory) ? s._visibleHistory.length : 0,
-          pendingIntents: (s._proactiveIntents || []).filter(i => i?.status === "pending").length,
-          intents: s._proactiveIntents || [],
+          pendingIntents: sharedIntents.filter(i => i?.status === "pending").length,
+          intents: sharedIntents,
         });
       }
     }
@@ -68,7 +70,8 @@ function safeWorld(profile) {
   return {
     profile: key,
     worldState: world._worldState || null,
-    worldSession: world._worldSession || null,
+    worldSession: world._worldSessions?.[activeAI] || null,
+    worldSessions: world._worldSessions || {},
     lifeArcs: world._lifeArcs || [],
     lastDailyShareSeedAt: world._lastDailyShareSeedAt || null,
     lastScheduleCheckAt: world._lastScheduleCheckAt || null,
@@ -103,20 +106,32 @@ export function registerWorldRoutes() {
     role: safeWorld(params.profile),
   }));
 
+  addRoute("PUT", "/api/world/scene-memory", ({ body }) => {
+    const profile = roleKey(body?.profile);
+    const backend = body?.backend || activeAI;
+    const content = String(body?.content ?? "").slice(0, 8000);
+    const roleWorld = getRoleWorld(profile);
+    setSceneMemory(roleWorld, content, backend);
+    saveWorlds();
+    return { ok: true, length: content.length };
+  });
+
   addRoute("POST", "/api/world/reset", async ({ body }) => {
     const profile = roleKey(body?.profile);
     const now = new Date().toISOString();
     const roleWorld = getRoleWorld(profile);
-    const activeSessions = activeSessionEntriesForProfile(sessions.cc, profile);
+    const activeSessions = Object.entries(sessions).flatMap(([ai, map]) => activeSessionEntriesForProfile(map, profile, ai));
 
     // Step 1: Generate scene memory from accumulated context (before resetting state)
     let generated = false;
-    for (const { userId, session } of activeSessions) {
+    const preferred = activeSessions.filter(entry => entry.ai === activeAI);
+    for (const { ai, userId, session } of (preferred.length ? preferred : activeSessions)) {
       try {
-        const summary = await generateSceneMemory({ userId, sess: session, profile, roleWorld });
+        const summary = await generateSceneMemory({ ai, userId, sess: session, profile, roleWorld });
         if (summary) {
-          setSceneMemory(roleWorld, summary);
+          setSceneMemory(roleWorld, summary, ai);
           generated = true;
+          break;
         }
       } catch (e) {
         console.error("[gui] scene memory generation failed:", e.message);
@@ -128,20 +143,17 @@ export function registerWorldRoutes() {
       session.sid = crypto.randomUUID();
       session._firstTurn = true;
       session._turnCount = 0;
-
-      if (session._worldSession) {
-        session._worldSession.sid = crypto.randomUUID();
-        session._worldSession.firstTurn = true;
-        session._worldSession.startedAt = now;
-        session._worldSession.resetReason = "manual from GUI";
-      }
+      session._lastUsage = null;
     }
 
-    if (roleWorld?._worldSession) {
-      roleWorld._worldSession.sid = crypto.randomUUID();
-      roleWorld._worldSession.firstTurn = true;
-      roleWorld._worldSession.startedAt = now;
-      roleWorld._worldSession.resetReason = "manual from GUI";
+    for (const [backend, worldSession] of Object.entries(roleWorld?._worldSessions || {})) {
+      if (!activeSessions.some(e => e.ai === backend)) continue;
+      worldSession.sid = crypto.randomUUID();
+      worldSession.firstTurn = true;
+      worldSession.startedAt = now;
+      worldSession.resetReason = "manual from GUI";
+      worldSession.turnCount = 0;
+      worldSession.lastUsage = null;
     }
 
     saveSessions();

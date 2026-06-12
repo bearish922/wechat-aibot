@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { addRoute } from "./server.mjs";
 import { profileTemplates, sessions } from "./state.mjs";
 import { log } from "./utils.mjs";

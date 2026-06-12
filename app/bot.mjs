@@ -37,7 +37,7 @@ const LOG_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const INSTANCE_LOCK_FILE = dataPath("runtime", ".wechat-aibot.lock");
 
 // ─── 核心功能模块导入 ───────────────────────────────────────────
-import { MAX_REPLY_LEN, splitText, hasInboundAttachment, splitSocialReply, loadPrompts, getChatStyle, formatLocalChatReality, expressionCapabilityPrompt } from "./lib/reply.mjs";
+import { hasInboundAttachment, loadPrompts, getChatStyle, formatLocalChatReality, expressionCapabilityPrompt } from "./lib/reply.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
 import { registerSessionRoutes } from "./lib/gui-sessions.mjs";
@@ -57,10 +57,11 @@ import { uuid, sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost } from "./lib/wechat.mjs";
 import { loadMemoryDocument, loadWorldMemoryDocument } from "./lib/memory.mjs";
 import { loadAllEvents } from "./lib/chat-history.mjs";
-import { getSceneConfig, normalizeVisibleHistory, normalizeToolUsage, emptyToolUsage, normalizeWorldState, sanitizeVisibleReplyText, normalizeLifeArcs } from "./lib/normalize.mjs";
-import { envWithProxy, commandExists, runClaudeStream, runCodexStream, runApiStream, runApiJson, toolUsageFromUsage, killProc, isApiConfigured, resolveApiConfig, CLAUDE, CLAUDE_MAIN_MODEL, CODEX, LOGS_DIR } from "./lib/claude-runner.mjs";
-import { sessionProfile, markToolUsage, saveRoleWorlds, loadRoleWorlds, getSceneMemory, setSceneMemory, getRoleWorld, ensureWorldSession } from "./lib/world-state.mjs";
-import { loadProfiles, makeSession, saveSessions, loadSessions, sessionMap, ensureUser, activeSession, sessionById, hasSessionName, nextSessionName, findSession, sessionsListText, clearPendingInput } from "./lib/session-store.mjs";
+import { getSceneConfig, emptyToolUsage, mergeToolUsage, sanitizeVisibleReplyText, normalizeLifeArcs } from "./lib/normalize.mjs";
+import { envWithProxy, commandExists, isApiConfigured, resolveApiConfig, CLAUDE, CODEX, LOGS_DIR } from "./lib/claude-runner.mjs";
+import { startBackendChat } from "./lib/backend-adapter.mjs";
+import { sessionProfile, saveRoleWorlds, loadRoleWorlds, setSceneMemory, getRoleWorld, ensureWorldSession } from "./lib/world-state.mjs";
+import { loadProfiles, makeSession, saveSessions, loadSessions, ensureUser, activeSession, sessionById, nextSessionName } from "./lib/session-store.mjs";
 import { handleHelp, handleCC, handleCodex, handleAPI, handleNew, handleSwitch, handleRename, handleSessions, handleProfile, handleClose, handleStatus, handleCancel } from "./lib/commands.mjs";
 import { buildTurnBody, appendVisibleHistory, getSceneMemorySystemBlock, recentVisibleContext } from "./lib/prompts.mjs";
 import { generateSceneletForTurn, buildSceneContextBlock, addFollowUpCandidates, recordChatHistory, sendFinalAssistantMessage, checkProactiveIntents, generateSceneMemory, batchUpdateMemory, runScheduleExtractor, replyPrefix } from "./lib/turn.mjs";
@@ -85,6 +86,7 @@ globalThis.__wechatSaveSessions = saveSessions;
 // 输入：无
 // 输出：无（直接修改全局 modelNames 对象）
 function loadModelNames() {
+  modelNames.codex = configValue("models.codexMain", "gpt-5.5");
   try {
     // 读取 Claude Code 配置文件 (~/.claude/settings.json)
     const p = path.join(USER_HOME, ".claude", "settings.json");
@@ -101,7 +103,7 @@ function loadModelNames() {
       const raw = fs.readFileSync(p, "utf-8");
       // 用正则提取 TOML 格式的 model = "xxx" 配置项
       const m = raw.match(/^model\s*=\s*"([^"]+)"/m);
-      if (m) modelNames.codex = m[1];
+      if (m && !configValue("models.codexMain", "")) modelNames.codex = m[1];
     }
   } catch {}
   // API 模式直接读取 config.json 中配置的模型名
@@ -333,23 +335,18 @@ function makeStreamHandler(onProc, flushChars) {
     }
   };
 }
-// 占位标记 —— 将在后续版本中被替换为实际实现
-
 // ═══════════════════════════════════════════════════════════════════
 // prepareTurnContext() —— 阶段 0+1：准备本轮对话上下文
 // ═══════════════════════════════════════════════════════════════════
 // 用途：
-//   1. 去重检查（failedTurn 逻辑）
-//   2. 解析 profile/turnProfile/isProfileChat
-//   3. 加载 memoryPrompt / roleWorld
-//   4. 调用 generateSceneletForTurn 生成 scenelet
-//   5. 构建日志基础设施（logEntry / logFile / txtLogFile / appendLog / writeTxtLog）
-//   6. 写初始日志
-//   7. 构建返回 ctx
+//   1. 解析 profile/turnProfile/isProfileChat
+//   2. 加载 memoryPrompt / roleWorld
+//   3. 调用 generateSceneletForTurn 生成 scenelet
+//   4. 构建本轮日志基础设施
 // 输入：ai/userId/sid/sessionName/body - 本轮基础信息
-//       styleState - 会话状态对象；failedTurn - 上一轮失败信息
-// 输出：Object | null — 上下文对象；null 表示去重拦截
-async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState, failedTurn) {
+//       styleState - 会话状态对象
+// 输出：本轮上下文对象
+async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState) {
   const turnStarted = Date.now();
   const rawProfile = sessionProfile(styleState);                // 获取会话绑定的角色名
   const turnProfile = rawProfile;
@@ -357,16 +354,6 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
   log("<", `[${sessionName}] ${body.slice(0, 80)}`);
   // 是否进入角色扮演聊天模式
   const isProfileChat = Boolean(turnProfile && profileTemplates[turnProfile] && turnProfile !== "默认");
-
-  // 去重检查：如果上一轮失败且 10 秒内收到完全相同的消息，跳过
-  if (failedTurn) {
-    const failedBody = failedTurn.body || "";
-    const failedAt = Date.parse(failedTurn.timestamp || "");
-    if (failedBody === body && failedAt && (turnStarted - failedAt < 10_000)) {
-      log("⏸", `[${sessionName}] dup blocked`);
-      return null;
-    }
-  }
 
   // 加载角色记忆文档，用于注入 AI 系统提示
   const memoryPrompt = isProfileChat ? (() => {
@@ -386,7 +373,7 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
   // 角色扮演模式下生成场景小剧场
   if (isProfileChat) {
     try {
-      sceneletResult = await generateSceneletForTurn({ userId, sess: styleState, profile: turnProfile, userBody: body, memoryPrompt });
+      sceneletResult = await generateSceneletForTurn({ ai, userId, sess: styleState, profile: turnProfile, userBody: body, memoryPrompt });
     } catch (e) {
       sceneletError = e.message;
       log("⚠", `[${sessionName}] scenelet fail: ${e.message}`);
@@ -438,12 +425,16 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
   let turnSucceeded = false;           // 本轮是否成功完成
   let assistantFullText = "";          // AI 生成的完整回复文本
   let toolUsage = emptyToolUsage();    // 本轮工具使用统计
+  let ragUsage = null;                 // 本轮 RAG 检索统计
   let lastUsage = null;                // 最后一次 API 用量数据
+  let activeSid = sid;                 // CC 会话失效并恢复时更新为新 SID
   const streamStartedAt = new Date().toISOString();  // 流式处理开始时间
 
   try {
     // 执行 RAG 知识库查询（仅角色扮演模式且无附件时）
-    const ragContext = RAG_ENABLED && !hasInboundAttachment(body) && isProfileChat && shouldUseRagForTurn(body, turnProfile) ? queryRag(body, turnProfile) : "";
+    const ragEligible = Boolean(RAG_ENABLED && !hasInboundAttachment(body) && isProfileChat && shouldUseRagForTurn(body, turnProfile));
+    const ragContext = ragEligible ? queryRag(body, turnProfile) : "";
+    ragUsage = { eligible: ragEligible, used: Boolean(ragContext), chars: ragContext.length };
     // 稳定风格提示
     const stableStyle = isProfileChat ? expressionCapabilityPrompt() : "";
     // 构建场景上下文块
@@ -451,7 +442,7 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
     if (sceneletResult) ctxParts.push(buildSceneContextBlock(styleState, sceneletResult));
     const sceneContext = ctxParts.join("\n\n---\n\n");
     // 场景记忆块（仅角色扮演模式的首轮）
-    const sceneMemoryBlock = (isProfileChat && firstTurn) ? getSceneMemorySystemBlock(roleWorld) : "";
+    const sceneMemoryBlock = (isProfileChat && firstTurn) ? getSceneMemorySystemBlock(roleWorld, ai) : "";
     // 组装发送给 AI 的完整消息体
     const turnBody = await buildTurnBody(body, ragContext, sceneContext, recentVisibleContext(styleState), sceneMemoryBlock);
 
@@ -463,118 +454,83 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
     // 创建流式处理器（管理 textBuf + flush 节流，消除 CC/Codex 重复代码）
     const streamHandler = makeStreamHandler(onProc, FLUSH_CHARS);
 
-    // ── 选择 AI 后端执行推理 ──
-    const streamResult = ai === "api"
-      // Direct API 模式：直接调用 Anthropic-compatible API
-      ? await (async () => {
-          const chatStyle = isProfileChat ? getChatStyle() : "";
-          const chatReality = isProfileChat ? formatLocalChatReality() : "";
-          const sysParts = [];
-          if (turnProfile && profileTemplates[turnProfile]) sysParts.push(profileTemplates[turnProfile]);
-          if (memoryPrompt) sysParts.push(memoryPrompt);
-          if (chatStyle) sysParts.push(chatStyle);
-          if (chatReality) sysParts.push(chatReality);
-          if (stableStyle) sysParts.push(stableStyle);
-          const sysPrompt = sysParts.join("\n\n---\n\n");
-          if (!styleState._apiMessages) styleState._apiMessages = [];
-          // API 上下文 = system prompt + 历史消息 + 当前用户消息
-          const messages = [
-            { role: "system", content: sysPrompt },
-            ...styleState._apiMessages,
-            { role: "user", content: turnBody },
-          ];
-          const apiRes = await runApiStream({ messages, sessionName, model: CLAUDE_MAIN_MODEL, useTools: isProfileChat });
-          if (apiRes.success && apiRes.text) {
-            assistantFullText = apiRes.text.trim();
-            // 只存储纯净的用户消息 + AI 回复供后续上下文使用
-            // turnBody 中包含 scenelet/memory/life-arcs，这些内容每轮都会重新生成，
-            // 存储完整的 turnBody 会污染上下文并造成模型困惑
-            styleState._apiMessages.push({ role: "user", content: body });
-            styleState._apiMessages.push({ role: "assistant", content: assistantFullText });
-            // 分块 flush 模拟流式输出体验
-            const chunkSize = isProfileChat ? 800 : 300;
-            let off = 0;
-            while (off < assistantFullText.length) {
-              const chunk = assistantFullText.slice(off, off + chunkSize);
-              onProc({ type: "flush", text: chunk });
-              off += chunkSize;
-            }
-            if (apiRes.usage) {
-              lastUsage = {
-                type: "api_usage",
-                model: CLAUDE_MAIN_MODEL,
-                session_id: sid,
-                started_at: streamStartedAt,
-                duration_ms: apiRes.durationMs || 0,
-                input_tokens: apiRes.usage.inputTokens || 0,
-                output_tokens: apiRes.usage.outputTokens || 0,
-              };
-            }
-            return { code: 0, text: assistantFullText };
-          }
-          return { code: -1, stderr: apiRes.error || "API call failed" };
-        })()
-      : ai === "cc"
-        // Claude Code 模式：通过 claude CLI 运行，事件驱动流式输出
-        ? await runClaudeStream(ai, sid, sessionName, turnBody, firstTurn, (event) => {
-            // 流式文本增量事件
-            if (event.type === "stream_event" && event.event?.type === "content_block_delta" && event.event.delta?.type === "text_delta") {
-              assistantFullText += event.event.delta.text;
-              streamHandler({ text: event.event.delta.text });
-            } else if (event.type === "assistant" && event.message?.content) {
-              // 非流式的 assistant 消息块（含文本和工具调用）
-              for (const block of event.message.content) {
-                if (block.type === "text") { assistantFullText += block.text; streamHandler({ text: block.text }); }
-                if (block.type === "tool_use") markToolUsage(toolUsage, block.name);  // 统计工具使用
-              }
-            }
-            // Token 用量统计
-            if (event.type === "assistant" && event.message?.usage) {
-              const u = event.message.usage;
-              lastUsage = {
-                type: "chat_usage",
-                model: event.message.model || "unknown",
-                session_id: sid,
-                started_at: streamStartedAt,
-                duration_ms: Date.now() - new Date(streamStartedAt).getTime(),
-                input_tokens: u.input_tokens || 0,
-                cache_read_input_tokens: u.cache_read_input_tokens || 0,
-                cache_creation_input_tokens: u.cache_creation_input_tokens || 0,
-                output_tokens: u.output_tokens || 0,
-              };
-            }
-            // 标记流式中出现的工具调用
-            if (event.type === "stream_event" && event.event?.type === "content_block_start" && event.event.content_block?.type === "tool_use") {
-              markToolUsage(toolUsage, event.event.content_block.name);
-            }
-          }, stableStyle, memoryPrompt, turnProfile, { routingBody: body, includeMemoryInSystem: true })
-        // Codex 模式：通过 codex CLI 运行
-        : await runCodexStream(ai, sid, sessionName, turnBody, firstTurn, (event) => {
-            if (event.type === "assistant" && event.message?.content) {
-              for (const block of event.message.content) {
-                if (block.type === "text") { assistantFullText += block.text; streamHandler({ text: block.text }); }
-                if (block.type === "tool_use") markToolUsage(toolUsage, block.name);  // 统计工具使用
-              }
-            }
-          }, ragContext, stableStyle, memoryPrompt, turnProfile, { routingBody: body });
+    const apiSystemParts = [];
+    if (turnProfile && profileTemplates[turnProfile]) apiSystemParts.push(profileTemplates[turnProfile]);
+    if (memoryPrompt) apiSystemParts.push(memoryPrompt);
+    if (isProfileChat && getChatStyle()) apiSystemParts.push(getChatStyle());
+    if (isProfileChat && formatLocalChatReality()) apiSystemParts.push(formatLocalChatReality());
+    if (stableStyle) apiSystemParts.push(stableStyle);
+    if (ai === "api" && !styleState._apiMessages) styleState._apiMessages = [];
+    const apiMessages = ai === "api" ? [
+      { role: "system", content: apiSystemParts.join("\n\n---\n\n") },
+      ...styleState._apiMessages,
+      { role: "user", content: turnBody },
+    ] : null;
 
-    // 保存进程引用（用于 /cancel 命令终止）
-    if (streamResult?.proc) styleState._lastProc = streamResult.proc;
+    const startChatAttempt = (sessionId, isFirstTurn) => startBackendChat({
+      backend: ai,
+      sessionId,
+      sessionName,
+      body: turnBody,
+      firstTurn: isFirstTurn,
+      stylePrompt: stableStyle,
+      memoryPrompt,
+      profile: turnProfile,
+      apiMessages,
+      useTools: isProfileChat,
+      onText: delta => {
+        assistantFullText += delta;
+        streamHandler({ text: delta });
+      },
+    });
+
+    let chatTask = startChatAttempt(activeSid, firstTurn);
+    styleState._lastProc = chatTask.proc || null;
+    let streamResult = await chatTask;
+    styleState._lastProc = null;
+    const missingCcSession = ai === "cc"
+      && streamResult?.code !== 0
+      && !assistantFullText
+      && !streamResult?.text
+      && /No conversation found with session ID/i.test(streamResult?.stderr || "");
+    if (missingCcSession) {
+      activeSid = uuid();
+      styleState.sid = activeSid;
+      styleState._firstTurn = true;
+      log("↻", `[${sessionName}] CC session missing; retrying with a new session`);
+      chatTask = startChatAttempt(activeSid, true);
+      styleState._lastProc = chatTask.proc || null;
+      streamResult = await chatTask;
+      styleState._lastProc = null;
+    }
+    if (!assistantFullText && streamResult?.text) assistantFullText = streamResult.text;
+    if (streamResult?.threadId && streamResult.threadId !== styleState.sid) styleState.sid = streamResult.threadId;
+    if (streamResult?.usage) {
+      lastUsage = {
+        ...streamResult.usage,
+        started_at: streamStartedAt,
+        duration_ms: Date.now() - new Date(streamStartedAt).getTime(),
+      };
+    }
+    toolUsage = mergeToolUsage(sceneletResult?.toolUsage, streamResult?.toolUsage);
+    if (ai === "api" && streamResult?.code === 0 && assistantFullText.trim()) {
+      styleState._apiMessages.push({ role: "user", content: body });
+      styleState._apiMessages.push({ role: "assistant", content: assistantFullText.trim() });
+    }
     // 检查 AI 后端是否成功返回
     if (streamResult?.code !== 0) throw new Error(`AI exited ${streamResult.code}${streamResult.stderr ? ": " + streamResult.stderr.slice(-500) : ""}`);
     // 清空缓冲区中剩余内容
     streamHandler({ drain: true });
 
     // 合并 streamResult 中的工具使用统计
-    const toolSummary = toolUsageFromUsage(streamResult?.toolUsage);
-    if (toolSummary) { toolUsage.webSearch += toolSummary.webSearch; toolUsage.webFetch += toolSummary.webFetch; for (const t of toolSummary.tools) { if (!toolUsage.tools.includes(t)) toolUsage.tools.push(t); } }
     appendLog({ ragChars: ragContext?.length || 0, toolUsage: { webSearch: toolUsage.webSearch, webFetch: toolUsage.webFetch, tools: toolUsage.tools } });
 
     // 发送最终回复给用户
     const t = (isProfileChat ? sanitizeVisibleReplyText(assistantFullText) : String(assistantFullText || "")).trim();
     if (t) {
+      const sent = await sendFinalAssistantMessage(userId, t, contextToken, prefix);
+      if (!sent) throw new Error("failed to send complete reply to WeChat");
       turnSucceeded = true;
-      await sendFinalAssistantMessage(userId, t, contextToken, prefix);
       const replyBytes = Buffer.byteLength(t, "utf-8");
       log(">", `[${sessionName}] (${replyBytes}B) ${t.slice(0, 60).replace(/\n/g, " ")}`);
       // 记录本轮工具使用摘要
@@ -588,12 +544,12 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
   } catch (e) {
     // 错误处理：记录失败、通知用户
     log("⚠", `[${sessionName}] turn failed: ${e.message}`);
-    styleState._lastFailedTurn = { body, timestamp: new Date().toISOString(), reason: e.message?.slice(0, 500), sid };
+    styleState._lastFailedTurn = { body, timestamp: new Date().toISOString(), reason: e.message?.slice(0, 500), sid: activeSid };
     await sendMessage(userId, `[系统提示] 回复失败：${e.message?.slice(0, 150)}`, contextToken).catch(() => {});
     appendLog({ error: e.message?.slice(0, 500) });
   }
 
-  return { turnSucceeded, assistantFullText, toolUsage, lastUsage };
+  return { turnSucceeded, assistantFullText, toolUsage, ragUsage, lastUsage };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -611,7 +567,7 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
 async function finalizeTurnSuccess(params) {
   const { userId, ai, sessionName, body, styleState, assistantFullText, contextToken,
     sceneletResult, sceneletError, turnProfile, isProfileChat, roleWorld,
-    toolUsage, lastUsage, appendLog, writeTxtLog } = params;
+    toolUsage, ragUsage, lastUsage, appendLog, writeTxtLog } = params;
 
   // 角色扮演模式下对回复文本做可见性清理（去除内部标记等）
   let cleanText = assistantFullText;
@@ -626,7 +582,7 @@ async function finalizeTurnSuccess(params) {
 
   // 将 scenelet 生成的 follow_up 候选写入 proactive intents
   if (sceneletResult?.followUpCandidates?.length) {
-    await addFollowUpCandidates(styleState, sceneletResult, body).catch(e => { log("⚠", `[${sessionName}] follow_up fail: ${e.message}`); });
+    await addFollowUpCandidates(styleState, sceneletResult, body, roleWorld).catch(e => { log("⚠", `[${sessionName}] follow_up fail: ${e.message}`); });
   }
 
   // 记录对话历史（用户消息和 AI 回复）
@@ -637,14 +593,14 @@ async function finalizeTurnSuccess(params) {
 
   // 持久化对话历史到数据库
   await recordChatHistory({ ai, userId, sess: styleState, role: "user", kind: "chat", text: body, timestamp: userAt });
-  await recordChatHistory({ ai, userId, sess: styleState, role: "assistant", kind: "chat", text: cleanText, scenelet: sceneletResult?.innerScenelet || "", sceneletStatus: sceneletResult ? "ok" : (sceneletError ? "error" : "skipped"), sceneletError: sceneletError || "", toolUsage, timestamp: assistantAt });
+  await recordChatHistory({ ai, userId, sess: styleState, role: "assistant", kind: "chat", text: cleanText, scenelet: sceneletResult?.innerScenelet || "", sceneletStatus: sceneletResult ? "ok" : (sceneletError ? "error" : "skipped"), sceneletError: sceneletError || "", toolUsage, ragUsage, timestamp: assistantAt });
 
   // 角色扮演模式的额外后处理
   if (isProfileChat && cleanText) {
     // 日程提取器：从本轮对话中提取潜在日程安排
     try {
       const activeSchedules = normalizeLifeArcs(roleWorld._lifeArcs).filter(a => a.status === "active" && a.kind);
-      const newCandidates = await runScheduleExtractor({ userBody: body, scenelet: sceneletResult?.innerScenelet || "", assistantReply: cleanText, profile: turnProfile, activeSchedules });
+      const newCandidates = await runScheduleExtractor({ ai, userBody: body, scenelet: sceneletResult?.innerScenelet || "", assistantReply: cleanText, profile: turnProfile, activeSchedules });
       if (newCandidates.length) {
         const existing = roleWorld._pendingScheduleCandidates || [];
         const existingTitles = new Set(existing.map(c => c.title));
@@ -666,22 +622,29 @@ async function finalizeTurnSuccess(params) {
       try {
         // 批量更新用户记忆
         const userMsgLog = styleState._userMessageLog || [];
-        await batchUpdateMemory({ userId, userMessages: userMsgLog, profile: turnProfile });
+        await batchUpdateMemory({ ai, userId, userMessages: userMsgLog, profile: turnProfile });
         styleState._userMessageLog = [];
         // 生成新场景记忆摘要
-        const summary = await generateSceneMemory({ userId, sess: styleState, profile: turnProfile, roleWorld });
+        const summary = await generateSceneMemory({ ai, userId, sess: styleState, profile: turnProfile, roleWorld });
         if (summary) {
-          setSceneMemory(roleWorld, summary);
+          setSceneMemory(roleWorld, summary, ai);
           // 重置会话 SID、首轮标志、回合计数器
           styleState.sid = uuid();
           styleState._firstTurn = true;
           styleState._turnCount = 0;
+          styleState._lastUsage = null;
           // 更新世界会话信息
-          const hw = ensureWorldSession(roleWorld);
-          hw.sid = uuid();
-          hw.firstTurn = true;
-          hw.startedAt = new Date().toISOString();
-          hw.resetReason = `auto-reset after ${threshold} turns`;
+          const resetAt = new Date().toISOString();
+          ensureWorldSession(roleWorld, ai);
+          const hw = roleWorld._worldSessions?.[ai];
+          if (hw) {
+            hw.sid = uuid();
+            hw.firstTurn = true;
+            hw.startedAt = resetAt;
+            hw.resetReason = `auto-reset after ${threshold} turns`;
+            hw.turnCount = 0;
+            hw.lastUsage = null;
+          }
           // 保留最近的 8 条可见历史，避免上下文过长
           styleState._visibleHistory = styleState._visibleHistory.slice(-8);
           // 裁剪 API 上下文到最近 8 轮（每轮 user+assistant 共 2 条）
@@ -716,15 +679,13 @@ async function finalizeTurnSuccess(params) {
 //   firstTurn   - 是否为本场景的第一轮对话
 //   onProc      - 流式输出回调函数 { type: "flush", text }
 //   styleState  - 会话状态对象（包含对话历史、角色、工具使用记录等）
-//   failedTurn  - 上一轮失败信息（用于防止重复失败重试），可选
 // 输出：无（副作用：发送微信消息、更新会话状态、记录日志）
-async function processTurn(ai, userId, sid, sessionName, body, contextToken, firstTurn, onProc, styleState, failedTurn = null) {
+async function processTurn(ai, userId, sid, sessionName, body, contextToken, firstTurn, onProc, styleState) {
   // 阶段 0+1：准备上下文
-  const ctx = await prepareTurnContext(ai, userId, sid, sessionName, body, styleState, failedTurn);
-  if (!ctx) return; // 去重拦截
+  const ctx = await prepareTurnContext(ai, userId, sid, sessionName, body, styleState);
 
   // 阶段 2+3+4：执行 AI 调用、发送回复、错误处理
-  const { turnSucceeded, assistantFullText, toolUsage, lastUsage } = await executeAICallAndSend(
+  const { turnSucceeded, assistantFullText, toolUsage, ragUsage, lastUsage } = await executeAICallAndSend(
     ai, userId, sid, sessionName, body, contextToken, firstTurn, onProc, styleState, ctx
   );
 
@@ -735,7 +696,7 @@ async function processTurn(ai, userId, sid, sessionName, body, contextToken, fir
       sceneletResult: ctx.sceneletResult, sceneletError: ctx.sceneletError,
       turnProfile: ctx.turnProfile, isProfileChat: ctx.isProfileChat,
       roleWorld: ctx.roleWorld,
-      toolUsage, lastUsage, appendLog: ctx.appendLog, writeTxtLog: ctx.writeTxtLog,
+      toolUsage, ragUsage, lastUsage, appendLog: ctx.appendLog, writeTxtLog: ctx.writeTxtLog,
     });
   }
 
@@ -765,7 +726,7 @@ async function sessionLoop(ai, userId, sessionId) {
       sess.busy = true;                                   // 标记会话为忙碌状态
       if (!currentSid || currentSid !== sess.sid) { currentSid = sess.sid; firstTurn = sess._firstTurn; }
       try {
-        await processTurn(ai, userId, currentSid, sess.name, body, contextToken, firstTurn, onProc, sess, sess._lastFailedTurn);
+        await processTurn(ai, userId, currentSid, sess.name, body, contextToken, firstTurn, onProc, sess);
         // 如果本轮成功（无失败记录），后续轮次不视为 firstTurn
         if (!sess._lastFailedTurn) { firstTurn = false; } else { currentSid = null; }
       } catch (e) {
@@ -812,11 +773,16 @@ function queueTurn(messageAI, userId, body, ctx, sessionId = null) {
 //   opts      - 可选参数：createSession（创建新会话）、profile（角色绑定）
 // 输出：Boolean - 是否成功入队
 function enqueueUserBody(messageAI, userId, body, ctx, opts = {}) {
-  // 去重检查：短时间内完全相同消息不重复处理
-  if (isDuplicateInput(userId, body)) { log("⏸", `dup ignored: ${body.slice(0, 60)}`); return false; }
   const ai = messageAI || activeAI;
   const sess = activeSession(userId, ai);
   if (!sess) return false;
+  // 平台重投的重复消息应忽略；上一轮明确失败时，允许同一正文立即重试一次。
+  const duplicate = isDuplicateInput(userId, body);
+  if (duplicate && sess._lastFailedTurn?.body !== body) {
+    log("⏸", `dup ignored: ${body.slice(0, 60)}`);
+    return false;
+  }
+  if (duplicate) sess._lastFailedTurn = null;
   // 可选：先创建新会话再入队
   if (opts.createSession) {
     const name = nextSessionName(userId, ai);
@@ -977,26 +943,32 @@ function startupCheck() {
   const warn = (label, detail = "") => checks.push({ ok: false, label, detail, critical: false });    // 警告（非致命）
   const fail = (label, detail = "") => checks.push({ ok: false, label, detail, critical: true });     // 严重（致命）
 
-  // 检查 Claude Code CLI 是否可用
-  if (commandExists(CLAUDE)) {
+  const claudeAvailable = commandExists(CLAUDE);
+  const codexAvailable = commandExists(CODEX);
+  const apiAvailable = isApiConfigured();
+
+  // Claude Code 和 Codex 都是可选入口；至少有一个 AI 后端可用即可启动聊天。
+  if (claudeAvailable) {
     pass("Claude Code", CLAUDE);
   } else {
-    fail("Claude Code", `${CLAUDE} 不存在`);
+    warn("Claude Code", `${CLAUDE} 不存在 (Claude Code 功能将不可用)`);
   }
 
-  // 检查 Codex CLI 是否可用（可选）
-  if (commandExists(CODEX)) {
+  if (codexAvailable) {
     pass("Codex", CODEX);
   } else {
     warn("Codex", `${CODEX} 不存在 (Codex 功能将不可用)`);
   }
 
   // 检查 Direct API 配置
-  if (isApiConfigured()) {
+  if (apiAvailable) {
     const { baseUrl, model } = resolveApiConfig();
     pass("Direct API", `${baseUrl} (${model})`);
   } else {
     warn("Direct API", "未配置 api.baseUrl/api.apiKey (/api 命令不可用，不影响 CC 使用)");
+  }
+  if (!claudeAvailable && !codexAvailable && !apiAvailable) {
+    fail("AI 后端", "Claude Code、Codex 和 Direct API 均不可用");
   }
 
   // 检查 Python 可用性（RAG 和文件提取依赖）
@@ -1128,7 +1100,7 @@ async function mainLoop() {
           log("⚠", `getupdates network (${transientFails} in a row)`);
           lastTransientLog = now;
         }
-        await sleep(Math.min(transientFails * 500, 8_000));  // 指数退避（最长 8 秒）
+        await sleep(Math.min(transientFails * 500, 8_000));  // 线性退避（最长 8 秒）
       } else {
         log("⚠", `getupdates fatal: ${e.message}`);
         await sleep(3_000);                                   // 永久错误等待 3 秒后重试
@@ -1186,7 +1158,7 @@ async function main() {
   // 以 API 模式启动时，为所有活跃会话加载历史上下文
   if (activeAI === "api") {
     try {
-      const store = sessions.cc;
+      const store = sessions.api;
       for (const [, u] of store) {
         const activeSess = u.list.find(s => s.id === u.activeId);
         if (activeSess && (!activeSess._apiMessages || activeSess._apiMessages.length === 0)) {
@@ -1231,7 +1203,7 @@ async function main() {
     }
   }
 
-  log("✓", `listening on WeChat (${activeAI === "cc" ? "CC" : "Codex"})`);
+  log("✓", `listening on WeChat (${activeAI === "cc" ? "CC" : activeAI === "api" ? "API" : "Codex"})`);
   // 启动主动意图检查定时器（每 15 秒检测是否需要主动向用户发送消息）
   const PROACTIVE_TIMER_MS = 15_000;
   setInterval(() => { checkProactiveIntents().catch(e => log("⚠️", `proactive check: ${e.message}`)); }, PROACTIVE_TIMER_MS).unref();

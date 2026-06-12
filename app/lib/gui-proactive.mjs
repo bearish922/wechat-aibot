@@ -36,13 +36,15 @@ function allLifeArcs(arcs = []) {
 
 export function registerProactiveRoutes() {
   addRoute("GET", "/api/proactive/intents", () => {
+    const seenProfiles = new Set();
     const result = [];
     for (const [ai, map] of Object.entries(sessions)) {
       for (const [, u] of map) {
         for (const s of u.list) {
-          const intents = uniqueIntents(s._proactiveIntents || []);
-          const rw = roleWorldForProfile(s._profile || "默认");
+          const profile = s._profile || "默认";
+          const rw = roleWorldForProfile(profile);
           const lifeArcs = allLifeArcs(rw?._lifeArcs || []);
+          const intents = uniqueIntents(rw?._proactiveIntents || []);
           if (!intents.length && !lifeArcs.length) continue;
           const scheduleCandidates = (rw?._pendingScheduleCandidates || []).map(c => ({
             title: c.title || "",
@@ -53,11 +55,14 @@ export function registerProactiveRoutes() {
             timeEnd: c.timeEnd || null,
             basis: c.basis || "",
           }));
+          // intents 已跨后端共享，同一 profile 只返回首条 session
+          if (seenProfiles.has(profile)) continue;
+          seenProfiles.add(profile);
           result.push({
             sessionId: s.id,
             sessionName: s.name,
             ai,
-            profile: s._profile || "default",
+            profile,
             active: s.id === u.activeId,
             busy: s.busy || false,
             lifeArcs,

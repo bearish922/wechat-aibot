@@ -44,11 +44,11 @@ export function registerHistoryRoutes() {
   });
 
   addRoute("PUT", "/api/history/:eventId", async ({ params, body }) => {
-    if (activeAI === "cc") return { error: "CC mode: context managed by Claude Code. Switch to /api first.", status: 403 };
+    if (activeAI !== "api") return { error: `${activeAI === "codex" ? "Codex" : "CC"} mode: context is managed by the backend. Switch to /api first.`, status: 403 };
     const ok = await updateChatEvent(params.eventId, { text: body?.text });
     if (!ok) return { error: "event not found", status: 404 };
     if (activeAI === "api" && body?.syncToApi) {
-      for (const [, u] of sessions.cc || new Map()) {
+      for (const [, u] of sessions.api || new Map()) {
         for (const s of u.list) {
           if (!s._apiMessages) continue;
           for (const m of s._apiMessages) {
@@ -61,11 +61,11 @@ export function registerHistoryRoutes() {
   });
 
   addRoute("DELETE", "/api/history/:eventId", async ({ params, body }) => {
-    if (activeAI === "cc") return { error: "CC mode: context managed by Claude Code. Switch to /api first.", status: 403 };
+    if (activeAI !== "api") return { error: `${activeAI === "codex" ? "Codex" : "CC"} mode: context is managed by the backend. Switch to /api first.`, status: 403 };
     const ok = await deleteChatEvent(params.eventId);
     if (!ok) return { error: "event not found", status: 404 };
     if (activeAI === "api" && body?.syncToApi) {
-      for (const [, u] of sessions.cc || new Map()) {
+      for (const [, u] of sessions.api || new Map()) {
         for (const s of u.list) {
           if (!s._apiMessages) continue;
           s._apiMessages = s._apiMessages.filter(m => m._eventId !== params.eventId);

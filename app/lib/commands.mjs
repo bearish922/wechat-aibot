@@ -32,7 +32,7 @@ export async function handleHelp(userId, ctx) {
     `/rename [序号|名称] <新名称>  重命名线程`,
     `/switch [序号|名称]  切换活跃线程`,
     `/sessions           查看所有线程`,
-    `/close [序号|名称]   关闭线程 (排空中)`,
+    `/close [序号|名称]   关闭线程`,
     `/cancel             取消当前运行的任务`,
     `/status             查看当前状态`,
     ``,
@@ -121,7 +121,7 @@ export async function handleNew(userId, body, ctx, messageAI) {
   }
   // 如果名称正好是已知角色模板名，自动绑定该角色
   const boundProfile = name === "默认" ? null : (profileTemplates[name] ? name : null);
-  const u = ensureUser(userId);
+  const u = ensureUser(userId, messageAI);
   const sess = makeSession(name, boundProfile);
   u.list.push(sess);
   u.activeId = sess.id;               // 新会话自动成为活跃会话
@@ -164,7 +164,7 @@ export async function handleRename(userId, body, ctx, messageAI) {
   const tokens = rest.split(/\s+/);
   const first = tokens[0];
   const numIdx = parseInt(first);
-  const u = ensureUser(userId);
+  const u = ensureUser(userId, messageAI);
   // 判断第一个 token 是数字序号还是名称
   const isNumRef = Number.isInteger(numIdx) && numIdx >= 1 && numIdx <= u.list.length;
   const isNameRef = u.list.some(s => s.name === first || s.name.includes(first));
@@ -286,10 +286,9 @@ export async function handleClose(userId, body, ctx) {
   const closedName = target.name;
   target._closing = true;              // 标记为关闭中
 
-  // 如果队列已空，立即从列表中移除
-  if (target.queue.length === 0) {
-    u.list.splice(targetIdx, 1);
-  }
+  // 切换 activeId 后旧 session loop 会停止，因此不能留下一个等待“排空”的孤立队列。
+  target.queue.length = 0;
+  u.list.splice(targetIdx, 1);
 
   // 确保用户至少有一个会话
   let autoCreated = null;
@@ -326,10 +325,11 @@ export async function handleStatus(userId, ctx) {
   const u = ensureUser(userId);
   const sess = activeSession(userId);
   const idx = u.list.indexOf(sess) + 1;
-  // 查看另一个 AI 后端的会话统计
-  const otherAI = activeAI === "cc" ? "codex" : "cc";
-  const otherMap = sessions[otherAI];
-  const otherCount = otherMap ? Array.from(otherMap.values()).reduce((s, u) => s + u.list.length, 0) : 0;
+  const backendLabels = { cc: "CC", codex: "Codex", api: "API" };
+  const backendCounts = Object.fromEntries(Object.entries(sessions).map(([backend, map]) => [
+    backend,
+    Array.from(map.values()).reduce((sum, user) => sum + user.list.length, 0),
+  ]));
   const profile = sessionProfile(sess);
   const status = sess.busy ? "⏳ 运行中" : sess.queue.length ? `排队 ${sess.queue.length}` : "空闲";
   await sendMessage(userId, [
@@ -341,7 +341,7 @@ export async function handleStatus(userId, ctx) {
     `状态:   ${status}`,
     `SID:    ${sess.sid}`,
     ``,
-    `${activeAI === "cc" ? "CC" : "Codex"} 线程数: ${u.list.length}  |  ${activeAI === "cc" ? "Codex" : "CC"} 线程数: ${otherCount}`,
+    Object.keys(backendLabels).map(backend => `${backendLabels[backend]}: ${backendCounts[backend] || 0}`).join("  |  "),
   ].join("\n"), ctx);
 }
 

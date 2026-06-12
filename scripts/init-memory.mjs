@@ -5,7 +5,7 @@ import { loadPrompts } from "../app/lib/reply.mjs";
 import { CLAUDE_MAIN_MODEL, runHiddenJson } from "../app/lib/claude-runner.mjs";
 import fs from "node:fs";
 
-const events = loadAllEvents();
+const events = await loadAllEvents();
 const userMessages = events
   .filter(e => e.role === "user" && e.text && e.sessionName === "cst")
   .map((e, i) => `[${i + 1}] ${e.timestamp?.slice(0, 16)} ${e.text}`);

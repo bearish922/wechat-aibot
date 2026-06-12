@@ -1,6 +1,6 @@
 import { loadSessions } from "../app/lib/session-store.mjs";
 import { sessions } from "../app/lib/state.mjs";
-import { getRoleWorld, loadRoleWorlds, saveRoleWorlds, syncRoleWorldToSession } from "../app/lib/world-state.mjs";
+import { getRoleWorld, loadRoleWorlds, saveRoleWorlds } from "../app/lib/world-state.mjs";
 import { maybeCreateScheduleEntry } from "../app/lib/turn.mjs";
 
 const profile = "白鹭千圣";
@@ -14,10 +14,11 @@ loadRoleWorlds();
 
 // 找白鹭千圣的 session
 let sess = null;
-for (const [, map] of Object.entries(sessions)) {
+let ai = null;
+for (const [backend, map] of Object.entries(sessions)) {
   for (const [, u] of map) {
     for (const s of u.list) {
-      if (s._profile === profile) { sess = s; break; }
+      if (s._profile === profile) { sess = s; ai = backend; break; }
     }
     if (sess) break;
   }
@@ -49,12 +50,11 @@ if (!candidates.length) {
 
 // 跳过间隔门 — 把 lastCheckAt 设为 0
 roleWorld._lastScheduleCheckAt = "2000-01-01T00:00:00.000Z";
-sess._lastScheduleCheckAt = "2000-01-01T00:00:00.000Z";
 saveRoleWorlds();
 
 console.log("\nTriggering maybeCreateScheduleEntry...\n");
 
-const changed = await maybeCreateScheduleEntry({ sess, profile });
+const changed = await maybeCreateScheduleEntry({ ai, sess, profile });
 
 console.log(`\nResult: ${changed ? "processed" : "skipped"}`);
 console.log(`Pending candidates remaining: ${(roleWorld._pendingScheduleCandidates || []).length}`);

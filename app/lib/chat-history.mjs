@@ -60,6 +60,8 @@ async function getDb() {
     _db.run(`CREATE INDEX IF NOT EXISTS idx_events_session_ts ON events(sessionKey, timestamp DESC)`);
     // 迁移：如果 sessionKey 是生成列(GENERATED ALWAYS)，重建为普通列
     migrateSessionKeyColumn(_db);
+    // 迁移：将 sessionKey 从 userId|sessionId 改为 userId|profile
+    migrateSessionKeyToProfile(_db);
     _dbReady = true;
     // 数据库为空且存在旧 JSON 文件时，执行数据迁移
     const cnt = _db.exec("SELECT COUNT(*) as c FROM events")[0]?.values[0]?.[0] || 0;
@@ -67,9 +69,60 @@ async function getDb() {
       migrateJsonToDb(_db);
       saveDb();
     }
+    if (backfillUsedRagFromLogs(_db) > 0) saveDb();
     return _db;
   })();
   return _dbInitPromise;
+}
+
+// 从旧运行日志回填明确发生过的 RAG 检索。只处理 ragChars > 0 的成功轮次，
+// 不猜测 ragChars=0 究竟是未触发还是检索无结果。
+export function backfillUsedRagFromLogs(db, logsDir = dataPath("logs")) {
+  if (!fs.existsSync(logsDir)) return 0;
+  const runs = [];
+  for (const file of fs.readdirSync(logsDir).filter(name => name.endsWith(".jsonl") && name !== "hidden-usage.jsonl")) {
+    try {
+      for (const line of fs.readFileSync(path.join(logsDir, file), "utf-8").split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        const item = JSON.parse(line);
+        if (item.error || !(Number(item.ragChars) > 0)) continue;
+        runs.push({ ...item, used: false });
+      }
+    } catch {}
+  }
+  if (!runs.length) return 0;
+  runs.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+
+  const res = db.exec("SELECT id,timestamp,userId,ai,sessionName,role,kind,text,ragUsage FROM events ORDER BY timestamp ASC");
+  if (!res.length) return 0;
+  const rows = res[0].values;
+  const users = new Map();
+  for (const row of rows) {
+    if (row[5] === "user" && row[6] === "chat") users.set(`${row[1]}|${row[2]}|${row[3]}|${row[4]}`, String(row[7] || ""));
+  }
+
+  let changed = 0;
+  for (const row of rows) {
+    if (row[5] !== "assistant" || row[6] !== "chat" || (row[8] && row[8] !== "{}")) continue;
+    const key = `${row[1]}|${row[2]}|${row[3]}|${row[4]}`;
+    const userText = users.get(key);
+    if (userText === undefined) continue;
+    const assistantMs = Date.parse(row[1]);
+    let match = null;
+    for (const run of runs) {
+      if (run.used || run.ai !== row[3] || run.userId !== row[2] || run.sessionName !== row[4]) continue;
+      const runMs = Date.parse(run.ts);
+      if (!Number.isFinite(runMs) || runMs > assistantMs || assistantMs - runMs > 30 * 60_000) continue;
+      if (Number(run.bodyChars) !== userText.length) continue;
+      if (!match || runMs > Date.parse(match.ts)) match = run;
+    }
+    if (!match) continue;
+    match.used = true;
+    db.run("UPDATE events SET ragUsage = ? WHERE id = ?", [JSON.stringify({ eligible: true, used: true, chars: Number(match.ragChars) }), row[0]]);
+    changed += db.getRowsModified();
+  }
+  if (changed) console.log("[chat-history] backfilled RAG usage rows:", changed);
+  return changed;
 }
 
 // 检查并迁移 sessionKey 从生成列变为普通列
@@ -135,6 +188,21 @@ function migrateSessionKeyColumn(db) {
   }
 }
 
+// 将 sessionKey 从 userId|sessionId 格式迁移到 userId|profile 格式
+function migrateSessionKeyToProfile(db) {
+  try {
+    const info = db.exec("SELECT COUNT(*) FROM events WHERE sessionKey != (userId || '|' || profile)");
+    const mismatched = info.length ? info[0].values[0][0] : 0;
+    if (!mismatched) return;
+    console.log(`[chat-history] migrating ${mismatched} sessionKey(s) to userId|profile...`);
+    db.run("UPDATE events SET sessionKey = userId || '|' || profile");
+    saveDb();
+    console.log("[chat-history] sessionKey migration to profile complete");
+  } catch (e) {
+    console.error("[chat-history] sessionKey->profile migration failed:", e.message);
+  }
+}
+
 // 写入 SQLite 数据库到磁盘: tmp -> bak -> copy
 function saveDb() {
   if (!_db) throw new Error("[chat-history] saveDb: _db is null");
@@ -187,7 +255,7 @@ function rowFromEvent(ev) {
     ev.ai || "cc",
     ev.sessionId || "",
     ev.sessionName || "",
-    [String(ev.userId || ""), ev.sessionId || ""].join("|"),
+    [String(ev.userId || ""), ev.profile || "默认"].join("|"),
     ev.profile || "默认",
     ev.role || "assistant",
     ev.kind || "chat",
@@ -302,9 +370,6 @@ export async function appendChatEvent(event) {
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, row);
   // 写入后立即持久化
   saveDb();
-  // 验证记录总数确保写入成功
-  const verify = db.exec("SELECT COUNT(*) FROM events")[0]?.values[0]?.[0] || 0;
-  console.log("[chat-history] wrote event", item.id.slice(-8), "role=" + item.role, "total=" + verify);
   return item;
 }
 
@@ -385,7 +450,7 @@ export async function listChatEvents(options = {}) {
         const sessionIds = [...new Set(needPairing.map(e => e.sessionId))];
         const ph = sessionIds.map(() => '?').join(',');
         const candRes = db.exec(
-          `SELECT * FROM events WHERE sessionId IN (${ph}) AND role IN ('user','assistant') AND kind != 'proactive' ORDER BY sessionId, timestamp ASC`,
+          `SELECT * FROM events WHERE sessionId IN (${ph}) AND role IN ('user','assistant') AND kind != 'proactive' ORDER BY sessionId, timestamp ASC, CASE WHEN role='user' THEN 0 ELSE 1 END`,
           sessionIds
         );
         const bySession = {};
@@ -400,12 +465,12 @@ export async function listChatEvents(options = {}) {
           const msgs = bySession[ev.sessionId];
           if (!msgs) continue;
           if (ev.role === "user") {
-            const partner = msgs.find(m => m.role === "assistant" && m.timestamp > ev.timestamp);
+            const partner = msgs.find(m => m.role === "assistant" && m.timestamp >= ev.timestamp);
             if (partner && !pairedIds.has(partner.id)) { pairedIds.add(partner.id); toAdd.push(partner); }
           } else {
             let partner = null;
             for (let i = msgs.length - 1; i >= 0; i--) {
-              if (msgs[i].role === "user" && msgs[i].timestamp < ev.timestamp) { partner = msgs[i]; break; }
+              if (msgs[i].role === "user" && msgs[i].timestamp <= ev.timestamp) { partner = msgs[i]; break; }
             }
             if (partner && !pairedIds.has(partner.id)) { pairedIds.add(partner.id); toAdd.push(partner); }
           }
@@ -448,7 +513,23 @@ export async function listConversations(options = {}) {
 
   // 按 sessionKey 分组聚合: MAX(timestamp) 获取最后活跃时间，COUNT(*) 获取消息总数
   // 子查询获取该会话最后一条消息的文本
-  const res = db.exec(`SELECT sessionKey, ai, userId, sessionId, sessionName, profile, MAX(timestamp) as lastTs, COUNT(*) as cnt, SUM(CASE WHEN scenelet != '' THEN 1 ELSE 0 END) as sceneletCnt, (SELECT text FROM events e2 WHERE e2.sessionKey = e1.sessionKey ORDER BY e2.timestamp DESC LIMIT 1) as lastText FROM events e1 ${where} GROUP BY sessionKey ORDER BY lastTs DESC`, params);
+  // sessionKey is role-level, so sessionId/sessionName/ai must come from the latest row,
+  // not SQLite's arbitrary non-grouped row.
+  const latestOrder = "ORDER BY e2.timestamp DESC, CASE WHEN e2.role='assistant' THEN 0 ELSE 1 END LIMIT 1";
+  const res = db.exec(`SELECT
+    e1.sessionKey,
+    (SELECT e2.ai FROM events e2 WHERE e2.sessionKey = e1.sessionKey ${latestOrder}) as ai,
+    e1.userId,
+    (SELECT e2.sessionId FROM events e2 WHERE e2.sessionKey = e1.sessionKey ${latestOrder}) as sessionId,
+    (SELECT e2.sessionName FROM events e2 WHERE e2.sessionKey = e1.sessionKey ${latestOrder}) as sessionName,
+    e1.profile,
+    MAX(e1.timestamp) as lastTs,
+    COUNT(*) as cnt,
+    SUM(CASE WHEN e1.scenelet != '' THEN 1 ELSE 0 END) as sceneletCnt,
+    (SELECT e2.text FROM events e2 WHERE e2.sessionKey = e1.sessionKey ${latestOrder}) as lastText
+    FROM events e1 ${where}
+    GROUP BY e1.sessionKey
+    ORDER BY lastTs DESC`, params);
   if (!res.length) return [];
   return res[0].values.map(row => ({
     key: row[0],
@@ -462,12 +543,4 @@ export async function listConversations(options = {}) {
     sceneletCount: row[8] || 0,
     lastText: row[9] || "",
   }));
-}
-
-// 根据事件对象生成会话唯一标识(sessionKey)
-// 会话由 userId + sessionId 唯一确定，AI 后端(cc/codex)不创建独立会话线程
-// 参数: event - 事件对象(含 userId 和 sessionId)
-// 返回: "userId|sessionId" 格式的会话 key
-export function conversationKey(event) {
-  return [event.userId || "", event.sessionId || ""].join("|");
 }

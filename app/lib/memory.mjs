@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { dataPath, ensureDir, PROJECT_ROOT } from "./paths.mjs";
 import { loadPrompts } from "./reply.mjs";
-import { CLAUDE_MAIN_MODEL, runHiddenCall } from "./claude-runner.mjs";
+import { backendModel, runBackendStructured } from "./backend-adapter.mjs";
 
 // 长期记忆文档的主文件路径(wechat-memory.md)
 export const MEMORY_FILE = dataPath("wechat-memory.md");
@@ -55,7 +55,7 @@ export function saveMemoryDocument(text) {
 // 调用 LLM 根据用户最近消息更新长期记忆文档(Markdown 格式)
 // 参数: userMessages - 用户最近消息文本数组
 // 返回: 更新后的记忆文档完整文本
-export async function updateMemoryDocument(userMessages) {
+export async function updateMemoryDocument(userMessages, backend = "cc") {
   const msgs = (userMessages || []).filter(Boolean);
   // 无消息时不更新
   if (!msgs.length) return loadMemoryDocument();
@@ -75,14 +75,15 @@ export async function updateMemoryDocument(userMessages) {
     "用户最近的消息（按时间顺序）：",
     msgs.map((m, i) => `[${i + 1}] ${m}`).join("\n\n"),
     "",
-    "请输出更新后的完整 Markdown 文档（不要 JSON，直接输出 Markdown）：",
+    "请只输出 JSON：{\"result\":\"更新后的完整 Markdown 文档\"}",
   ].join("\n");
 
   // 调用隐藏 LLM 生成更新后的记忆文档(bare=false 获取原始文本)
-  const raw = await runHiddenCall(input, {
+  const raw = await runBackendStructured(input, {
+    backend,
     label: "memory_update",
     bare: false,
-    model: CLAUDE_MAIN_MODEL,
+    model: backendModel(backend),
     timeoutMs: 120000,
   });
 
@@ -123,7 +124,7 @@ export function saveWorldMemoryDocument(text) {
   fs.renameSync(tmp, WORLD_MEMORY_FILE);
 }
 
-// ─── legacy API (kept for bot commands) ─────────────────────
+// ─── compatibility helpers used by the turn pipeline and eval scripts ───
 
 // 检查记忆功能是否启用(始终返回 true，保留接口兼容性)
 export function isMemoryEnabled() {
@@ -146,12 +147,4 @@ export function memoryItemsText() {
   const doc = loadMemoryDocument();
   if (!doc) return "";
   return doc;
-}
-
-// 获取格式化的记忆列表展示文本(带标题和长度信息)
-// 返回: 格式化的记忆展示字符串
-export function memoryListText() {
-  const doc = loadMemoryDocument();
-  if (!doc) return "暂无记忆记录。";
-  return `当前记忆文档 (${doc.length} 字符)：\n\n${doc}`;
 }

@@ -1,10 +1,10 @@
 import { addRoute } from "./server.mjs";
 import { sessions, activeAI } from "./state.mjs";
 
-function hiddenWorldForProfile(profile) {
+function hiddenWorldForProfile(profile, ai) {
   const worlds = globalThis.__wechatRoleWorlds;
   const world = worlds?.get?.(profile || "默认");
-  return world?._worldSession || null;
+  return world?._worldSessions?.[ai] || null;
 }
 
 export function registerSessionRoutes() {
@@ -23,7 +23,7 @@ export function registerSessionRoutes() {
             queue: s.queue?.length || 0,
             profile: s._profile || "默认",
             firstTurn: s._firstTurn,
-            hiddenWorld: hiddenWorldForProfile(s._profile || "默认"),
+            hiddenWorld: hiddenWorldForProfile(s._profile || "默认", ai),
           });
         }
       }
@@ -38,18 +38,18 @@ export function registerSessionRoutes() {
     lines.push(`# ${new Date().toLocaleString("zh-CN")}`);
     lines.push("");
     for (const [ai, map] of Object.entries(sessions)) {
-      const aiLabel = ai === "cc" ? "Claude Code" : "Codex";
+      const aiLabel = ai === "cc" ? "Claude Code" : ai === "api" ? "Direct API" : "Codex";
       lines.push(`## ${aiLabel}`);
       for (const [, u] of map) {
         for (const s of u.list) {
           const active = s.id === u.activeId ? " [当前]" : "";
           const profile = s._profile || "默认";
-          const hiddenWorld = hiddenWorldForProfile(profile);
-          const command = ai === "cc" ? `claude --resume ${s.sid}` : `codex resume ${s.sid}`;
+          const hiddenWorld = hiddenWorldForProfile(profile, ai);
+          const command = ai === "cc" ? `claude --resume ${s.sid}` : ai === "codex" ? `codex resume ${s.sid}` : "API context is stored in wechat-sessions.json";
           lines.push(`  ${s.name}${active}`);
           lines.push(`    角色: ${profile}`);
           lines.push(`    ${command}`);
-          if (hiddenWorld?.sid) lines.push(`    Hidden world: claude --resume ${hiddenWorld.sid}`);
+          if (hiddenWorld?.sid && ai !== "api") lines.push(`    Hidden world: ${ai === "cc" ? "claude --resume" : "codex resume"} ${hiddenWorld.sid}`);
           commands.push({
             ai,
             aiLabel,

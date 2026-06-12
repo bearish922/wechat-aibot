@@ -3,10 +3,10 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn, spawnSync, execSync } from "node:child_process";
 import { configValue, envOrConfig, configBool, configNumber } from "./config.mjs";
-import { DATA_DIR, RUNTIME_DIR, appPath, dataPath, ensureDir, rootPath } from "./paths.mjs";
+import { RUNTIME_DIR, dataPath, ensureDir } from "./paths.mjs";
 import { log } from "./utils.mjs";
 import { loadPrompts } from "./reply.mjs";
-import { activeAI, profileTemplates } from "./state.mjs";
+import { profileTemplates } from "./state.mjs";
 import { apiChatStream, apiChatJson, apiChatWithTools, isApiConfigured, resolveApiConfig } from "./api-client.mjs";
 
 const USER_HOME = process.env.USERPROFILE || process.env.HOME || process.cwd();
@@ -146,6 +146,8 @@ const CODEX_HTTPS_PROXY = envOrConfig("WECHAT_CODEX_HTTPS_PROXY", "proxy.codexHt
 const CLAUDE_MAIN_MODEL = envOrConfig("WECHAT_CLAUDE_MAIN_MODEL", "models.claudeMain", "deepseek-v4-pro[1m]");
 const CLAUDE_FAST_MODEL = envOrConfig("WECHAT_CLAUDE_FAST_MODEL", "models.claudeFast", "deepseek-v4-flash[1m]");
 const CLAUDE_FALLBACK_MODEL = envOrConfig("WECHAT_CLAUDE_FALLBACK_MODEL", "models.claudeFallback", "deepseek-v4-pro[1m]");
+const CODEX_MAIN_MODEL = usableConfigString(envOrConfig("WECHAT_CODEX_MAIN_MODEL", "models.codexMain", "gpt-5.5"), "gpt-5.5");
+const CODEX_REASONING_EFFORT = usableConfigString(envOrConfig("WECHAT_CODEX_REASONING_EFFORT", "models.codexReasoningEffort", "high"), "high");
 const SCENELET_BARE = configBool("scene.sceneletBare", false);
 const CLAUDE_TIMEOUT_MS = configNumber("timeouts.aiMs", 600_000);
 const LOGS_DIR = dataPath("logs");
@@ -270,8 +272,12 @@ function toolUsageFromUsage(raw = null) {
   // 获取 server 侧的工具使用子对象
   const server = usage.server_tool_use || {};
   const result = emptyToolUsage();
-  // 汇总 WebSearch 请求数，兼容多种字段命名
-  result.webSearch += Number(server.web_search_requests || usage.web_search_requests || usage.webSearchRequests || 0) || 0;
+  // 汇总 WebSearch 请求数，兼容顶层 usage 和按模型拆分的 modelUsage。
+  const directWebSearch = Number(server.web_search_requests || usage.web_search_requests || usage.webSearchRequests || 0) || 0;
+  const modelWebSearch = raw?.modelUsage && typeof raw.modelUsage === "object"
+    ? Object.values(raw.modelUsage).reduce((sum, item) => sum + (Number(item?.webSearchRequests || 0) || 0), 0)
+    : 0;
+  result.webSearch = Math.max(directWebSearch, modelWebSearch);
   // 汇总 WebFetch 请求数，兼容多种字段命名
   result.webFetch += Number(server.web_fetch_requests || usage.web_fetch_requests || usage.webFetchRequests || 0) || 0;
   // 根据计数决定是否将对应工具名加入列表
@@ -453,6 +459,7 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
         duration_ms: Date.now() - startedMs,
         success: true,
         output_chars: String(content || "").length,
+        toolUsage: parsed._toolUsage,
         ...parsed._hiddenUsage,
       };
       // 将成功的调用写入用量日志
@@ -495,7 +502,7 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
   if (profile && profileTemplates[profile]) systemPromptParts.push(profileTemplates[profile]);
   // 2) 记忆上下文（仅在显式配置为纳入系统提示时添加）
   if (memoryPrompt && options.includeMemoryInSystem === true) systemPromptParts.push(memoryPrompt);
-  // 4) 风格提示词（默认包含，除非显式设为 false）
+  // 3) 风格提示词（默认包含，除非显式设为 false）
   if (stylePrompt && options.includeStyleInSystem !== false) systemPromptParts.push(stylePrompt);
   // 如果有系统提示内容，写入临时文件
   const systemPromptFile = systemPromptParts.length
@@ -620,23 +627,10 @@ function buildRagContextBlock(ragContext) {
 //   userBody - 用户消息正文
 //   ragContext - RAG 检索结果（可选）
 //   stylePrompt - 风格提示词
-//   memoryPrompt - 记忆上下文（当前未使用，保留用于未来扩展）
 //   profileOverride - 角色配置文件覆盖
 // 返回: 拼接完成的完整提示文本
-function buildCodexPrompt(ai, userBody, ragContext, stylePrompt, memoryPrompt = "", profileOverride = null) {
-  const profile = profileOverride;
-  // 收集系统提示组件
-  const systemParts = [];
-  // 1) 角色模板
-  if (profile && profileTemplates[profile]) {
-    systemParts.push(profileTemplates[profile]);
-  }
-  // 2) 长期记忆
-  if (memoryPrompt) systemParts.push(memoryPrompt);
-  // 3) 风格提示词
-  if (stylePrompt) systemParts.push(stylePrompt);
-  // 将系统提示与用户消息用 --- 分隔拼接
-  let prompt = systemParts.length ? `${systemParts.join("\n\n---\n\n")}\n\n---\n\n${userBody}` : userBody;
+function buildCodexPrompt(ai, userBody, ragContext) {
+  let prompt = userBody;
   // 如果有 RAG 检索结果，将其作为最高优先级的上下文块前置
   if (ragContext) {
     prompt = [
@@ -648,6 +642,363 @@ function buildCodexPrompt(ai, userBody, ragContext, stylePrompt, memoryPrompt = 
     ].join("\n");
   }
   return prompt;
+}
+
+function codexTomlString(value) {
+  return JSON.stringify(String(value || ""));
+}
+
+function codexSystemPrompt(stylePrompt, memoryPrompt = "", profileOverride = null) {
+  const parts = [];
+  if (profileOverride && profileTemplates[profileOverride]) parts.push(profileTemplates[profileOverride]);
+  if (memoryPrompt) parts.push(memoryPrompt);
+  if (stylePrompt) parts.push(stylePrompt);
+  return parts.join("\n\n---\n\n");
+}
+
+function codexUsageSummary(usage = null) {
+  if (!usage || typeof usage !== "object") return null;
+  return {
+    input_tokens: Number(usage.input_tokens || 0) || 0,
+    cache_read_input_tokens: Number(usage.cached_input_tokens || usage.cache_read_input_tokens || 0) || 0,
+    cache_creation_input_tokens: 0,
+    output_tokens: Number(usage.output_tokens || 0) || 0,
+    reasoning_output_tokens: Number(usage.reasoning_output_tokens || 0) || 0,
+  };
+}
+
+function codexToolName(item = null) {
+  const type = String(item?.type || "");
+  if (type === "web_search" || type === "webSearch") return "WebSearch";
+  if (type === "mcp_tool_call" || type === "mcpToolCall") return item?.tool || item?.name || "MCP";
+  if (type === "command_execution" || type === "commandExecution") return "Shell";
+  if (type === "dynamic_tool_call" || type === "dynamicToolCall") return item?.tool || "DynamicTool";
+  return "";
+}
+
+function createCodexEventState(sessionId = "") {
+  return {
+    threadId: sessionId || "",
+    text: "",
+    usage: null,
+    toolUsage: emptyToolUsage(),
+  };
+}
+
+function reduceCodexEvent(state, event) {
+  if (event?.type === "thread.started" && event.thread_id) state.threadId = String(event.thread_id);
+  if (event?.type === "item.completed") {
+    const item = event.item || {};
+    if ((item.type === "agent_message" || item.type === "agentMessage") && item.text) state.text += String(item.text);
+    const tool = codexToolName(item);
+    if (tool) {
+      if (!state.toolUsage.tools.includes(tool)) state.toolUsage.tools.push(tool);
+      if (tool === "WebSearch") state.toolUsage.webSearch += 1;
+    }
+  }
+  if (event?.type === "turn.completed") state.usage = codexUsageSummary(event.usage);
+  return state;
+}
+
+function codexAppServerUsage(tokenUsage = null) {
+  const last = tokenUsage?.last || {};
+  const total = tokenUsage?.total || {};
+  return {
+    input_tokens: Number(last.inputTokens || 0) || 0,
+    cache_read_input_tokens: Number(last.cachedInputTokens || 0) || 0,
+    cache_creation_input_tokens: 0,
+    output_tokens: Number(last.outputTokens || 0) || 0,
+    reasoning_output_tokens: Number(last.reasoningOutputTokens || 0) || 0,
+    total_input_tokens: Number(total.inputTokens || 0) || 0,
+    total_output_tokens: Number(total.outputTokens || 0) || 0,
+    model_context_window: Number(tokenUsage?.modelContextWindow || 0) || 0,
+  };
+}
+
+function runCodexAppServer(prompt, {
+  sessionId = "",
+  persist = true,
+  systemPrompt = "",
+  model = "",
+  allowWebSearch = false,
+  timeoutMs = CLAUDE_TIMEOUT_MS,
+  onEvent = () => {},
+} = {}) {
+  const args = ["app-server", "--listen", "stdio://"];
+  const codexCommand = /\.js$/i.test(CODEX) ? NODE : CODEX;
+  const codexArgs = /\.js$/i.test(CODEX) ? [CODEX, ...args] : args;
+  const proc = spawnCli(codexCommand, codexArgs, {
+    cwd: AI_WORK_DIR,
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: envWithProxy(CODEX_HTTPS_PROXY),
+  });
+  proc.stdin.on("error", () => {});
+
+  let nextRequestId = 1;
+  let stdoutBuf = "";
+  let stderrOut = "";
+  let threadId = sessionId || "";
+  let turnId = "";
+  let text = "";
+  let usage = null;
+  let completed = false;
+  let timedOut = false;
+  let settled = false;
+  const toolUsage = emptyToolUsage();
+  const pending = new Map();
+
+  const send = message => proc.stdin.write(`${JSON.stringify(message)}\n`, "utf8");
+  const notify = (method, params = {}) => send({ method, params });
+  const request = (method, params = {}) => new Promise((resolve, reject) => {
+    const id = nextRequestId++;
+    pending.set(id, { resolve, reject });
+    send({ id, method, params });
+  });
+
+  let resolveResult;
+  const promise = new Promise(resolve => { resolveResult = resolve; });
+  promise.proc = proc;
+
+  const finish = (code, error = "") => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    for (const waiter of pending.values()) waiter.reject(new Error(error || "Codex app-server stopped"));
+    pending.clear();
+    resolveResult({
+      code,
+      stderr: error || stderrOut,
+      killed: proc.killed,
+      timedOut,
+      threadId,
+      text,
+      usage,
+      toolUsage,
+    });
+    if (proc.exitCode === null && proc.pid) killProc(proc);
+  };
+
+  const handleNotification = message => {
+    const method = message?.method;
+    const params = message?.params || {};
+    if (method === "item/agentMessage/delta" && params.threadId === threadId) {
+      const delta = String(params.delta || "");
+      text += delta;
+      onEvent(message);
+      return;
+    }
+    if (method === "item/completed" && params.threadId === threadId) {
+      const item = params.item || {};
+      if (!text && item.type === "agentMessage" && item.text) text = String(item.text);
+      const tool = codexToolName(item);
+      if (tool) {
+        if (!toolUsage.tools.includes(tool)) toolUsage.tools.push(tool);
+        if (tool === "WebSearch") toolUsage.webSearch += 1;
+      }
+      onEvent(message);
+      return;
+    }
+    if (method === "thread/tokenUsage/updated" && params.threadId === threadId) {
+      usage = codexAppServerUsage(params.tokenUsage);
+      onEvent(message);
+      return;
+    }
+    if (method === "turn/completed" && params.threadId === threadId) {
+      if (turnId && params.turn?.id && params.turn.id !== turnId) return;
+      completed = true;
+      const status = params.turn?.status || "completed";
+      const error = params.turn?.error?.message || (status === "completed" ? "" : `Codex turn ${status}`);
+      finish(status === "completed" ? 0 : -1, error);
+      return;
+    }
+    onEvent(message);
+  };
+
+  const handleMessage = message => {
+    if (Object.prototype.hasOwnProperty.call(message || {}, "id")) {
+      const waiter = pending.get(message.id);
+      if (!waiter) return;
+      pending.delete(message.id);
+      if (message.error) waiter.reject(new Error(message.error.message || JSON.stringify(message.error)));
+      else waiter.resolve(message.result || {});
+      return;
+    }
+    handleNotification(message);
+  };
+
+  proc.stdout.on("data", chunk => {
+    stdoutBuf += chunk;
+    const lines = stdoutBuf.split("\n");
+    stdoutBuf = lines.pop();
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try { handleMessage(JSON.parse(line)); } catch {}
+    }
+  });
+  proc.stderr.on("data", chunk => {
+    stderrOut += chunk;
+    if (stderrOut.length > 5000) stderrOut = stderrOut.slice(-5000);
+  });
+  proc.on("error", error => finish(-1, error.message));
+  proc.on("close", code => {
+    if (stdoutBuf.trim()) { try { handleMessage(JSON.parse(stdoutBuf)); } catch {} }
+    if (!settled) finish(completed ? 0 : (code ?? -1), stderrOut || "Codex app-server exited before turn completion");
+  });
+
+  const timer = setTimeout(() => {
+    timedOut = true;
+    finish(-1, `Codex app-server timed out after ${timeoutMs}ms`);
+  }, timeoutMs);
+
+  (async () => {
+    try {
+      await request("initialize", {
+        clientInfo: { name: "weixin-aibot", title: "Weixin AI Bot", version: "1" },
+        capabilities: { experimentalApi: true },
+      });
+      notify("initialized");
+
+      const threadParams = {
+        model: model || CODEX_MAIN_MODEL,
+        cwd: AI_WORK_DIR,
+        approvalPolicy: "never",
+        sandbox: "read-only",
+        developerInstructions: systemPrompt || null,
+        config: {
+          web_search: allowWebSearch ? "live" : "disabled",
+          tools: { web_search: allowWebSearch },
+        },
+      };
+      let threadResult;
+      if (sessionId) {
+        try {
+          threadResult = await request("thread/resume", { ...threadParams, threadId: sessionId });
+        } catch {
+          threadResult = await request("thread/start", { ...threadParams, ephemeral: !persist });
+        }
+      } else {
+        threadResult = await request("thread/start", { ...threadParams, ephemeral: !persist });
+      }
+      threadId = String(threadResult?.thread?.id || sessionId || "");
+      if (!threadId) throw new Error("Codex app-server did not return a thread id");
+
+      const turnResult = await request("turn/start", {
+        threadId,
+        input: [{ type: "text", text: String(prompt || "") }],
+        model: model || CODEX_MAIN_MODEL,
+        effort: CODEX_REASONING_EFFORT || null,
+      });
+      turnId = String(turnResult?.turn?.id || "");
+    } catch (error) {
+      finish(-1, error.message);
+    }
+  })();
+
+  return promise;
+}
+
+function buildCodexExecArgs({ sessionId = "", persist = true, systemPrompt = "", model = "", allowWebSearch = false, outputSchemaFile = "" } = {}) {
+  const args = ["-a", "never", "-s", "read-only"];
+  if (allowWebSearch) args.push("--search");
+  if (model) args.push("-m", model);
+  if (CODEX_REASONING_EFFORT) args.push("-c", `model_reasoning_effort=${codexTomlString(CODEX_REASONING_EFFORT)}`);
+  if (systemPrompt) args.push("-c", `developer_instructions=${codexTomlString(systemPrompt)}`);
+  args.push("exec");
+  if (sessionId) args.push("resume", sessionId);
+  args.push("--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules");
+  if (!persist) args.push("--ephemeral");
+  if (outputSchemaFile) args.push("--output-schema", outputSchemaFile);
+  args.push("-");
+  return args;
+}
+
+function runCodexExec(prompt, {
+  sessionId = "",
+  persist = true,
+  systemPrompt = "",
+  model = "",
+  allowWebSearch = false,
+  outputSchema = null,
+  timeoutMs = CLAUDE_TIMEOUT_MS,
+  onEvent = () => {},
+} = {}) {
+  const schemaFile = outputSchema
+    ? path.join(RUNTIME_DIR, `.codex_schema_${crypto.randomUUID()}.json`)
+    : "";
+  if (schemaFile) {
+    ensureDir(RUNTIME_DIR);
+    fs.writeFileSync(schemaFile, JSON.stringify(outputSchema), "utf-8");
+  }
+  const args = buildCodexExecArgs({
+    sessionId,
+    persist,
+    systemPrompt,
+    model: model || CODEX_MAIN_MODEL,
+    allowWebSearch,
+    outputSchemaFile: schemaFile,
+  });
+  const codexCommand = /\.js$/i.test(CODEX) ? NODE : CODEX;
+  const codexArgs = /\.js$/i.test(CODEX) ? [CODEX, ...args] : args;
+  const proc = spawnCli(codexCommand, codexArgs, {
+    cwd: AI_WORK_DIR,
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: envWithProxy(CODEX_HTTPS_PROXY),
+  });
+  proc.stdin.on("error", () => {});
+  proc.stdin.end(prompt, "utf8");
+
+  let buf = "";
+  let stderrOut = "";
+  const eventState = createCodexEventState(sessionId);
+  let resolved = false;
+  let timedOut = false;
+
+  const handleEvent = (event) => {
+    reduceCodexEvent(eventState, event);
+    onEvent(event);
+  };
+
+  proc.stdout.on("data", d => {
+    buf += d;
+    const lines = buf.split("\n");
+    buf = lines.pop();
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try { handleEvent(JSON.parse(trimmed)); } catch {}
+    }
+  });
+  proc.stderr.on("data", d => {
+    stderrOut += d;
+    if (stderrOut.length > 5000) stderrOut = stderrOut.slice(-5000);
+  });
+
+  let timer = null;
+  const promise = new Promise(resolve => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      killProc(proc);
+    }, timeoutMs);
+    proc.on("close", code => {
+      clearTimeout(timer);
+      if (schemaFile) { try { fs.rmSync(schemaFile, { force: true }); } catch {} }
+      if (resolved) return;
+      resolved = true;
+      if (buf.trim()) { try { handleEvent(JSON.parse(buf.trim())); } catch {} }
+      resolve({ code, stderr: stderrOut, killed: proc.killed, timedOut, ...eventState });
+    });
+    proc.on("error", e => {
+      clearTimeout(timer);
+      if (schemaFile) { try { fs.rmSync(schemaFile, { force: true }); } catch {} }
+      if (resolved) return;
+      resolved = true;
+      resolve({ code: -1, stderr: e.message, killed: false, timedOut, ...eventState });
+    });
+  });
+  promise.proc = proc;
+  return promise;
 }
 
 // runCodexStream - 以流式 JSON 模式启动 OpenAI Codex CLI 进行对话
@@ -666,89 +1017,67 @@ function buildCodexPrompt(ai, userBody, ragContext, stylePrompt, memoryPrompt = 
 //   options - 额外选项（如 noSessionPersistence）
 // 返回: Promise，resolve 时返回 { code, stderr, killed }；promise 上挂载 .proc 引用
 function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragContext, stylePrompt, memoryPrompt = "", profileOverride = null, options = {}) {
-  // 构建完整的提示文本（包含系统提示、RAG 上下文和用户消息）
-  const prompt = buildCodexPrompt(ai, body, ragContext, stylePrompt, memoryPrompt, profileOverride);
-  let args;
-  if (options.noSessionPersistence || firstTurn) {
-    // 无持久化或首轮：新建执行，从 stdin（-）读取 prompt
-    args = [
-      "exec",
-      "--json",
-      "--skip-git-repo-check",
-      "--cd", AI_WORK_DIR,
-      "--sandbox", "workspace-write",
-      "-",
-    ];
-  } else {
-    // 后续轮次：恢复已有会话
-    args = [
-      "exec", "resume", sid,
-      "--json",
-      "--skip-git-repo-check",
-      "-",
-    ];
+  const prompt = buildCodexPrompt(ai, body, ragContext);
+  return runCodexAppServer(prompt, {
+    sessionId: (!firstTurn && !options.noSessionPersistence) ? sid : "",
+    persist: !options.noSessionPersistence,
+    systemPrompt: codexSystemPrompt(stylePrompt, memoryPrompt, profileOverride),
+    model: options.model || CODEX_MAIN_MODEL,
+    allowWebSearch: Boolean(profileOverride && profileTemplates[profileOverride]),
+    timeoutMs: options.timeoutMs || CLAUDE_TIMEOUT_MS,
+    onEvent,
+  });
+}
+
+async function runCodexJson(prompt, { label = "hidden", timeoutMs = 300_000, model = null, sessionId = "", firstTurn = false, persist = false, systemPrompt = "", outputSchema = null } = {}) {
+  if (!commandExists(CODEX)) return null;
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
+  const task = runCodexExec(prompt, {
+    sessionId: persist && !firstTurn ? sessionId : "",
+    persist,
+    systemPrompt,
+    model: model || CODEX_MAIN_MODEL,
+    allowWebSearch: true,
+    outputSchema,
+    timeoutMs,
+  });
+  const result = await task;
+  const baseEvent = {
+    type: "hidden_call_usage",
+    backend: "codex",
+    label,
+    model: model || CODEX_MAIN_MODEL || "default",
+    session_id: result.threadId || sessionId || null,
+    started_at: startedAt,
+    duration_ms: Date.now() - startedMs,
+    context_chars: String(prompt || "").length,
+    system_chars: String(systemPrompt || "").length,
+  };
+  if (result.code !== 0 || !result.text.trim()) {
+    writeHiddenUsageEvent({ ...baseEvent, success: false, error: result.stderr || `exit ${result.code}` });
+    return null;
   }
-
-  // 处理 Codex 入口：如果 CODEX 指向 .js 脚本，则通过 Node.js 执行
-  const codexCommand = /\.js$/i.test(CODEX) ? NODE : CODEX;
-  const codexArgs = /\.js$/i.test(CODEX) ? [CODEX, ...args] : args;
-  // 启动子进程
-  const proc = spawnCli(codexCommand, codexArgs, {
-    cwd: AI_WORK_DIR,
-    timeout: CLAUDE_TIMEOUT_MS,
-    windowsHide: true,
-    stdio: ["pipe", "pipe", "pipe"],
-    env: envWithProxy(CODEX_HTTPS_PROXY),
-  });
-
-  // 将 prompt 写入 stdin
-  proc.stdin.on("error", () => {});
-  proc.stdin.write(prompt);
-  proc.stdin.end();
-
-  // 缓冲区和状态变量
-  let buf = "";        // stdout 行缓冲
-  let stderrOut = "";  // stderr 输出（保留末尾最多 5000 字符）
-  let resolved = false; // 防止重复 resolve
-
-  // 处理流式 stdout：按行分割并解析为 JSON 事件
-  proc.stdout.on("data", d => {
-    buf += d;
-    const lines = buf.split("\n");
-    // 最后一段可能是不完整的行，保留在缓冲区
-    buf = lines.pop();
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      // 尝试解析为 JSON，非 JSON 行静默跳过
-      try { onEvent(JSON.parse(trimmed)); } catch { /* 跳过非 JSON 行，静默忽略解析错误 */ }
+  try {
+    let parsed;
+    try { parsed = parseHiddenJson(result.text); }
+    catch { parsed = result.text.trim(); }
+    if (parsed && typeof parsed === "object") {
+      parsed._toolUsage = result.toolUsage || emptyToolUsage();
+      parsed._hiddenUsage = result.usage || null;
+      parsed._hiddenCall = {
+        ...baseEvent,
+        success: true,
+        output_chars: result.text.length,
+        ...(result.usage || {}),
+      };
+      writeHiddenUsageEvent(parsed._hiddenCall);
     }
-  });
-  // 收集 stderr
-  proc.stderr.on("data", d => { stderrOut += d; if (stderrOut.length > 5000) stderrOut = stderrOut.slice(-5000); });
-
-  // 构建 Promise 封装进程结束逻辑
-  const promise = new Promise((resolve) => {
-    proc.on("close", (code) => {
-      // 非零退出码时记录警告
-      if (code !== 0) log("⚠", `[${sessionName}] Codex exited code=${code}`);
-      if (resolved) return;
-      resolved = true;
-      // 处理缓冲区残留的最后一整行
-      if (buf.trim()) { try { onEvent(JSON.parse(buf.trim())); } catch { /* 跳过残留缓冲区的解析错误 */ } }
-      resolve({ code, stderr: stderrOut, killed: proc.killed });
-    });
-    proc.on("error", (e) => {
-      // 进程出错时立即 resolve
-      if (resolved) return;
-      resolved = true;
-      resolve({ code: -1, stderr: e.message, killed: false });
-    });
-  });
-
-  // 挂载子进程引用
-  promise.proc = proc;
-  return promise;
+    return parsed;
+  } catch (e) {
+    writeHiddenUsageEvent({ ...baseEvent, success: false, error: e.message, output_chars: result.text.length });
+    return null;
+  }
 }
 
 // killProc - 强制终止一个子进程及其所有子进程
@@ -866,41 +1195,6 @@ async function runApiJson({ systemPrompt = "", body = "", label = "api_hidden", 
   return result;
 }
 
-// 统一的后端路由函数：根据 activeAI 选择 API 或 CC 后端执行隐藏调用
-// 参数: prompt - 发送给模型的提示词
-//       opts.systemPrompt - 系统提示词
-//       opts.label - 调用标签，用于日志 (默认 "hidden")
-//       opts.model - 模型名称 (默认 CLAUDE_MAIN_MODEL)
-//       opts.timeoutMs - 超时毫秒 (默认 300_000)
-//       opts.bare - 裸模式 (默认 true，传递给 runHiddenJson)
-//       opts.persist / opts.sessionName / opts.sessionId / opts.firstTurn - 会话持久化参数
-// 返回: API 路径返回附加了 _hiddenCall + _hiddenUsage 的 data 对象
-//       CC 路径返回 runHiddenJson 的结果
-async function runHiddenCall(prompt, opts = {}) {
-  if (activeAI === "api" && isApiConfigured()) {
-    const res = await runApiJson({
-      systemPrompt: opts.systemPrompt || "",
-      body: prompt,
-      label: opts.label || "api_hidden",
-      model: opts.model || CLAUDE_MAIN_MODEL,
-      timeoutMs: opts.timeoutMs || 300_000,
-    });
-    if (res.success && res.data) {
-      const data = res.data;
-      data._hiddenCall = {
-        session_id: null,
-        duration_ms: res.durationMs || 0,
-        success: true,
-        ...(res._apiCall || {}),
-      };
-      data._hiddenUsage = res.usage || null;
-      return data;
-    }
-    return null;
-  }
-  return runHiddenJson(prompt, opts);
-}
-
 export {
   usableConfigString,
   firstExisting,
@@ -916,8 +1210,13 @@ export {
   commandExists,
   stripJsonFences,
   parseHiddenJson,
+  buildCodexExecArgs,
+  createCodexEventState,
+  reduceCodexEvent,
+  codexAppServerUsage,
+  runCodexAppServer,
   runHiddenJson,
-  runHiddenCall,
+  runCodexJson,
   runClaudeStream,
   buildCodexPrompt,
   runCodexStream,
@@ -931,6 +1230,8 @@ export {
   resolveApiConfig,
   CLAUDE,
   CLAUDE_MAIN_MODEL,
+  CODEX_MAIN_MODEL,
+  CODEX_REASONING_EFFORT,
   CLAUDE_FAST_MODEL,
   CLAUDE_FALLBACK_MODEL,
   SCENELET_BARE,

@@ -1,7 +1,8 @@
 import { loadPrompts, getChatStyle, formatLocalChatReality, formatZonedTimeParts, getWeatherReality } from "./reply.mjs";
-import { normalizeVisibleHistory, getSceneConfig } from "./normalize.mjs";
+import { normalizeVisibleHistory } from "./normalize.mjs";
 import { lifeArcPromptItems } from "./world-state.mjs";
 import { profileTemplates } from "./state.mjs";
+import { normalizeBackend } from "./backend-adapter.mjs";
 
 // buildRagContextBlock —— 构建 RAG（检索增强生成）上下文块
 // 将关于角色自身的事实知识（如"关于千圣自己"）组装为系统可注入的上下文字符串。
@@ -172,16 +173,15 @@ function appendVisibleHistory(sess, role, text, kind = "chat", timestamp = new D
 // 参数：
 //   roleWorld - 角色世界对象，可能包含 _sceneMemory / sceneMemory / updatedAt 等字段
 // 返回：格式化的情景记忆字符串（含标题、时效提示和正文）；无记忆时返回空字符串
-function getSceneMemorySystemBlock(roleWorld) {
-  // 提取情景记忆文本
-  const text = roleWorld?._sceneMemory || roleWorld?.sceneMemory || "";
+function getSceneMemorySystemBlock(roleWorld, backend = "cc") {
+  const b = normalizeBackend(backend);
+  const map = roleWorld?._sceneMemory;
+  const text = (map && typeof map === "object") ? (map[b] || "") : "";
   if (!text) return "";
-  // 加载提示词配置
   const cfg = loadPrompts();
-  // 获取章节引入语
   const intro = cfg.sceneMemorySystemBlockIntro || "【情景记忆】";
-  // 获取记忆的生成时间
-  const generatedAt = roleWorld?._sceneMemoryAt || roleWorld?.updatedAt || "";
+  const atMap = roleWorld?._sceneMemoryAt;
+  const generatedAt = (atMap && typeof atMap === "object") ? (atMap[b] || "") : "";
   let stalenessNote = "";
   if (generatedAt) {
     // 计算距今的毫秒数

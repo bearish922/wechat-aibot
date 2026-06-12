@@ -84,6 +84,20 @@ describe("splitSocialReply", () => {
     assert.ok(r.length >= 1);
   });
 
+  it("sends a standalone parenthetical action as its own message", () => {
+    assert.deepEqual(
+      splitSocialReply("粽子加白煮蛋，今天早饭合格。\n（Leo已经在玄关催我了。）"),
+      ["粽子加白煮蛋，今天早饭合格。", "（Leo已经在玄关催我了。）"],
+    );
+  });
+
+  it("keeps inline parentheses in the surrounding message", () => {
+    assert.deepEqual(
+      splitSocialReply("今天早饭合格（白煮蛋也算）。"),
+      ["今天早饭合格（白煮蛋也算）。"],
+    );
+  });
+
   it("does not merge social beats into an artificial part count", () => {
     const originalRandom = Math.random;
     Math.random = () => 0;

@@ -18,8 +18,13 @@
     "model": "deepseek-v4-pro"
   },
   "models": {
+    "claudeMain": "deepseek-v4-pro[1m]",
     "claudeFast": "deepseek-v4-flash[1m]",
     "claudeFallback": "deepseek-v4-flash[1m]",
+    "codexMain": "gpt-5.5",
+    "codexReasoningEffort": "high",
+    "claudeContextMax": 1000000,
+    "codexContextMax": 1000000,
     "scenelet": "deepseek-v4-pro[1m]"
   },
   "timeouts": {

@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { decode as decodeSilk, getDuration as getSilkDuration, isSilk as isSilkAudio } from "silk-wasm";
 import { configValue, envOrConfig, configBool, configNumber } from "./config.mjs";
-import { dataPath, RUNTIME_DIR, appPath, ensureDir, DATA_DIR } from "./paths.mjs";
+import { dataPath, RUNTIME_DIR, appPath, ensureDir } from "./paths.mjs";
 import { log } from "./utils.mjs";
 import { usableConfigString, spawnCli, commandExists, LOGS_DIR } from "./claude-runner.mjs";
 import { loadPrompts } from "./reply.mjs";

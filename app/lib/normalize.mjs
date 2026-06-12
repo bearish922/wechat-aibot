@@ -1,7 +1,7 @@
 ﻿import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { loadPrompts } from "./reply.mjs";
-import { CLAUDE_MAIN_MODEL } from "./claude-runner.mjs";
+
 import { dataPath } from "./paths.mjs";
 
 // 从 data/config.json 加载用户配置，文件不存在或解析失败返回空对象
@@ -190,6 +190,20 @@ function normalizeToolUsage(raw = null) {
   };
 }
 
+function mergeToolUsage(...items) {
+  const merged = emptyToolUsage();
+  for (const item of items) {
+    const usage = normalizeToolUsage(item);
+    if (!usage) continue;
+    merged.webSearch += usage.webSearch;
+    merged.webFetch += usage.webFetch;
+    for (const tool of usage.tools) {
+      if (!merged.tools.includes(tool)) merged.tools.push(tool);
+    }
+  }
+  return merged;
+}
+
 // 创建空的世界状态对象(所有字段为默认空值)
 function emptyWorldState() {
   return {
@@ -257,12 +271,13 @@ function normalizeWorldSession(raw = null) {
   return {
     sid: raw.sid ? String(raw.sid) : null,
     firstTurn: raw.firstTurn === true,
-    model: raw.model ? String(raw.model) : CLAUDE_MAIN_MODEL,
+    model: raw.model ? String(raw.model) : "",
     startedAt: raw.startedAt ? String(raw.startedAt) : null,
     lastUsedAt: raw.lastUsedAt ? String(raw.lastUsedAt) : null,
     // 重置原因上限 300 字符
     resetReason: raw.resetReason ? String(raw.resetReason).slice(0, 300) : "",
     lastUsage: raw.lastUsage && typeof raw.lastUsage === "object" ? raw.lastUsage : null,
+    turnCount: Math.max(0, Number(raw.turnCount || 0) || 0),
   };
 }
 
@@ -315,9 +330,9 @@ function normalizeLifeArc(raw) {
   };
 }
 
-// 规范化生活弧线数组：逐条规范化 -> 过期/非活跃过滤 -> 按 id 去重 -> 排序 -> 截取最近 6 条
+// 规范化生活弧线数组：逐条规范化 -> 过期/非活跃过滤 -> 按 id 去重 -> 排序
 // 参数: raw - 原始弧线数组; includeClosed - 是否包含已关闭的弧线(默认 false)
-// 返回: 规范化后的弧线数组(最多 6 条)
+// 返回: 规范化后的弧线数组
 function normalizeLifeArcs(raw, { includeClosed = false } = {}) {
   if (!Array.isArray(raw)) return [];
   const nowMs = Date.now();
@@ -449,8 +464,8 @@ function sameLocalDay(iso, date = new Date()) {
 // 统计指定 session 当天已发送的主动消息数量
 // 参数: sess - session 对象; date - 参考日期(默认当前)
 // 返回: 当天已发送的主动消息数
-function proactiveSentToday(sess, date = new Date()) {
-  return normalizeProactiveIntents(sess?._proactiveIntents)
+function proactiveSentToday(roleWorld, date = new Date()) {
+  return normalizeProactiveIntents(roleWorld?._proactiveIntents)
     // 筛选状态为 sent 且与给定日期同天的意图
     .filter(i => i.status === "sent" && sameLocalDay(i.sentAt || i.scheduledAt, date))
     .length;
@@ -494,6 +509,7 @@ export {
   normalizeProactiveIntents,
   emptyToolUsage,
   normalizeToolUsage,
+  mergeToolUsage,
   normalizeWorldState,
   applyWorldStatePatch,
   normalizeWorldSession,

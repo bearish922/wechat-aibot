@@ -1,10 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import initSqlJs from "sql.js";
+import { backfillUsedRagFromLogs } from "../lib/chat-history.mjs";
 
 const appJs = readFileSync(join(import.meta.dirname, "..", "static", "app.js"), "utf-8");
 const chatHistory = readFileSync(join(import.meta.dirname, "..", "lib", "chat-history.mjs"), "utf-8");
+const botSource = readFileSync(join(import.meta.dirname, "..", "bot.mjs"), "utf-8");
 
 describe("History tool usage UI", () => {
   it("renders a small missing-scenelet note for assistant messages", () => {
@@ -29,5 +33,38 @@ describe("History tool usage UI", () => {
     assert.match(chatHistory, /function normalizeRagUsage/);
     assert.match(chatHistory, /toolUsage: normalizeToolUsage\(event\.toolUsage\)/);
     assert.match(chatHistory, /ragUsage: normalizeRagUsage\(event\.ragUsage\)/);
+  });
+
+  it("passes RAG usage from execution into assistant history", () => {
+    assert.match(botSource, /ragUsage = \{ eligible: ragEligible, used: Boolean\(ragContext\), chars: ragContext\.length \}/);
+    assert.match(botSource, /toolUsage, ragUsage, timestamp: assistantAt/);
+    assert.match(chatHistory, /function backfillUsedRagFromLogs/);
+    assert.match(chatHistory, /backfillUsedRagFromLogs\(_db\)/);
+  });
+
+  it("backfills a legacy positive RAG hit from the matching run log", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "history-rag-"));
+    try {
+      writeFileSync(join(dir, "cst-cc.jsonl"), JSON.stringify({
+        ts: "2026-06-12T05:31:54.165Z",
+        ai: "cc",
+        userId: "u1",
+        sessionName: "cst",
+        bodyChars: 2,
+        ragChars: 1007,
+      }) + "\n");
+      const SQL = await initSqlJs();
+      const db = new SQL.Database();
+      db.run("CREATE TABLE events (id TEXT, timestamp TEXT, userId TEXT, ai TEXT, sessionName TEXT, role TEXT, kind TEXT, text TEXT, ragUsage TEXT)");
+      const timestamp = "2026-06-12T05:32:12.335Z";
+      db.run("INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?)", ["u", timestamp, "u1", "cc", "cst", "user", "chat", "你好", "{}"]);
+      db.run("INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?)", ["a", timestamp, "u1", "cc", "cst", "assistant", "chat", "回复", "{}"]);
+
+      assert.equal(backfillUsedRagFromLogs(db, dir), 1);
+      const value = db.exec("SELECT ragUsage FROM events WHERE id='a'")[0].values[0][0];
+      assert.deepEqual(JSON.parse(value), { eligible: true, used: true, chars: 1007 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

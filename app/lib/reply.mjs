@@ -24,7 +24,6 @@ import {
   DEFAULT_INNER_SCENELET_INTRO,
   DEFAULT_SCENELET_REPLY_BRIDGE_INSTRUCTION,
   DEFAULT_MEMORY_CONTEXT_INSTRUCTION,
-  DEFAULT_RAG_KEYWORDS,
   DEFAULT_SCENE_MEMORY_SYSTEM_BLOCK_INTRO,
   DEFAULT_SCENE_MEMORY_PROMPT_INSTRUCTIONS,
   DEFAULT_DAILY_SHARE_SEED_PROMPT,
@@ -301,8 +300,24 @@ export function splitSocialReply(text) {
     .split(/\n\s*\n/)
     .map(s => s.trim())
     .filter(Boolean);
-  if (paragraphs.length >= 2 && !isStructuredReply(text)) {
-    return paragraphs;
+  if (!isStructuredReply(text)) {
+    const explicitParts = paragraphs.flatMap(paragraph => {
+      const lines = paragraph.split("\n").map(s => s.trim()).filter(Boolean);
+      const parts = [];
+      let current = [];
+      for (const line of lines) {
+        if (/^[（(][\s\S]*[）)]$/u.test(line)) {
+          if (current.length) parts.push(current.join("\n"));
+          current = [];
+          parts.push(line);
+        } else {
+          current.push(line);
+        }
+      }
+      if (current.length) parts.push(current.join("\n"));
+      return parts;
+    });
+    if (explicitParts.length >= 2) return explicitParts;
   }
   const sentences = text
     .replace(/\r/g, "")
