@@ -67,7 +67,10 @@ export function formatWeatherReality(weatherData) {
     ].filter(Boolean);
     lines.push(parts.join("，"));
   }
-  lines.push("", "（以上为实时天气数据，若与月份季节描述冲突，以实时数据为准）");
+  lines.push(
+    "",
+    "（以上数据只用于约束场景，或回答用户主动问到、当前话题确实依赖的天气信息。不要因为看见这段数据就在回复中主动提醒天气；近期对话已经提过时尤其不要重复。）",
+  );
   return lines.join("\n");
 }
 

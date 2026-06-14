@@ -4,50 +4,54 @@ import { loadPrompts } from "./reply.mjs";
 import { backendModel, runBackendStructured } from "./backend-adapter.mjs";
 
 // 长期记忆文档的主文件路径(wechat-memory.md)
+// 当指定 profile 时，使用 wechat-memory-{profile}.md 实现按角色分文件存储
 export const MEMORY_FILE = dataPath("wechat-memory.md");
+const memoryFileForProfile = (profile) => profile ? dataPath(`wechat-memory-${profile}.md`) : MEMORY_FILE;
 // 长期记忆文档的备份文件路径
 const MEMORY_BAK_FILE = dataPath("wechat-memory.bak.md");
+const memoryBakForProfile = (profile) => profile ? dataPath(`wechat-memory-${profile}.bak.md`) : MEMORY_BAK_FILE;
 
 // 世界记忆文档 —— 纯手动维护，不走 LLM update
 const WORLD_MEMORY_FILE = dataPath("wechat-world-memory.md");
 const WORLD_MEMORY_BAK_FILE = dataPath("wechat-world-memory.bak.md");
+const worldMemoryFileForProfile = (profile) => profile ? dataPath(`wechat-world-memory-${profile}.md`) : WORLD_MEMORY_FILE;
+const worldMemoryBakForProfile = (profile) => profile ? dataPath(`wechat-world-memory-${profile}.bak.md`) : WORLD_MEMORY_BAK_FILE;
 
 // ─── core read/write ────────────────────────────────────────
 
 // 从文件系统加载记忆 Markdown 文档
+// profile: 角色名；为空时使用全局文件，非空时按角色分文件
 // 返回: 记忆文档全文(字符串)，优先读主文件，主文件失败则读备份，都失败返回空字符串
-export function loadMemoryDocument() {
+export function loadMemoryDocument(profile = "") {
+  const main = memoryFileForProfile(profile);
+  const bak = memoryBakForProfile(profile);
   try {
-    // 优先读主文件
-    if (fs.existsSync(MEMORY_FILE)) {
-      return fs.readFileSync(MEMORY_FILE, "utf-8").trim();
+    if (fs.existsSync(main)) {
+      return fs.readFileSync(main, "utf-8").trim();
     }
   } catch {}
   try {
-    // 主文件不可用时回退到备份
-    if (fs.existsSync(MEMORY_BAK_FILE)) {
-      return fs.readFileSync(MEMORY_BAK_FILE, "utf-8").trim();
+    if (fs.existsSync(bak)) {
+      return fs.readFileSync(bak, "utf-8").trim();
     }
   } catch {}
   return "";
 }
 
 // 原子写入方式保存记忆文档：先写临时文件，备份旧文件，再重命名(原子写入防数据损坏)
-// 参数: text - 要保存的 Markdown 文本
-export function saveMemoryDocument(text) {
+// 参数: text - 要保存的 Markdown 文本; profile - 角色名，为空时使用全局文件
+export function saveMemoryDocument(text, profile = "") {
   ensureDir(PROJECT_ROOT);
   const content = String(text || "").trim();
-  // 空内容不写入，防止误清空记忆
   if (!content) return;
-  const tmp = MEMORY_FILE + ".tmp";
-  // 先写入临时文件
+  const main = memoryFileForProfile(profile);
+  const bak = memoryBakForProfile(profile);
+  const tmp = main + ".tmp";
   fs.writeFileSync(tmp, content, "utf-8");
-  // 备份当前主文件
-  if (fs.existsSync(MEMORY_FILE)) {
-    fs.copyFileSync(MEMORY_FILE, MEMORY_BAK_FILE);
+  if (fs.existsSync(main)) {
+    fs.copyFileSync(main, bak);
   }
-  // 原子重命名: 将临时文件替换为主文件
-  fs.renameSync(tmp, MEMORY_FILE);
+  fs.renameSync(tmp, main);
 }
 
 // ─── LLM update ─────────────────────────────────────────────
@@ -57,15 +61,12 @@ export function saveMemoryDocument(text) {
 // 返回: 更新后的记忆文档完整文本
 export async function updateMemoryDocument(userMessages, backend = "cc", profile = "") {
   const msgs = (userMessages || []).filter(Boolean);
-  // 无消息时不更新
-  if (!msgs.length) return loadMemoryDocument();
+  if (!msgs.length) return loadMemoryDocument(profile);
 
-  // 加载记忆更新 Prompt 模板
   const prompt = loadPrompts(profile).memoryUpdatePrompt;
-  if (!prompt) return loadMemoryDocument();
+  if (!prompt) return loadMemoryDocument(profile);
 
-  // 构建 LLM 输入：Prompt 模板 + 当前记忆 + 用户最新消息
-  const currentDoc = loadMemoryDocument();
+  const currentDoc = loadMemoryDocument(profile);
   const input = [
     prompt,
     "",
@@ -78,7 +79,6 @@ export async function updateMemoryDocument(userMessages, backend = "cc", profile
     "请只输出 JSON：{\"result\":\"更新后的完整 Markdown 文档\"}",
   ].join("\n");
 
-  // 调用隐藏 LLM 生成更新后的记忆文档(bare=false 获取原始文本)
   const raw = await runBackendStructured(input, {
     backend,
     label: "memory_update",
@@ -87,41 +87,37 @@ export async function updateMemoryDocument(userMessages, backend = "cc", profile
     timeoutMs: 120000,
   });
 
-  // 解析返回结果：可能是纯文本字符串或 JSON 包装对象
   const updated = typeof raw === "string" ? raw : (raw?.result || raw?.text || "");
   if (updated && updated.trim()) {
-    // 原子写入更新后的记忆文档
-    saveMemoryDocument(updated.trim());
+    saveMemoryDocument(updated.trim(), profile);
   }
-  return loadMemoryDocument();
+  return loadMemoryDocument(profile);
 }
 
 // ─── world memory (manual only, no LLM update) ──────────────
 
-export function loadWorldMemoryDocument() {
+export function loadWorldMemoryDocument(profile = "") {
+  const main = worldMemoryFileForProfile(profile);
+  const bak = worldMemoryBakForProfile(profile);
   try {
-    if (fs.existsSync(WORLD_MEMORY_FILE)) {
-      return fs.readFileSync(WORLD_MEMORY_FILE, "utf-8").trim();
-    }
+    if (fs.existsSync(main)) return fs.readFileSync(main, "utf-8").trim();
   } catch {}
   try {
-    if (fs.existsSync(WORLD_MEMORY_BAK_FILE)) {
-      return fs.readFileSync(WORLD_MEMORY_BAK_FILE, "utf-8").trim();
-    }
+    if (fs.existsSync(bak)) return fs.readFileSync(bak, "utf-8").trim();
   } catch {}
   return "";
 }
 
-export function saveWorldMemoryDocument(text) {
+export function saveWorldMemoryDocument(text, profile = "") {
   ensureDir(PROJECT_ROOT);
   const content = String(text || "").trim();
   if (!content) return;
-  const tmp = WORLD_MEMORY_FILE + ".tmp";
+  const main = worldMemoryFileForProfile(profile);
+  const bak = worldMemoryBakForProfile(profile);
+  const tmp = main + ".tmp";
   fs.writeFileSync(tmp, content, "utf-8");
-  if (fs.existsSync(WORLD_MEMORY_FILE)) {
-    fs.copyFileSync(WORLD_MEMORY_FILE, WORLD_MEMORY_BAK_FILE);
-  }
-  fs.renameSync(tmp, WORLD_MEMORY_FILE);
+  if (fs.existsSync(main)) fs.copyFileSync(main, bak);
+  fs.renameSync(tmp, main);
 }
 
 // ─── compatibility helpers used by the turn pipeline and eval scripts ───
@@ -142,9 +138,8 @@ export function shouldRunMemoryWriter(text = "") {
 }
 
 // 获取记忆文档的纯文本内容(用于注入 Prompt)
-// 返回: 记忆文档文本
-export function memoryItemsText() {
-  const doc = loadMemoryDocument();
+export function memoryItemsText(profile = "") {
+  const doc = loadMemoryDocument(profile);
   if (!doc) return "";
   return doc;
 }

@@ -47,7 +47,7 @@ function buildVisibleHistoryBlock(history) {
 //   visibleHistory - recentVisibleContext 返回的数组（可选）
 //   sceneMemory    - 情景记忆/对话摘要文本（可选，仅 reset 后首轮注入）
 // 返回：拼接好的多段落 prompt 字符串，各段以 "\n\n---\n\n" 分隔
-async function buildTurnBody(userBody, ragContext = "", sceneContext = "", visibleHistory = [], sceneMemory = "", profile = "") {
+async function buildTurnBody(userBody, sceneContext = "", visibleHistory = [], sceneMemory = "", profile = "") {
   // 存储各段内容的数组
   const sections = [];
   const now = new Date();
@@ -63,10 +63,6 @@ async function buildTurnBody(userBody, ragContext = "", sceneContext = "", visib
   // 场景上下文
   if (sceneContext) {
     sections.push(sceneContext);
-  }
-  // RAG 上下文块
-  if (ragContext) {
-    sections.push(buildRagContextBlock(ragContext, profile));
   }
   // 聊天风格指令
   sections.push(getChatStyle(profile));
@@ -277,6 +273,13 @@ function buildHiddenWorldSystemPrompt(profile, sceneMemory = "", memoryPrompt = 
     // scenelet（内心独白）生成指令
     cfg.sceneletInstructions,
     "",
+    // RAG 知识库检索结果的使用说明（如有配置）
+    cfg.ragContextInstruction ? [
+      "【知识库检索】",
+      "本轮的 rag_context 字段包含知识库检索结果。",
+      cfg.ragContextInstruction,
+    ].join("\n") : "",
+    "",
     // hidden-world 专用的聊天风格
     cfg.hiddenWorldChatStyle || "",
   );
@@ -299,7 +302,7 @@ function buildHiddenWorldSystemPrompt(profile, sceneMemory = "", memoryPrompt = 
 //   proactiveIntents - 待处理的主动意图列表（默认空数组）
 //   worldSession    - hidden-world 自身的会话信息（默认 null）
 // 返回：完整的 hidden-world 用户消息 prompt 字符串
-async function buildHiddenWorldPrompt({ userId, sessionName, profile, userBody, lifeArcs = [], visibleContext, memoryPrompt, worldState = null, proactiveIntents = [], worldSession = null }) {
+async function buildHiddenWorldPrompt({ userId, sessionName, profile, userBody, lifeArcs = [], visibleContext, memoryPrompt, worldState = null, proactiveIntents = [], worldSession = null, ragContext = "" }) {
   const now = new Date();
   // 加载提示词配置
   const cfg = loadPrompts(profile);
@@ -337,6 +340,8 @@ async function buildHiddenWorldPrompt({ userId, sessionName, profile, userBody, 
       recent_visible_context: visibleContext,
       // 用户的当前消息
       user_message: userBody,
+      // RAG 知识库检索结果
+      rag_context: ragContext || null,
     }, null, 2),
   ].filter(Boolean).join("\n");
 }

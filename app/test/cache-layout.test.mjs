@@ -15,7 +15,7 @@ describe("prompt cache layout", () => {
   });
 
   it("keeps memory out of the dynamic turn body and opts into the Claude system prompt", () => {
-    assert.match(prompts, /async function buildTurnBody\(userBody, ragContext = "", sceneContext = "", visibleHistory = \[\], sceneMemory = "", profile = ""\)/);
+    assert.match(prompts, /async function buildTurnBody\(userBody, sceneContext = "", visibleHistory = \[\], sceneMemory = "", profile = ""\)/);
     assert.doesNotMatch(prompts, /buildTurnBody\([^)]*memoryPrompt/);
     assert.match(bot, /startBackendChat\(/);
     assert.match(backendAdapter, /includeMemoryInSystem: true/);

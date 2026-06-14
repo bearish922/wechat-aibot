@@ -12,7 +12,6 @@ describe("Prompts runtime pipeline UI", () => {
       'title: "表达能力"',
       'title: "长期记忆 (System Prompt)"',
       'title: "Hidden-world 输出"',
-      'title: "RAG"',
       'title: "聊天风格及现实"',
       'title: "用户消息"',
       'title: "模型调用与输出"',
@@ -38,6 +37,7 @@ describe("Prompts runtime pipeline UI", () => {
     assert.ok(memoryIdx < dynamicIdx, "memory should appear before dynamic context");
     assert.ok(dynamicIdx < modelIdx, "dynamic context should appear before model output");
     assert.match(appJs, /通过 --append-system-prompt-file 注入 system prompt/);
+    assert.match(appJs, /RAG 知识库检索/);
   });
 
   it("exposes editable controls used by the runtime prompt pipeline", () => {

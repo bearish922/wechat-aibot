@@ -59,6 +59,44 @@ function showModal(title, body) {
   document.body.appendChild(overlay);
 }
 
+function showSceneMemoryEditor(profile, text) {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `<div class="modal-box" style="max-width:720px">
+    <div class="modal-head">
+      <h3>Scene Memory — ${escHtml(profile)}</h3>
+      <button class="btn modal-close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <textarea id="scene-memory-editor" style="width:100%;min-height:340px;font-size:13px;line-height:1.5;font-family:inherit;resize:vertical;padding:10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg)">${escHtml(text)}</textarea>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+        <button class="btn btn-primary" id="scene-memory-save">保存</button>
+        <span id="scene-memory-msg" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+    </div>
+  </div>`;
+  const close = () => overlay.remove();
+  overlay.querySelector(".modal-close").addEventListener("click", close);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  overlay.querySelector("#scene-memory-save").addEventListener("click", async () => {
+    const btn = overlay.querySelector("#scene-memory-save");
+    const msg = overlay.querySelector("#scene-memory-msg");
+    const content = overlay.querySelector("#scene-memory-editor").value;
+    btn.disabled = true;
+    msg.textContent = "保存中...";
+    try {
+      const r = await put("/api/world/scene-memory", { profile, content });
+      msg.textContent = r.ok ? `已保存 (${r.length} chars)` : (r.error || "保存失败");
+      msg.style.color = r.ok ? "var(--green)" : "var(--red)";
+    } catch (e) {
+      msg.textContent = "保存失败: " + e.message;
+      msg.style.color = "var(--red)";
+    }
+    btn.disabled = false;
+  });
+  document.body.appendChild(overlay);
+}
+
 function showBlockingModal(title, body) {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -163,6 +201,8 @@ async function pollStatusUpdate() {
     if (s.ccContext) {
       const ccPanel = document.querySelector('[data-panel="cc-context"]');
       if (ccPanel) ccPanel.style.display = "";
+      const title = document.querySelector('[data-cc="title"]');
+      if (title) title.textContent = `${contextBackendLabel(s.ccContext)} Context — ${s.ccContext.profile}`;
       const turn = document.querySelector('[data-cc="turn"]'); if (turn) turn.textContent = `${s.ccContext.turnCount}/${s.ccContext.turnThreshold}`;
       const uc = document.querySelector('[data-cc="userCtx"]'); if (uc) uc.textContent = ctxPct(s.ccContext.userCtx);
       const hc = document.querySelector('[data-cc="hwCtx"]'); if (hc) hc.textContent = ctxPct(s.ccContext.hwCtx);
@@ -177,6 +217,10 @@ function ctxPct(ctx) {
   return `${Number(ctx.tokens || 0).toLocaleString()} / ${Number(ctx.max || 0).toLocaleString()} (${pct}%)${turns}`;
 }
 
+function contextBackendLabel(context) {
+  return context?.backendLabel || (context?.backend === "codex" ? "Codex" : "CC");
+}
+
 function startStatusPoll() {
   clearStatusPoll();
   _statusPollTimer = setInterval(pollStatusUpdate, 4000);
@@ -185,6 +229,7 @@ function startStatusPoll() {
 function renderCCContext(s) {
   const cc = s.ccContext;
   if (!cc) return `<div class="panel" data-panel="cc-context" style="display:none"></div>`;
+  const backendLabel = contextBackendLabel(cc);
   const turn = `${cc.turnCount}/${cc.turnThreshold}`;
   const userCtx = ctxPct(cc.userCtx);
   const hwCtx = ctxPct(cc.hwCtx);
@@ -192,9 +237,9 @@ function renderCCContext(s) {
   return `
     <div class="panel" data-panel="cc-context">
       <div class="panel-head">
-        <h2>CC Context — ${escHtml(cc.profile)}</h2>
+        <h2 data-cc="title">${escHtml(backendLabel)} Context — ${escHtml(cc.profile)}</h2>
         <div class="cc-toolbar">
-          <button class="btn btn-sm" data-action="show-cc-scene">${hasScene ? 'View Scene Memory' : 'No Scene Memory'}</button>
+          <button class="btn btn-sm" data-action="show-cc-scene">${hasScene ? '编辑 Scene Memory' : '无 Scene Memory'}</button>
           <button class="btn btn-sm btn-reset" data-action="reset-cc">Reset</button>
         </div>
       </div>
@@ -217,7 +262,7 @@ function bindCCContextEvents() {
       if (!st.ccContext?.profile) {
         closeModal();
         button.disabled = false;
-        return toast("无活跃 CC 会话", false);
+        return toast(`无活跃 ${contextBackendLabel(st.ccContext)} 会话`, false);
       }
       const r = await post("/api/world/reset", { profile: st.ccContext.profile });
       closeModal();
@@ -233,8 +278,9 @@ function bindCCContextEvents() {
   content.querySelector('[data-action="show-cc-scene"]')?.addEventListener("click", async () => {
     try {
       const st = await get("/api/status");
-      const text = st.ccContext?.sceneMemory || "暂无 scene memory（reset 后自动生成）";
-      showModal("Scene Memory", text);
+      const profile = st.ccContext?.profile;
+      const text = st.ccContext?.sceneMemory || "";
+      showSceneMemoryEditor(profile, text);
     } catch (e) {}
   });
 }
@@ -575,22 +621,18 @@ function renderPromptsPipeline(p, profile, profiles) {
           title: "Hidden-world 输出",
           desc: "",
           body: `
-            <p style="color:var(--muted);font-size:13px;margin:0 0 8px">注入了 worldState（currentPlan、openThreads）、inner_scenelet 场景叙事、以及全部 life_arc 简述（title / kind / progress_note）。</p>
+            <p style="color:var(--muted);font-size:13px;margin:0 0 8px">注入了 worldState（currentPlan、openThreads）、RAG 知识库检索、inner_scenelet 场景叙事、以及全部 life_arc 简述（title / kind / progress_note）。</p>
             <label class="pipeline-sub-label">Inner Scenelet 引导说明</label>
             ${renderTextPreview("innerSceneletIntro", p.innerSceneletIntro)}
             <label class="pipeline-sub-label">Inner Scenelet 正文</label>
             <a href="#hiddenWorldPromptSection" class="btn" style="margin:8px 0">查看下方 Hidden World 配置</a>
             <label class="pipeline-sub-label">Scenelet 到回复桥接指令</label>
             ${renderTextPreview("sceneletReplyBridgeInstruction", p.sceneletReplyBridgeInstruction)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 5,
-          title: "RAG",
-          desc: "",
-          body: `
+            <hr style="border-color:var(--border);margin:14px 0 10px">
+            <label class="pipeline-sub-label" style="font-size:12px;font-weight:600;color:var(--accent)">RAG 知识库检索</label>
+            <p style="color:var(--muted);font-size:12px;margin:0 0 8px">RAG 检索结果注入 Hidden-world prompt，角色在内心独白中感知相关知识，不再直接出现在主回复中。</p>
             ${renderRagKeywordChips(p)}
-            <label class="pipeline-sub-label">RAG 上下文说明</label>
+            <label class="pipeline-sub-label" style="margin-top:8px">RAG 上下文说明</label>
             ${renderTextPreview("ragContextInstruction", p.ragContextInstruction)}
             ${renderControlGrid([
               renderNumberControl("ragTopK", "Top-K", p.ragTopK || 6, 1, 20, "docs"),
@@ -601,7 +643,7 @@ function renderPromptsPipeline(p, profile, profiles) {
           `,
         })}
         ${renderPipelineStep({
-          n: 6,
+          n: 5,
           title: "聊天风格及现实",
           desc: "",
           body: `
@@ -612,7 +654,7 @@ function renderPromptsPipeline(p, profile, profiles) {
           `,
         })}
         ${renderPipelineStep({
-          n: 7,
+          n: 6,
           title: "用户消息",
           desc: "",
           body: `
@@ -710,7 +752,7 @@ function renderNumberControl(key, label, value, min, max, unit, options = {}) {
 function renderTextPreview(key, value) {
   const isOpen = promptsEditing[key];
   if (isOpen) {
-    const h = key === 'sceneletInstructions' || key === 'proactiveInstructions' || key === 'memoryUpdatePrompt' || key === 'scheduleCreatorInstructions' ? '220px' : '110px';
+    const h = key === 'sceneletInstructions' || key === 'proactiveInstructions' || key === 'memoryUpdatePrompt' || key === 'scheduleCreatorInstructions' ? '440px' : '110px';
     return `<textarea id="prompt_${key}" class="prompts-editable prompts-textarea" data-key="${key}" style="min-height:${h}">${escHtml(value || '')}</textarea>
       <div class="editor-actions" style="margin-top:4px">
         <button class="btn btn-primary" data-action="save-text" data-key="${key}">保存</button>
@@ -1770,7 +1812,6 @@ function renderHistoryMessages(messages) {
       <div class="history-text" data-eid="${escAttr(item.id)}">${escHtml(item.text || "")}</div>
       ${renderHistorySceneletNote(item)}
       ${renderHistoryToolNote(item)}
-      ${item.sceneState ? `<details class="scenelet-details"><summary>scene state</summary><pre>${escHtml(item.sceneState)}</pre></details>` : ""}
       ${item.scenelet ? `<details class="scenelet-details"><summary>inner scenelet</summary><pre>${escHtml(item.scenelet)}</pre></details>` : ""}
     </article>
   `).join("");
@@ -2190,6 +2231,7 @@ function renderProactiveIntent(intent, now, mergedCount = 0) {
 
 // Memory — Markdown document editor
 let memoryDoc = "";
+let memoryProfile = "";
 let memoryPreview = true;
 let worldMemoryDoc = "";
 let worldMemoryPreview = true;
@@ -2217,15 +2259,24 @@ function renderMd(src) {
 }
 
 async function renderMemory() {
-  const [wd, ud] = await Promise.all([get("/api/world-memory"), get("/api/memory")]);
+  const resp = await get("/api/profiles");
+  const profiles = (resp.profiles || []).map(p => p.name).filter(Boolean);
+  if (!profiles.length) profiles.push("默认");
+  if (!memoryProfile) memoryProfile = profiles.includes("白鹭千圣") ? "白鹭千圣" : profiles[0];
+
+  const [wd, ud] = await Promise.all([
+    get("/api/world-memory?profile=" + encodeURIComponent(memoryProfile)),
+    get("/api/memory?profile=" + encodeURIComponent(memoryProfile)),
+  ]);
   worldMemoryDoc = wd.content || "";
   memoryDoc = ud.content || "";
 
-  function memoryPanel(label, doc, preview, toggleId, saveId) {
+  function memoryPanel(label, doc, preview, toggleId, saveId, extraHead = "") {
     return `
       <div class="panel">
         <div class="panel-head">
           <h2>${label}</h2>
+          ${extraHead}
           <div style="display:flex;gap:8px">
             <span style="color:var(--muted);font-size:13px;align-self:center">${doc.length} chars</span>
             <button class="btn" id="${toggleId}">${preview ? "Edit" : "Preview"}</button>
@@ -2238,10 +2289,22 @@ async function renderMemory() {
       </div>`;
   }
 
+  const profileSelectHtml = `
+    <div class="memory-toolbar">
+      <select id="memoryProfileSelect">
+        ${profiles.map(name => `<option value="${escAttr(name)}"${name === memoryProfile ? " selected" : ""}>${escHtml(name)}</option>`).join("")}
+      </select>
+    </div>`;
+
   content.innerHTML = `
-    ${memoryPanel("World Memory", worldMemoryDoc, worldMemoryPreview, "worldMemoryToggleBtn", "worldMemorySaveBtn")}
+    ${memoryPanel("World Memory", worldMemoryDoc, worldMemoryPreview, "worldMemoryToggleBtn", "worldMemorySaveBtn", profileSelectHtml)}
     ${memoryPanel("User Memory", memoryDoc, memoryPreview, "memoryToggleBtn", "memorySaveBtn")}
   `;
+
+  document.getElementById("memoryProfileSelect")?.addEventListener("change", e => {
+    memoryProfile = e.target.value;
+    renderMemory();
+  });
 
   function bindPanel(toggleId, saveId, previewKey, apiPath, label) {
     document.getElementById(toggleId).addEventListener("click", () => {
@@ -2253,7 +2316,7 @@ async function renderMemory() {
       const previewing = previewKey === "w" ? worldMemoryPreview : memoryPreview;
       const currentDoc = previewKey === "w" ? worldMemoryDoc : memoryDoc;
       const text = previewing ? currentDoc : document.getElementById(toggleId + "-editor").value;
-      await put(apiPath, { content: text });
+      await put(apiPath, { content: text, profile: memoryProfile });
       if (previewKey === "w") worldMemoryDoc = text;
       else memoryDoc = text;
       toast(label + " saved");

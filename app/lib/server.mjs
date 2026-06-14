@@ -98,8 +98,9 @@ let server = null;
 export function startServer(port = 18720) {
   if (server) return;
   server = createServer(async (req, res) => {
-    const url = req.url.split("?")[0];
+    const [url, qs] = req.url.split("?");
     const method = req.method.toUpperCase();
+    const query = Object.fromEntries(new URLSearchParams(qs || ""));
 
     // 优先匹配 API 路由（动态路由优先于静态文件）
     for (const route of routes) {
@@ -107,7 +108,7 @@ export function startServer(port = 18720) {
       if (params) {
         try {
           const body = method === "GET" ? null : await readBody(req);
-          const result = await route.handler({ req, res, body, params, json: (d, s) => json(res, d, s) });
+          const result = await route.handler({ req, res, body, params, query, json: (d, s) => json(res, d, s) });
           // Route handlers may return { status } so callers receive the intended HTTP status,
           // not a misleading 200 response containing an error body.
           if (result !== undefined) json(res, result, Number(result?.status) || 200);

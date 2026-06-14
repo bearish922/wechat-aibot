@@ -16,7 +16,7 @@ let lastProactiveCheckAt = 0;
 
 // ─── orchestration ───────────────────────────────────────────
 // 核心编排函数：为本轮对话生成隐藏世界层的中间叙事（inner_scenelet）。
-// 该 scenelet 是 AI 角色的"内心独白"，后续用于驱动最终回复的生成。
+// 该 scenelet 是 AI 角色的"内心独白"，后续注入主回复驱动最终回复的生成。
 //
 // @param {object} params
 //   userId - 用户微信 ID
@@ -25,7 +25,7 @@ let lastProactiveCheckAt = 0;
 //   userBody - 用户发送的消息文本
 //   memoryPrompt - 记忆文档内容注入的提示词片段
 // @returns {object|null} 标准化后的 scenelet 结果对象，包含 innerScenelet、worldStatePatch 等字段；失败返回 null
-export async function generateSceneletForTurn({ ai, userId, sess, profile, userBody, memoryPrompt }) {
+export async function generateSceneletForTurn({ ai, userId, sess, profile, userBody, memoryPrompt, ragContext = "" }) {
   // 如果 profile 无效或未注册，跳过
   if (!profile || !profileTemplates[profile]) return null;
   // 获取角色的世界状态对象
@@ -45,6 +45,7 @@ export async function generateSceneletForTurn({ ai, userId, sess, profile, userB
     // 带入待处理的主动意图，数量受配置上限约束
     proactiveIntents: normalizeProactiveIntents(roleWorld._proactiveIntents).filter(i => i.status === "pending").slice(-getSceneConfig().hiddenWorldMaxPendingIntents),
     worldSession: world,
+    ragContext,
   });
   // 仅在 world session 的首轮带入场景记忆系统块
   const sceneMemoryBlock = world.firstTurn || ai === "api" ? getSceneMemorySystemBlock(roleWorld, ai, profile) : "";
@@ -62,9 +63,9 @@ export async function generateSceneletForTurn({ ai, userId, sess, profile, userB
   });
   let result = normalizeSceneletResult(raw);
   const firstAttemptToolUsage = result?.toolUsage;
-  // 隐藏世界调用失败或只返回 thinking、没有有效 scene_state：
+  // 隐藏世界调用失败或只返回 thinking、没有有效 inner_scenelet：
   // 在同一个 world session 内重试。retry 不能丢弃隐形上下文或伪装成 reset。
-  if (!result?.sceneState) {
+  if (!result?.innerScenelet) {
     raw = await runBackendStructured(prompt, {
       backend: ai,
       label: "hidden_world_retry",
@@ -80,8 +81,8 @@ export async function generateSceneletForTurn({ ai, userId, sess, profile, userB
     result = normalizeSceneletResult(raw);
     if (result) result.toolUsage = mergeToolUsage(firstAttemptToolUsage, result.toolUsage);
   }
-  // 两次都没有有效的 sceneState，交给上层记录明确错误
-  if (!result?.sceneState) throw new Error("hidden world returned no valid scene_state");
+  // 两次都没有有效的 innerScenelet，交给上层记录明确错误
+  if (!result?.innerScenelet) throw new Error("hidden world returned no valid inner_scenelet");
   // 如果 API 路径返回了 session_id，更新 world session 标识
   if (raw?._hiddenCall?.session_id) world.sid = raw._hiddenCall.session_id;
   // 更新 world session 的使用状态
@@ -93,6 +94,7 @@ export async function generateSceneletForTurn({ ai, userId, sess, profile, userB
   applyWorldStatePatch(roleWorld, result.worldStatePatch);
   roleWorld.updatedAt = world.lastUsedAt;
   saveRoleWorlds();
+  if (ragContext) result.ragUsage = { eligible: true, used: true, chars: ragContext.length };
   return result;
 }
 
@@ -120,13 +122,13 @@ export function buildSceneContextBlock(sess, sceneletResult) {
       `${profile}生活中跨越多天的安排，只作为时间参考和自然接话线索，不要主动复述。`,
       JSON.stringify(lifeArcSummary, null, 2),
     ].join("\n") : "",
-    // 如果有 scene_state，拼入场景状态及桥接说明（inner_scenelet 不注入主回复）
-    sceneletResult?.sceneState ? [
-      "【角色场景状态：scene_state】",
+    // 如果有 inner_scenelet，拼入内心独白及桥接说明
+    sceneletResult?.innerScenelet ? [
+      "【角色内心】",
       cfg.innerSceneletIntro,
-      sceneletResult.sceneState,
+      sceneletResult.innerScenelet,
       cfg.sceneletReplyBridgeInstruction ? [
-        "【从 scene_state 到微信回复】",
+        "【从内心到回复】",
         cfg.sceneletReplyBridgeInstruction,
       ].join("\n") : "",
     ].filter(Boolean).join("\n") : "",
@@ -170,9 +172,9 @@ export async function addFollowUpCandidates(sess, sceneletResult, userBody, role
 //   toolUsage - 工具调用信息
 //   ragUsage - RAG 检索使用情况
 //   timestamp - 事件时间戳
-export async function recordChatHistory({ ai, userId, sess, role, kind = "chat", text, sceneState = "", scenelet = "", sceneletStatus = "", sceneletError = "", proactiveIntentId = "", toolUsage = null, ragUsage = null, timestamp = new Date().toISOString() }) {
+export async function recordChatHistory({ ai, userId, sess, role, kind = "chat", text, scenelet = "", sceneletStatus = "", sceneletError = "", proactiveIntentId = "", toolUsage = null, ragUsage = null, timestamp = new Date().toISOString() }) {
   // 文本和 scenelet 都为空时不记录
-  if (!sess || (!text?.trim() && !sceneState?.trim() && !scenelet?.trim())) return;
+  if (!sess || (!text?.trim() && !scenelet?.trim())) return;
   // 将丰富字段封装后追加到聊天历史
   await appendChatEvent({
     timestamp,
@@ -184,7 +186,6 @@ export async function recordChatHistory({ ai, userId, sess, role, kind = "chat",
     role,
     kind,
     text,
-    sceneState,
     scenelet,
     sceneletStatus,
     sceneletError,
@@ -753,18 +754,20 @@ export async function checkProactiveIntents() {
       // 追加到可见聊天历史
       appendVisibleHistory(sess, "assistant", decision.visibleReply, "proactive", sentAt);
       // 记录聊天历史事件
-      await recordChatHistory({
-        ai,
-        userId,
-        sess,
-        role: "assistant",
-        kind: "proactive",
-        text: decision.visibleReply,
-        scenelet: decision.innerScenelet,
-        proactiveIntentId: intent.id,
-        toolUsage: decision.toolUsage,
-        timestamp: sentAt,
-      });
+      try {
+        await recordChatHistory({
+          ai,
+          userId,
+          sess,
+          role: "assistant",
+          kind: "proactive",
+          text: decision.visibleReply,
+          scenelet: decision.innerScenelet,
+          proactiveIntentId: intent.id,
+          toolUsage: decision.toolUsage,
+          timestamp: sentAt,
+        });
+      } catch (e) { log("⚠", `[${sess.name}] record proactive history fail: ${e.message}`); }
       // 从已发送的主动消息中再次提取日程候选项
       try {
         const activeSchedules = normalizeLifeArcs(roleWorld._lifeArcs).filter(a => a.status === "active" && a.kind);
@@ -871,9 +874,9 @@ export async function batchUpdateMemory({ ai, userId, userMessages, profile }) {
   if (!shouldRunMemoryWriter(combined)) return;
 
   // 对比写入前后的文档大小，记录变更
-  const before = loadMemoryDocument();
+  const before = loadMemoryDocument(profile);
   await updateMemoryDocument(msgs, ai, profile);
-  const after = loadMemoryDocument();
+  const after = loadMemoryDocument(profile);
   const changed = before !== after;
   if (changed) log("🧠", `memory ${before.length}→${after.length}B`);
 }

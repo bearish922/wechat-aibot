@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { parseClaudeContextTranscript } from "../lib/claude-context.mjs";
 
 const statusSource = readFileSync(join(import.meta.dirname, "..", "lib", "gui-status.mjs"), "utf-8");
+const appSource = readFileSync(join(import.meta.dirname, "..", "static", "app.js"), "utf-8");
 
 describe("GUI context status", () => {
   it("uses the Claude transcript as the primary accumulated context source", () => {
@@ -15,6 +16,12 @@ describe("GUI context status", () => {
     assert.match(statusSource, /usage\.output_tokens/);
     assert.match(statusSource, /activeAI === "codex"/);
     assert.match(statusSource, /roleWorld\?\._worldSessions\?\.\[activeAI\]/);
+  });
+
+  it("renders the active backend label instead of a hard-coded CC heading", () => {
+    assert.match(appSource, /contextBackendLabel\(cc\)/);
+    assert.match(appSource, /data-cc="title"/);
+    assert.doesNotMatch(appSource, /<h2>CC Context/);
   });
 
   it("reports the completed-turn context and transcript prompt count", () => {

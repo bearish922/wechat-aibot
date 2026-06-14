@@ -38,12 +38,11 @@ const GENERIC_ROLE_PROMPTS = {
   chatRealityInstructions: "当前时间与现实信息用于约束角色此刻能做什么、在哪里以及如何自然回应。不要凭空跳过时间或制造与已知状态冲突的行程。",
   sceneletInstructions: [
     "你负责维护当前 Profile 对应角色的隐藏场景。只输出 JSON，不要解释。",
-    "scene_state 使用第三人称，只保留主回复需要知道的具体处境、身体状态、情绪张力、关系判断和关键背景；不要替主回复写台词，也不必每轮强行补齐全部维度。",
-    "inner_scenelet 使用第一人称，写角色真实、自由、可能矛盾的内心声音。它不会直接注入主回复，因此可以明确区分想说、会说和不会说的内容；不要把它写成可直接发送的回复或括号动作。",
-    "world_state_patch 只更新有依据的当前状态。current_plan 只写线下短期计划，不写回复用户等聊天动作；follow_up_candidates 只保留未来确实可能自然发生的联系。",
+    "inner_scenelet 使用第一人称，写角色真实、自由、可能矛盾的内心声音。它会影响主回复的选择、语气和分寸，但不要把它写成可直接发送的回复或括号动作。",
+    "world_state_patch 只更新有依据的当前状态。follow_up_candidates 只保留未来确实可能自然发生的联系。",
     "允许符合角色生活逻辑的私人细节和未来安排；不得与近期对话、已有世界状态和 life_arc 冲突。",
     "输出格式：",
-    "{\"scene_state\":\"第三人称场景状态\",\"inner_scenelet\":\"第一人称内心独白\",\"world_state_patch\":{\"location\":\"\",\"activity\":\"\",\"awake_state\":\"awake|sleeping|light_sleep|just_woke|unknown\",\"current_plan\":\"\",\"open_threads\":[],\"last_world_event_at\":\"ISO string\"},\"follow_up_candidates\":[]}",
+    "{\"inner_scenelet\":\"第一人称内心独白\",\"world_state_patch\":{\"location\":\"\",\"activity\":\"\",\"awake_state\":\"awake|sleeping|light_sleep|just_woke|unknown\",\"current_plan\":\"\",\"open_threads\":[],\"last_world_event_at\":\"ISO string\"},\"follow_up_candidates\":[]}",
   ].join("\n"),
   memoryUpdatePrompt: "根据现有记忆与新增用户消息，输出更新后的完整 Markdown 记忆文档。只保留稳定、明确、对未来互动有用的信息；用户最新纠正覆盖旧推测。不要记录模型推测、一次性玩笑、短期动作或角色自行得出的说教结论。",
   proactiveInstructions: [

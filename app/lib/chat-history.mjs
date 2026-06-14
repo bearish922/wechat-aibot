@@ -359,6 +359,28 @@ export async function loadAllEvents() {
   return res[0].values.map(eventFromRow);
 }
 
+// 按 userId + profile 加载跨后端共享的最近可见历史。
+// CC/Codex 的运行线程保持独立，但角色对话上下文统一来自 SQLite role-level sessionKey。
+export async function loadRoleVisibleHistory(userId, profile, limit = 100) {
+  const db = await getDb();
+  const sessionKey = [String(userId || ""), profile || "默认"].join("|");
+  const safeLimit = Math.max(1, Number(limit) || 100);
+  const res = db.exec(`SELECT timestamp,role,kind,text FROM (
+    SELECT timestamp,role,kind,text
+    FROM events
+    WHERE sessionKey = ? AND text != '' AND role IN ('user','assistant')
+    ORDER BY timestamp DESC, CASE WHEN role='assistant' THEN 0 ELSE 1 END
+    LIMIT ?
+  ) ORDER BY timestamp ASC, CASE WHEN role='user' THEN 0 ELSE 1 END`, [sessionKey, safeLimit]);
+  if (!res.length) return [];
+  return res[0].values.map(row => ({
+    timestamp: row[0],
+    role: row[1],
+    kind: row[2] || "chat",
+    text: row[3] || "",
+  }));
+}
+
 // 向数据库追加一条聊天事件
 // 参数: event - 事件对象(含 id, timestamp, userId, role, kind, text 等)
 // 返回: 实际写入的事件对象，text 和 scenelet 都为空时返回 null
@@ -378,7 +400,6 @@ export async function appendChatEvent(event) {
     role: event.role || "assistant",
     kind: event.kind || "chat",
     text: String(event.text || ""),
-    sceneState: event.sceneState ? String(event.sceneState) : "",
     scenelet: event.scenelet ? String(event.scenelet) : "",
     sceneletStatus: event.sceneletStatus ? String(event.sceneletStatus) : "",
     sceneletError: event.sceneletError ? String(event.sceneletError) : "",
@@ -389,7 +410,7 @@ export async function appendChatEvent(event) {
   const row = rowFromEvent(item);
   db.run(`INSERT INTO events
     (id,timestamp,userId,ai,sessionId,sessionName,sessionKey,profile,role,kind,text,scenelet,sceneletStatus,sceneletError,proactiveIntentId,toolUsage,ragUsage,sceneState)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, row);
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, row);
   // 写入后立即持久化
   saveDb();
   return item;
@@ -550,7 +571,7 @@ export async function listConversations(options = {}) {
     e1.profile,
     MAX(e1.timestamp) as lastTs,
     COUNT(*) as cnt,
-    SUM(CASE WHEN e1.scenelet != '' OR e1.sceneState != '' THEN 1 ELSE 0 END) as sceneletCnt,
+    SUM(CASE WHEN e1.scenelet != '' THEN 1 ELSE 0 END) as sceneletCnt,
     (SELECT e2.text FROM events e2 WHERE e2.sessionKey = e1.sessionKey ${latestOrder}) as lastText
     FROM events e1 ${where}
     GROUP BY e1.sessionKey

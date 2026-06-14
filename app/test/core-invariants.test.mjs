@@ -19,7 +19,7 @@ describe("core runtime invariants", () => {
 
   it("keeps hidden-world retries in the existing session", () => {
     const retryStart = turn.indexOf('label: "hidden_world_retry"');
-    const retryEnd = turn.indexOf("if (!result?.sceneState) throw", retryStart);
+    const retryEnd = turn.indexOf("if (!result?.innerScenelet) throw", retryStart);
     const retryBlock = turn.slice(retryStart, retryEnd);
     assert.ok(retryStart >= 0 && retryEnd > retryStart);
     assert.match(retryBlock, /sessionId: world\.sid/);
@@ -46,6 +46,15 @@ describe("core runtime invariants", () => {
     assert.match(history, /SELECT e2\.sessionName FROM events e2 WHERE e2\.sessionKey = e1\.sessionKey/);
     assert.match(history, /m\.timestamp >= ev\.timestamp/);
     assert.match(history, /msgs\[i\]\.timestamp <= ev\.timestamp/);
+  });
+
+  it("hydrates role visible context from shared SQLite history before each turn", () => {
+    assert.match(history, /export async function loadRoleVisibleHistory\(userId, profile/);
+    assert.match(history, /WHERE sessionKey = \? AND text != '' AND role IN \('user','assistant'\)/);
+    assert.match(bot, /styleState\._visibleHistory = await loadRoleVisibleHistory\(userId, turnProfile\)/);
+    const sharedHistoryAt = bot.indexOf("styleState._visibleHistory = await loadRoleVisibleHistory");
+    const sceneletAt = bot.indexOf("sceneletResult = await generateSceneletForTurn", sharedHistoryAt);
+    assert.ok(sharedHistoryAt >= 0 && sceneletAt > sharedHistoryAt);
   });
 
   it("uses the selected profile name in shared role prompts", () => {

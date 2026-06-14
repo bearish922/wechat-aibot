@@ -127,6 +127,81 @@ CHARACTER_ALIASES = {
     "爱音": "千早爱音",
     "长崎素世": "长崎素世",
     "素世": "长崎素世",
+    "市谷有咲": "市谷有咲",
+    "有咲": "市谷有咲",
+    "户山香澄": "户山香澄",
+    "香澄": "户山香澄",
+    "花园多惠": "花园多惠",
+    "多惠": "花园多惠",
+    "小多惠": "花园多惠",
+    "山吹沙绫": "山吹沙绫",
+    "沙绫": "山吹沙绫",
+    "牛込里美": "牛込里美",
+    "里美": "牛込里美",
+    "奥泽美咲": "奥泽美咲",
+    "美咲": "奥泽美咲",
+    "北泽育美": "北泽育美",
+    "育美": "北泽育美",
+    "弦卷心": "弦卷心",
+    "心": "弦卷心",
+    "凑友希那": "凑友希那",
+    "友希那": "凑友希那",
+    "今井莉莎": "今井莉莎",
+    "莉莎": "今井莉莎",
+    "宇田川亚子": "宇田川亚子",
+    "亚子": "宇田川亚子",
+    "白金燐子": "白金燐子",
+    "燐子": "白金燐子",
+    "宇田川巴": "宇田川巴",
+    "巴": "宇田川巴",
+    "美竹兰": "美竹兰",
+    "兰": "美竹兰",
+    "青叶摩卡": "青叶摩卡",
+    "摩卡": "青叶摩卡",
+    "上原绯玛丽": "上原绯玛丽",
+    "绯玛丽": "上原绯玛丽",
+    "羽泽鸫": "羽泽鸫",
+    "鸫": "羽泽鸫",
+    "桐谷透子": "桐谷透子",
+    "透子": "桐谷透子",
+    "八潮瑠唯": "八潮瑠唯",
+    "瑠唯": "八潮瑠唯",
+    "二叶筑紫": "二叶筑紫",
+    "筑紫": "二叶筑紫",
+    "仓田真白": "仓田真白",
+    "真白": "仓田真白",
+    "广町七深": "广町七深",
+    "七深": "广町七深",
+    "高松灯": "高松灯",
+    "灯": "高松灯",
+    "椎名立希": "椎名立希",
+    "立希": "椎名立希",
+    "要乐奈": "要乐奈",
+    "乐奈": "要乐奈",
+    "长崎爽世": "长崎素世",
+    "爽世": "长崎素世",
+    "丰川祥子": "丰川祥子",
+    "祥子": "丰川祥子",
+    "若叶睦": "若叶睦",
+    "睦": "若叶睦",
+    "八幡海铃": "八幡海铃",
+    "海铃": "八幡海铃",
+    "祐天寺若麦": "祐天寺若麦",
+    "若麦": "祐天寺若麦",
+    "三角初华": "三角初华",
+    "初华": "三角初华",
+    "纯田真奈": "纯田真奈",
+    "真奈": "纯田真奈",
+    "和奏瑞依": "LAYER",
+    "LAYER": "LAYER",
+    "佐藤益木": "MASKING",
+    "MASKING": "MASKING",
+    "鳰原令王那": "PAREO",
+    "PAREO": "PAREO",
+    "朝日六花": "LOCK",
+    "LOCK": "LOCK",
+    "珠手知由": "CHU2",
+    "CHU2": "CHU2",
 }
 
 PROFILE_CHARACTERS = {
@@ -137,14 +212,8 @@ PROFILE_CHARACTERS = {
 }
 
 QUERY_TYPE_PATTERNS = [
-    ("relationship", r"关系|朋友|队友|同伴|相处|互动|称呼|小彩|花音|小薰|薰|日菜|爱音|素世|祥子"),
-    ("speech_style", r"说话|语气|口吻|台词|表达|怎么说|说法|聊天|回复"),
-    ("personality", r"性格|为什么|想法|态度|价值观|内心|温柔|现实|努力|真心"),
-    ("habit_preference", r"喜欢|讨厌|偏好|习惯|红茶|咖啡|食物|Leo|香薰"),
-    ("weakness", r"弱点|害怕|不擅长|怕|路痴|电车|虫|画"),
-    ("skill", r"能力|擅长|演技|表演|贝斯|练习|工作|专业"),
-    ("event_history", r"过去|以前|曾经|剧情|事件|假唱|退团|发传单|早期"),
-    ("daily_life", r"日常|生活|大学|家|合租|居家|上课|片场|排练|睡眠|睡觉|睡着|睡了|睡吗|睡|起床|早起|电费|灯|地铁|通勤"),
+    ("lore", r"身高|生日|血型|学校|学部|大学|乐队|成员|经历|过去|以前|曾经|关系|朋友|队友|同伴|互动|称呼|设定|资料|官方|剧情|假唱|退团|作品|歌曲|角色|几岁|多大|多高|哪里|哪儿|花咲川|羽丘|庆鹏|四叶|月之森|CiRCLE|RiNG|PasPale|Pastel.*Palettes|Roselia|Afterglow|PoPiPa|Poppin.*Party|HHW|Hello.*Happy.*World|Morfonica|RAS|Raise.*Suilen|MyGO|Ave.*Mujica|CRYCHIC"),
+    ("names", r"长崎素世|千早爱音|丸山彩|白鹭千圣|素世|爱音|小彩|伊芙|麻弥|日菜|纱夜|薰|花音|育美|有咲|香澄|多惠|沙绫|里美|美咲|心|灯|友希那|莉莎|亚子|燐子|巴|摩卡|兰|鸫|绯玛丽|透子|筑紫|瑠唯|真白|六花|LOCK|LAYER|MASKING|PAREO|CHU2|乐奈|立希|海铃|若麦|睦|祥子"),
 ]
 
 CASUAL_PATTERNS = [
@@ -928,9 +997,39 @@ def cmd_query(
         })
     ranked.sort(key=lambda item: item["score"], reverse=True)
 
+    # Build a set of character fact sources (人物画像 + 局部事实) for two-stage retrieval.
+    # When the query involves character names, basic facts (school, birthday, etc.)
+    # live in these docs and should not be crowded out by relationship docs.
+    fact_sources = set()
+    for char in qmeta.get("characters", []):
+        fact_sources.add(f"01_角色/{char}/人物画像.md")
+        fact_sources.add(f"01_角色/{char}/局部事实.md")
+
     selected = []
     selected_sources = set()
+
+    # Stage 1: character fact documents first (grounding against hallucination).
+    # Cap at top_k - 1 so at least one slot remains for relationship/context docs.
+    stage1_limit = max(1, top_k - 1) if len(fact_sources) > 1 else top_k
     for item in ranked:
+        if len(selected) >= stage1_limit:
+            break
+        if item["score"] < min_score:
+            continue
+        if not result_allowed_for_query(item["hit"].payload or {}, qmeta):
+            continue
+        source = (item["hit"].payload or {}).get("source")
+        if source not in fact_sources:
+            continue
+        if source in selected_sources:
+            continue
+        selected_sources.add(source)
+        selected.append(item)
+
+    # Stage 2: fill remaining slots from all other sources
+    for item in ranked:
+        if len(selected) >= top_k:
+            break
         if item["score"] < min_score:
             continue
         if not result_allowed_for_query(item["hit"].payload or {}, qmeta):

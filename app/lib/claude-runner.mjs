@@ -1165,7 +1165,7 @@ async function runApiJson({ systemPrompt = "", body = "", label = "api_hidden", 
     systemPrompt,
     body,
     model: selectedModel,
-    maxTokens: 4000,
+    maxTokens: 8000,
     temperature: 0.7,
     timeoutMs,
   });

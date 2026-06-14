@@ -40,6 +40,21 @@ describe("Role prompt suites", () => {
     assert.deepEqual(chisato.ragKeywords, untuned.ragKeywords);
   });
 
+  it("keeps Chisato inner emotion causal without leaking inner prose", () => {
+    const scenelet = loadPrompts("白鹭千圣").sceneletInstructions;
+    const bridge = loadPrompts("白鹭千圣").sceneletReplyBridgeInstruction;
+    assert.match(scenelet, /新事实、纠正前提或说明自己已有经验时，先更新判断/);
+    assert.match(scenelet, /普通低风险日常不主动发明专业审查项/);
+    assert.match(bridge, /过滤的是语言成品/);
+    assert.match(bridge, /感性金句.*外溢/);
+    assert.match(bridge, /保留的是表达选择和互动后果/);
+    assert.match(bridge, /不是强制每轮显露温柔/);
+    assert.match(bridge, /不自动禁止它对语气、取舍和让步产生影响/);
+    assert.match(bridge, /角色一致性不等于坚持旧判断/);
+    assert.match(bridge, /给最少够用的答案，不自动扩写成完整检查表/);
+  });
+
+
   it("provides a complete neutral baseline for every scoped field", () => {
     const generic = getGenericRolePromptDefaults();
     assert.deepEqual(Object.keys(generic).sort(), [...ROLE_PROMPT_FIELDS].sort());

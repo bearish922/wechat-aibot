@@ -123,6 +123,7 @@ export function getChatStyle(profile = "") {
 
 // WeChat ilink API 单条消息字节上限约 2048 字节，留安全余量设为 1800
 export const MAX_REPLY_LEN = 1800;
+const MAX_SOCIAL_PARTS = 8;
 
 // 根据小时数返回中文时间段称谓
 function timePeriodFromHour(hour) {
@@ -281,6 +282,21 @@ function makeChatBeats(sentences) {
   return chunks;
 }
 
+// 当段落数超过上限时，贪心合并最短的相邻段落，直到数量 ≤ limit
+function collapseParts(parts, limit) {
+  while (parts.length > limit) {
+    let best = 0;
+    let bestLen = Infinity;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const len = parts[i].length + parts[i + 1].length;
+      if (len < bestLen) { bestLen = len; best = i; }
+    }
+    parts[best] = parts[best] + "\n\n" + parts[best + 1];
+    parts.splice(best + 1, 1);
+  }
+  return parts;
+}
+
 // 入口：将 AI 回复拆分为多条消息
 // 优先按自然段落拆分（≥2 段且非结构化内容），其次按句子 + 随机概率拆分
 export function splitSocialReply(text) {
@@ -306,7 +322,7 @@ export function splitSocialReply(text) {
       if (current.length) parts.push(current.join("\n"));
       return parts;
     });
-    if (explicitParts.length >= 2) return explicitParts;
+    if (explicitParts.length >= 2) return collapseParts(explicitParts, MAX_SOCIAL_PARTS);
   }
   const sentences = text
     .replace(/\r/g, "")
@@ -322,4 +338,3 @@ export function splitSocialReply(text) {
   }
   return [text.trim()];
 }
-

@@ -357,9 +357,7 @@ function normalizeLifeArcs(raw, { includeClosed = false } = {}) {
 function normalizeSceneletResult(raw) {
   if (!raw || typeof raw !== "object") return null;
   return {
-    // 第三人称场景状态（注入主回复）
-    sceneState: raw.scene_state ? String(raw.scene_state).trim() : "",
-    // 第一人称内心独白（内部消费，不注入主回复）
+    // 第一人称内心独白（注入主回复，影响回复语气和分寸）
     innerScenelet: raw.inner_scenelet ? String(raw.inner_scenelet).trim() : "",
     // follow-up 候选消息列表
     followUpCandidates: Array.isArray(raw.follow_up_candidates) ? raw.follow_up_candidates : [],

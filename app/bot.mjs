@@ -56,7 +56,7 @@ import { getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendin
 import { uuid, sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost } from "./lib/wechat.mjs";
 import { loadMemoryDocument, loadWorldMemoryDocument } from "./lib/memory.mjs";
-import { loadAllEvents } from "./lib/chat-history.mjs";
+import { loadAllEvents, loadRoleVisibleHistory } from "./lib/chat-history.mjs";
 import { getSceneConfig, emptyToolUsage, mergeToolUsage, sanitizeVisibleReplyText, normalizeLifeArcs } from "./lib/normalize.mjs";
 import { envWithProxy, commandExists, isApiConfigured, resolveApiConfig, CLAUDE, CODEX, LOGS_DIR } from "./lib/claude-runner.mjs";
 import { startBackendChat } from "./lib/backend-adapter.mjs";
@@ -216,7 +216,7 @@ function shouldUseRoleplayRag(userMessage) {
   for (const key of ["lore", "names"]) {
     const pattern = String(kw[key] || "").trim();
     if (!pattern) continue;
-    try { if (new RegExp(pattern, "u").test(text)) return true; } catch {}
+    try { if (new RegExp(pattern, "iu").test(text)) return true; } catch {}
   }
   return false;
 }
@@ -355,10 +355,20 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
   // 是否进入角色扮演聊天模式
   const isProfileChat = Boolean(turnProfile && profileTemplates[turnProfile] && turnProfile !== "默认");
 
+  // 角色可见历史按 userId + profile 跨后端共享。各后端保留独立运行线程，
+  // 但 hidden-world 和主回复每轮都使用 SQLite 中同一份连续聊天上下文。
+  if (isProfileChat) {
+    try {
+      styleState._visibleHistory = await loadRoleVisibleHistory(userId, turnProfile);
+    } catch (e) {
+      log("⚠", `[${sessionName}] shared visible history load fail: ${e.message}`);
+    }
+  }
+
   // 加载角色记忆文档，用于注入 AI 系统提示
   const memoryPrompt = isProfileChat ? (() => {
-    const userItems = loadMemoryDocument();
-    const worldItems = loadWorldMemoryDocument();
+    const userItems = loadMemoryDocument(turnProfile);
+    const worldItems = loadWorldMemoryDocument(turnProfile);
     if (!userItems && !worldItems) return "";
     const instruction = loadPrompts(turnProfile).memoryContextInstruction || "";
     const parts = [];
@@ -370,10 +380,15 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
   const roleWorld = isProfileChat ? getRoleWorld(turnProfile) : null; // 获取角色世界状态
   let sceneletResult = null;
   let sceneletError = null;
+  let ragUsage = null; // 本轮 RAG 检索统计（在 HW 调用中注入）
   // 角色扮演模式下生成场景小剧场
   if (isProfileChat) {
     try {
-      sceneletResult = await generateSceneletForTurn({ ai, userId, sess: styleState, profile: turnProfile, userBody: body, memoryPrompt });
+      // RAG 知识库查询：在 HW 调用之前执行，结果注入 inner scenelet 生成
+      const ragEligible = Boolean(RAG_ENABLED && !hasInboundAttachment(body) && shouldUseRagForTurn(body, turnProfile));
+      const ragContext = ragEligible ? queryRag(body, turnProfile) : "";
+      ragUsage = { eligible: ragEligible, used: Boolean(ragContext), chars: ragContext.length };
+      sceneletResult = await generateSceneletForTurn({ ai, userId, sess: styleState, profile: turnProfile, userBody: body, memoryPrompt, ragContext });
     } catch (e) {
       sceneletError = e.message;
       log("⚠", `[${sessionName}] scenelet fail: ${e.message}`);
@@ -381,7 +396,7 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
   }
 
   // 构建日志条目基础信息
-  const logEntry = { ts: new Date().toISOString(), ai, userId, sessionName, sid, firstTurn: styleState._firstTurn, isProfileChat, profile: turnProfile || "默认", bodyChars: String(body || "").length, sceneletChars: sceneletResult?.sceneState?.length || 0, sceneletError: sceneletError || null };
+  const logEntry = { ts: new Date().toISOString(), ai, userId, sessionName, sid, firstTurn: styleState._firstTurn, isProfileChat, profile: turnProfile || "默认", bodyChars: String(body || "").length, sceneletChars: sceneletResult?.innerScenelet?.length || 0, sceneletError: sceneletError || null };
   const safeName = sessionName.replace(/[<>:"/\\|?*]/g, "_");  // 文件系统安全的名称
   const logFile = path.join(LOGS_DIR, `${safeName}-${ai}.jsonl`);   // 结构化日志
   const txtLogFile = path.join(LOGS_DIR, `${safeName}-${ai}.txt`);  // 人类可读日志
@@ -398,13 +413,12 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
   // 记录用户原始消息和上下文到日志
   writeTxtLog("USER MESSAGE", body);
   if (memoryPrompt) writeTxtLog("MEMORY SNAPSHOT", memoryPrompt);
-  if (sceneletResult?.sceneState) writeTxtLog("SCENE STATE", sceneletResult.sceneState);
   if (sceneletResult?.innerScenelet) writeTxtLog("INNER SCENELET", sceneletResult.innerScenelet);
 
 
   return {
     turnStarted, rawProfile, turnProfile, prefix,
-    isProfileChat, memoryPrompt, roleWorld, sceneletResult, sceneletError,
+    isProfileChat, memoryPrompt, roleWorld, sceneletResult, sceneletError, ragUsage,
     logEntry, logFile, txtLogFile, appendLog, writeTxtLog,
   };
 }
@@ -422,20 +436,16 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
 //       onProc - 输出回调；styleState - 会话状态；ctx - 上下文对象（来自 prepareTurnContext）
 // 输出：Object { turnSucceeded, assistantFullText, toolUsage, lastUsage }
 async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextToken, firstTurn, onProc, styleState, ctx) {
-  const { isProfileChat, turnProfile, memoryPrompt, roleWorld, sceneletResult, prefix, appendLog, writeTxtLog } = ctx;
+  const { isProfileChat, turnProfile, memoryPrompt, roleWorld, sceneletResult, prefix, appendLog, writeTxtLog, ragUsage: ctxRagUsage } = ctx;
   let turnSucceeded = false;           // 本轮是否成功完成
   let assistantFullText = "";          // AI 生成的完整回复文本
   let toolUsage = emptyToolUsage();    // 本轮工具使用统计
-  let ragUsage = null;                 // 本轮 RAG 检索统计
+  let ragUsage = ctxRagUsage;          // RAG 检索统计（来自 prepareTurnContext，已注入 HW）
   let lastUsage = null;                // 最后一次 API 用量数据
   let activeSid = sid;                 // CC 会话失效并恢复时更新为新 SID
   const streamStartedAt = new Date().toISOString();  // 流式处理开始时间
 
   try {
-    // 执行 RAG 知识库查询（仅角色扮演模式且无附件时）
-    const ragEligible = Boolean(RAG_ENABLED && !hasInboundAttachment(body) && isProfileChat && shouldUseRagForTurn(body, turnProfile));
-    const ragContext = ragEligible ? queryRag(body, turnProfile) : "";
-    ragUsage = { eligible: ragEligible, used: Boolean(ragContext), chars: ragContext.length };
     // 稳定风格提示
     const stableStyle = isProfileChat ? expressionCapabilityPrompt(turnProfile) : "";
     // 构建场景上下文块
@@ -445,7 +455,7 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
     // 场景记忆块（仅角色扮演模式的首轮）
     const sceneMemoryBlock = (isProfileChat && firstTurn) ? getSceneMemorySystemBlock(roleWorld, ai, turnProfile) : "";
     // 组装发送给 AI 的完整消息体
-    const turnBody = await buildTurnBody(body, ragContext, sceneContext, recentVisibleContext(styleState), sceneMemoryBlock, turnProfile);
+    const turnBody = await buildTurnBody(body, sceneContext, recentVisibleContext(styleState), sceneMemoryBlock, turnProfile);
 
     writeTxtLog("TURN BODY", turnBody);
     if (stableStyle) writeTxtLog("STABLE STYLE", stableStyle);
@@ -517,7 +527,7 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
     streamHandler({ drain: true });
 
     // 合并 streamResult 中的工具使用统计
-    appendLog({ ragChars: ragContext?.length || 0, toolUsage: { webSearch: toolUsage.webSearch, webFetch: toolUsage.webFetch, tools: toolUsage.tools } });
+    appendLog({ ragChars: ragUsage?.chars || 0, toolUsage: { webSearch: toolUsage.webSearch, webFetch: toolUsage.webFetch, tools: toolUsage.tools } });
 
     // 发送最终回复给用户
     const t = (isProfileChat ? sanitizeVisibleReplyText(assistantFullText) : String(assistantFullText || "")).trim();
@@ -532,7 +542,7 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
       if (toolUsage.webSearch > 0) parts.push(`webSearch×${toolUsage.webSearch}`);
       if (toolUsage.webFetch > 0) parts.push(`webFetch×${toolUsage.webFetch}`);
       if (toolUsage.tools.length > 0) parts.push(`tools: ${toolUsage.tools.join(", ")}`);
-      if (ragContext) parts.push(`rag: ${ragContext.length}B`);
+      if (ragUsage?.used) parts.push(`rag: ${ragUsage.chars}B`);
       if (parts.length) log("\u{2295}", `[${sessionName}] ${parts.join(" ")}`);
     }
   } catch (e) {
@@ -541,6 +551,25 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
     styleState._lastFailedTurn = { body, timestamp: new Date().toISOString(), reason: e.message?.slice(0, 500), sid: activeSid };
     await sendMessage(userId, `[系统提示] 回复失败：${e.message?.slice(0, 150)}`, contextToken).catch(() => {});
     appendLog({ error: e.message?.slice(0, 500) });
+
+    // 即使发送失败，也保留已生成的内容和 scenelet 写入历史
+    const failAt = new Date().toISOString();
+    const failText = assistantFullText ? sanitizeVisibleReplyText(assistantFullText).trim() : "";
+    if (isProfileChat && (failText || ctx.sceneletResult?.innerScenelet)) {
+      appendVisibleHistory(styleState, "user", body, "chat", failAt);
+      if (failText) appendVisibleHistory(styleState, "assistant", failText, "chat", failAt);
+      try {
+        await recordChatHistory({ ai, userId, sess: styleState, role: "user", kind: "chat", text: body, timestamp: failAt });
+        await recordChatHistory({ ai, userId, sess: styleState, role: "assistant", kind: "chat",
+          text: failText || "[发送失败，内容未完整发出]",
+          scenelet: ctx.sceneletResult?.innerScenelet || "",
+          sceneletStatus: ctx.sceneletResult ? "ok" : (ctx.sceneletError ? "error" : "skipped"),
+          sceneletError: ctx.sceneletError || "",
+          toolUsage, ragUsage, timestamp: failAt });
+      } catch (dbErr) {
+        ctx.writeTxtLog("DB WRITE ERROR (fail)", dbErr.message);
+      }
+    }
   }
 
   return { turnSucceeded, assistantFullText, toolUsage, ragUsage, lastUsage };
@@ -588,13 +617,13 @@ async function finalizeTurnSuccess(params) {
   // 持久化对话历史到数据库（失败时写入日志便于恢复）
   try {
     await recordChatHistory({ ai, userId, sess: styleState, role: "user", kind: "chat", text: body, timestamp: userAt });
-    await recordChatHistory({ ai, userId, sess: styleState, role: "assistant", kind: "chat", text: cleanText, sceneState: sceneletResult?.sceneState || "", scenelet: sceneletResult?.innerScenelet || "", sceneletStatus: sceneletResult ? "ok" : (sceneletError ? "error" : "skipped"), sceneletError: sceneletError || "", toolUsage, ragUsage, timestamp: assistantAt });
+    await recordChatHistory({ ai, userId, sess: styleState, role: "assistant", kind: "chat", text: cleanText, scenelet: sceneletResult?.innerScenelet || "", sceneletStatus: sceneletResult ? "ok" : (sceneletError ? "error" : "skipped"), sceneletError: sceneletError || "", toolUsage, ragUsage, timestamp: assistantAt });
   } catch (e) {
     writeTxtLog("DB WRITE ERROR", e.message);
     // fallback: 将历史数据以 JSON 写入日志，方便手动恢复
     writeTxtLog("HISTORY FALLBACK", JSON.stringify({
       user: { role: "user", kind: "chat", text: body, timestamp: userAt },
-      assistant: { role: "assistant", kind: "chat", text: cleanText, sceneState: sceneletResult?.sceneState || "", scenelet: sceneletResult?.innerScenelet || "", sceneletStatus: sceneletResult ? "ok" : (sceneletError ? "error" : "skipped"), timestamp: assistantAt },
+      assistant: { role: "assistant", kind: "chat", text: cleanText, scenelet: sceneletResult?.innerScenelet || "", sceneletStatus: sceneletResult ? "ok" : (sceneletError ? "error" : "skipped"), timestamp: assistantAt },
     }, null, 2));
   }
 

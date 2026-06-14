@@ -11,8 +11,8 @@ export const DEFAULT_VISION_CAPTION_PROMPT = [
 ].join("\n");
 
 export const DEFAULT_RAG_KEYWORDS = {
-  lore: "身高|生日|血型|学校|学部|大学|乐队|成员|经历|过去|以前|曾经|关系|朋友|队友|同伴|互动|称呼|设定|资料|官方|剧情|假唱|退团|作品|歌曲|角色|几岁|多大|多高|哪里|哪儿",
-  names: "长崎素世|千早爱音|丸山彩|白鹭千圣|素世|爱音|小彩|MyGO|CRYCHIC|Pastel\\*Palettes|PasPale",
+  lore: "身高|生日|血型|学校|学部|大学|乐队|成员|经历|过去|以前|曾经|关系|朋友|队友|同伴|互动|称呼|设定|资料|官方|剧情|假唱|退团|作品|歌曲|角色|几岁|多大|多高|哪里|哪儿|花咲川|羽丘|庆鹏|四叶|月之森|CiRCLE|RiNG|PasPale|Pastel.*Palettes|Roselia|Afterglow|PoPiPa|Poppin.*Party|HHW|Hello.*Happy.*World|Morfonica|RAS|Raise.*Suilen|MyGO|Ave.*Mujica|CRYCHIC",
+  names: "长崎素世|千早爱音|丸山彩|白鹭千圣|素世|爱音|小彩|伊芙|麻弥|日菜|纱夜|薰|花音|育美|有咲|香澄|多惠|沙绫|里美|美咲|心|灯|友希那|莉莎|亚子|燐子|巴|摩卡|兰|鸫|绯玛丽|透子|筑紫|瑠唯|真白|六花|LOCK|LAYER|MASKING|PAREO|CHU2|乐奈|立希|海铃|若麦|睦|祥子|MyGO|CRYCHIC|Pastel\\*Palettes|Roselia|Afterglow|PoPiPa|Poppin.*Party|HHW|Hello.*Happy.*World|Morfonica|RAS|Raise.*Suilen|Ave.*Mujica",
 };
 
 // ─── 默认行为参数 ──────────────────────────────────────────────
