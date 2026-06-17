@@ -60,6 +60,7 @@ export async function generateSceneletForTurn({ ai, userId, sess, profile, userB
     firstTurn: world.firstTurn,
     model: world.model || backendModel(ai),
     systemPrompt: buildHiddenWorldSystemPrompt(profile, sceneMemoryBlock, memoryPrompt),
+    profile,
   });
   let result = normalizeSceneletResult(raw);
   const firstAttemptToolUsage = result?.toolUsage;
@@ -77,6 +78,7 @@ export async function generateSceneletForTurn({ ai, userId, sess, profile, userB
       firstTurn: false,
       model: world.model || backendModel(ai),
       systemPrompt: buildHiddenWorldSystemPrompt(profile, sceneMemoryBlock, memoryPrompt),
+      profile,
     });
     result = normalizeSceneletResult(raw);
     if (result) result.toolUsage = mergeToolUsage(firstAttemptToolUsage, result.toolUsage);
@@ -285,7 +287,7 @@ async function evaluateProactiveIntent({ ai, userId, sess, profile, intent }) {
     sess,
   });
   // 调用 AI 做出决策，并标准化返回结果
-  const raw = await runBackendStructured(prompt, { backend: ai, label: "proactive" });
+  const raw = await runBackendStructured(prompt, { backend: ai, label: "proactive", profile });
   return normalizeProactiveDecision(raw);
 }
 
@@ -345,6 +347,7 @@ async function advanceWorldState({ ai, roleWorld, profile, now }) {
     bare: true,
     model: backendModel(ai),
     timeoutMs: 30000,
+    profile,
   });
 
   // 验证返回值有效性
@@ -420,6 +423,7 @@ async function runDailyShareSeed({ ai, sess, profile }) {
     model: backendModel(ai),
     timeoutMs: 60000,
     systemPrompt: profileTemplates[profile] || "",
+    profile,
   });
 
   // 验证返回：必须有 has_share 标记且 message_intent 非空
@@ -527,6 +531,7 @@ export async function runScheduleExtractor({ ai, userBody, scenelet, assistantRe
     bare: true,
     model: backendModel(ai),
     timeoutMs: 45000,
+    profile,
   });
 
   // 验证返回结构并过滤掉无效候选项
@@ -585,6 +590,7 @@ export async function maybeCreateScheduleEntry({ ai, sess, profile }) {
     bare: false,
     model: backendModel(ai),
     timeoutMs: cfg.scheduleFinalizationTimeoutMs,
+    profile,
   });
 
   // 模型选择跳过：无候选项被选中，清空待处理列表
@@ -851,6 +857,7 @@ export async function generateSceneMemory({ ai, userId, sess, profile, roleWorld
     bare: true,
     model: backendModel(ai),
     timeoutMs: 240000,
+    profile,
   });
   // 兼容多种返回格式：纯字符串、summary 字段、scene_memory 字段、inner_scenelet 字段
   return typeof raw === "string" ? raw : (raw?.summary || raw?.scene_memory || raw?.inner_scenelet || "");

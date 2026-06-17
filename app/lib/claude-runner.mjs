@@ -195,6 +195,29 @@ function envWithProxy(proxyUrl, extra = {}) {
   return env;
 }
 
+// claudeConfigDirFor - 查找 profile 对应的 Claude 配置目录
+// 用于按 profile 路由到不同的 cc-switch provider（如 cst18 走 DeepSeek，
+// 其他 profile 跟随 ~/.claude/settings.json 的当前选择）
+// 参数: profile - 角色模板名称（可为空）
+// 返回: 配置目录路径字符串；未配置则返回 null（claude.exe 使用默认 ~/.claude）
+function claudeConfigDirFor(profile) {
+  if (!profile) return null;
+  const map = configValue("paths.profileClaudeConfigDirs", {});
+  if (!map || typeof map !== "object") return null;
+  const dir = map[profile];
+  return dir && String(dir).trim() ? String(dir).trim() : null;
+}
+
+// envForProfile - 为指定 profile 构建 Claude 子进程环境
+// 在代理环境之上，按 profile 注入 CLAUDE_CONFIG_DIR，让 claude.exe 加载独立的 settings.json
+function envForProfile(proxyUrl, profile, extra = {}) {
+  const env = envWithProxy(proxyUrl, extra);
+  const dir = claudeConfigDirFor(profile);
+  if (dir) env.CLAUDE_CONFIG_DIR = dir;
+  else delete env.CLAUDE_CONFIG_DIR;
+  return env;
+}
+
 // commandExists - 检查命令是否存在于文件系统或 PATH 中
 // 参数: command - 命令路径或名称
 // 返回: 存在则 true，否则 false
@@ -342,7 +365,7 @@ function writeHiddenUsageEvent(event) {
 //   options.persist - 是否保持会话上下文（默认 false，即无状态调用）
 //   options.systemPrompt - 系统提示词（会写入临时文件）
 // 返回: 解析后的 JSON 对象（含 _toolUsage、_hiddenUsage、_hiddenCall 元数据），失败返回 null
-async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, bare = true, model = null, sessionName = "", sessionId = "", firstTurn = false, persist = false, systemPrompt = "" } = {}) {
+async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, bare = true, model = null, sessionName = "", sessionId = "", firstTurn = false, persist = false, systemPrompt = "", profile = "" } = {}) {
   // Claude 命令不可用时直接返回 null
   if (!commandExists(CLAUDE)) return null;
   // 记录调用开始时间和模型
@@ -385,7 +408,7 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
     cwd: AI_WORK_DIR,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
-    env: envWithProxy(CLAUDE_HTTPS_PROXY),
+    env: envForProfile(CLAUDE_HTTPS_PROXY, profile),
   });
   // 忽略 stdin 错误，将 prompt 写入 stdin 后关闭
   proc.stdin.on("error", () => {});
@@ -551,7 +574,7 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
     timeout: CLAUDE_TIMEOUT_MS,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
-    env: envWithProxy(CLAUDE_HTTPS_PROXY),
+    env: envForProfile(CLAUDE_HTTPS_PROXY, profile),
   });
 
   // 将用户消息写入 stdin 后关闭

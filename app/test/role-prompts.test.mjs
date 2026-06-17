@@ -29,8 +29,8 @@ describe("Role prompt suites", () => {
   it("migrates the current tuned suite to Chisato without leaking it to new roles", () => {
     const document = loadPromptDocument();
     assert.equal(document.version, 2);
-    assert.deepEqual(Object.keys(document.roles), ["白鹭千圣"]);
-    assert.equal(Object.keys(document.roles["白鹭千圣"]).length, ROLE_PROMPT_FIELDS.length);
+    assert.deepEqual(Object.keys(document.roles), ["白鹭千圣", "梦中的千圣"]);
+    assert.equal(Object.keys(document.roles["白鹭千圣"]).length, ROLE_PROMPT_FIELDS.length + 1); // +1 为 runtimePolicy
 
     const chisato = loadPrompts("白鹭千圣");
     const untuned = loadPrompts("新角色");

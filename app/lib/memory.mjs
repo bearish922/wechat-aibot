@@ -85,6 +85,7 @@ export async function updateMemoryDocument(userMessages, backend = "cc", profile
     bare: false,
     model: backendModel(backend),
     timeoutMs: 120000,
+    profile,
   });
 
   const updated = typeof raw === "string" ? raw : (raw?.result || raw?.text || "");
