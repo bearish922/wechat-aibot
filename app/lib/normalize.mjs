@@ -351,17 +351,31 @@ function normalizeLifeArcs(raw, { includeClosed = false } = {}) {
     .sort((a, b) => Date.parse(a.updatedAt || a.createdAt || 0) - Date.parse(b.updatedAt || b.createdAt || 0));
 }
 
-// 规范化 scenelet 执行结果对象(LLM 返回的 JSON 结构)
-// 参数: raw - 原始 scenelet 结果对象(snake_case 字段名)
-// 返回: 规范化后的结果对象，包含 innerScenelet、候选列表、世界状态补丁、工具统计等
+// 规范化 scenelet 执行结果对象（LLM 返回的 JSON 结构）。
+// 负责任的 LLM 调用器（claude-runner.mjs）将原始 JSON 传给此函数，统一清洗和规范化。
+//
+// visible_reply 提取逻辑：
+//   - 单 Actor 模式（actorMode="single"）：LLM 同时生成 inner_scenelet 与 visible_reply，
+//     visible_reply 即最终发送给用户的文本，需经过 sanitizeVisibleReplyText() 清洗
+//   - 双阶段模式（actorMode="two_stage"）：hidden-world 只输出 inner_scenelet，
+//     visible_reply 由后续主回复模型独立生成；此处 visibleReply 为空字符串
+//   - visible_reply 缺失或空字符串时：返回空字符串，由调用方判断是否跳过发送
+//
+// 参数: raw - 原始 scenelet 结果对象（snake_case 字段名，来自 LLM JSON 输出）
+// 返回: 规范化后的结果对象，包含 innerScenelet、visibleReply、候选列表、世界状态补丁、工具统计等
 function normalizeSceneletResult(raw) {
   if (!raw || typeof raw !== "object") return null;
+  // 提取 visible_reply：单 Actor 模式下这是最终的对外回复文本，需立即清洗
+  // 双阶段模式下该字段通常不存在或为空，sanitizeVisibleReplyText("") 返回 ""
+  const visibleReply = raw.visible_reply ? sanitizeVisibleReplyText(raw.visible_reply) : "";
   return {
-    // 第一人称内心独白（注入主回复，影响回复语气和分寸）
+    // 角色第一人称内心独白（两种模式下均产生），用于后续上下文注入
     innerScenelet: raw.inner_scenelet ? String(raw.inner_scenelet).trim() : "",
+    // 单 Actor 模式下的可见回复文本（已清洗）；双阶段模式下为空
+    visibleReply,
     // follow-up 候选消息列表
     followUpCandidates: Array.isArray(raw.follow_up_candidates) ? raw.follow_up_candidates : [],
-    // 世界状态补丁
+    // 世界状态补丁（双阶段模式下由 hidden-world 输出，单 Actor 由 continuity updater 输出）
     worldStatePatch: raw.world_state_patch && typeof raw.world_state_patch === "object" ? raw.world_state_patch : null,
     // 工具使用统计
     toolUsage: normalizeToolUsage(raw._toolUsage) || emptyToolUsage(),
@@ -424,22 +438,71 @@ function normalizeScheduleCandidates(raw = []) {
   }).filter(Boolean).slice(0, 5);
 }
 
-// 清洗用户可见的回复文本：移除场景标记、分隔线、多余空行、压缩空格
+// 清洗用户可见的回复文本：移除场景标记、分隔线、多余空行、压缩空格。
+// 圆括号是角色扮演类 AI 最容易产生"小说体"泄漏的渠道，采用分级拦截模式：
+//   保留短促自然的括号（潜台词、神态、身体反应），
+//   拦截冗长旁白、连续多段独立括号、环境全景播报和舞台调度式描写。
 // 参数: text - 原始回复文本
 // 返回: 清洗后的干净文本
 function sanitizeVisibleReplyText(text) {
-  return String(text || "")
-    // 移除 [某某某] 格式的场景标记(如 [思考] [回忆])
+  let t = String(text || "")
+    // 移除 [某某某] 格式的场景标记（如 [思考] [回忆]）
     .replace(/\[[一-鿿A-Za-z]{1,12}\]/gu, "")
-    // 移除独立分隔线行
+    // 移除独立分隔线行（如 ——————）
     .replace(/^\s*[—\-－]{2,}\s*$/gm, "")
-    // 破折号替换为逗号
+    // 破折号替换为逗号（微信聊天中破折号不自然）
     .replace(/—+/g, "，")
-    // 压缩多个空格/制表符为一个
-    .replace(/[ \t]{2,}/g, " ")
+    // 移除 JSON 泄漏：以 { 或 [ 开头的独立行
+    .replace(/^\s*[\{\[].*[\}\]]\s*$/gm, "")
+    // 移除系统标签泄漏（如 <|inner|> <|visible|> 等）
+    .replace(/<\|[^>]*\|>/g, "");
+
+  // ── 圆括号分级拦截 ──
+  // 目的：AI 常在括号中泄漏"小说体"描写，需逐级过滤同时保留自然的短括号。
+
+  // 规则 1：删除超长括号（> 100 字符）
+  // 这类括号通常是一整段的镜头旁白、环境播报或心理活动描写，
+  // 远超正常聊天中括号内文字的长度（正常 5-30 字符），直接整段删除。
+  t = t.replace(/（[^）]{100,}）/g, "");
+  t = t.replace(/\([^)]{100,}\)/g, "");
+
+  // 规则 2：限制括号段数，最多保留 2 段
+  // 连续 3 段以上的独立括号（如"（推门）（看窗外）（叹气）（低头）"）
+  // 是典型的动作脚本/舞台调度模式，微信聊天中不自然。
+  // 保留前 2 段能传达关键神态/动作，删除后续避免读起来像剧本。
+  const parenPattern = /[（(][^）)]*[）)]/g;
+  const parenMatches = t.match(parenPattern);
+  if (parenMatches && parenMatches.length > 2) {
+    let count = 0;
+    t = t.replace(parenPattern, (match) => {
+      count++;
+      return count <= 2 ? match : "";
+    });
+  }
+
+  // 规则 3：纯环境全景括号 → 删除
+  // 判断标准：括号内同时包含地点词（窗外/玄关/教室/街头等）和环境词（灯光/风/雨/车流等），
+  // 且长度 > 20 字符。这类是明显的"第三人称场景描写"泄漏。
+  // 单独出现地点（"在教室"）或单独环境（"风吹过"）不触发，避免误删正常描述。
+  const scenePlaceWords = /窗外|玄关|门口|路边|站台|教室|练习室|片场|后台|舞台|公寓|客厅|房间|厨房|浴室|阳台|街道|路口/;
+  const sceneEnvWords = /灯光|路灯|天色|阳光|风|雨|电车|车流|行人|人群|声音|广播|音乐/;
+  t = t.replace(/[（(][^）)]*[）)]/g, (match) => {
+    const inner = match.slice(1, -1);
+    if (inner.length > 20 && scenePlaceWords.test(inner) && sceneEnvWords.test(inner)) {
+      return "";
+    }
+    return match;
+  });
+
+  // 压缩多个空格/制表符为一个
+  t = t.replace(/[ \t]{2,}/g, " ")
     // 压缩 3 个以上连续空行为 2 个
     .replace(/\n{3,}/g, "\n\n")
+    // 清理因括号删除产生的多余空行
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
+
+  return t;
 }
 
 // 生成本地日期 key 字符串(YYYY-MM-DD 格式)

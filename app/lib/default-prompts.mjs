@@ -1,5 +1,7 @@
-// Global prompt and runtime defaults. Role-scoped prompt defaults live in role-prompts.mjs.
+// 全局 prompt 与运行时默认参数。角色级 prompt 默认值在 role-prompts.mjs 中定义。
 
+// ─── 图片解析 prompt ──────────────────────────────────────────
+// 发给视觉模型的系统指令，要求客观解析图片供后续聊天模型使用
 export const DEFAULT_VISION_CAPTION_PROMPT = [
   "请为另一个聊天模型客观解析这张图片，输出中文。",
   "优先识别：画面主体、可见文字/OCR、物品类型、作品名或品牌名、场景、数量/分量。",
@@ -10,46 +12,76 @@ export const DEFAULT_VISION_CAPTION_PROMPT = [
   "输出 3-6 句；需要时可加一行'低置信度/不确定点'。不要角色扮演。",
 ].join("\n");
 
+// ─── RAG 记忆检索关键词 ─────────────────────────────────────
+// lore: 世界观/设定类关键词，用于检索角色背景资料
+// names: 角色名关键词，用于检索特定角色的记忆文档
 export const DEFAULT_RAG_KEYWORDS = {
   lore: "身高|生日|血型|学校|学部|大学|乐队|成员|经历|过去|以前|曾经|关系|朋友|队友|同伴|互动|称呼|设定|资料|官方|剧情|假唱|退团|作品|歌曲|角色|几岁|多大|多高|哪里|哪儿|花咲川|羽丘|庆鹏|四叶|月之森|CiRCLE|RiNG|PasPale|Pastel.*Palettes|Roselia|Afterglow|PoPiPa|Poppin.*Party|HHW|Hello.*Happy.*World|Morfonica|RAS|Raise.*Suilen|MyGO|Ave.*Mujica|CRYCHIC",
-  names: "长崎素世|千早爱音|丸山彩|白鹭千圣|素世|爱音|小彩|伊芙|麻弥|日菜|纱夜|薰|花音|育美|有咲|香澄|多惠|沙绫|里美|美咲|心|灯|友希那|莉莎|亚子|燐子|巴|摩卡|兰|鸫|绯玛丽|透子|筑紫|瑠唯|真白|六花|LOCK|LAYER|MASKING|PAREO|CHU2|乐奈|立希|海铃|若麦|睦|祥子|MyGO|CRYCHIC|Pastel\\*Palettes|Roselia|Afterglow|PoPiPa|Poppin.*Party|HHW|Hello.*Happy.*World|Morfonica|RAS|Raise.*Suilen|Ave.*Mujica",
+  names: "长崎素世|千早爱音|丸山彩|白鹭千圣|梦中的千圣|素世|爱音|小彩|伊芙|麻弥|日菜|纱夜|薰|花音|育美|有咲|香澄|多惠|沙绫|里美|美咲|心|灯|友希那|莉莎|亚子|燐子|巴|摩卡|兰|鸫|绯玛丽|透子|筑紫|瑠唯|真白|六花|LOCK|LAYER|MASKING|PAREO|CHU2|乐奈|立希|海铃|若麦|睦|祥子|MyGO|CRYCHIC|Pastel\\*Palettes|Roselia|Afterglow|PoPiPa|Poppin.*Party|HHW|Hello.*Happy.*World|Morfonica|RAS|Raise.*Suilen|Ave.*Mujica",
 };
 
 // ─── 默认行为参数 ──────────────────────────────────────────────
 
+// 可见对话历史的最大轮数（每轮 = user + assistant 各一条）
 export const DEFAULT_VISIBLE_CONTEXT_TURNS = 8;
+// 主动消息检查间隔（毫秒），定时扫描是否有待发送的主动消息
 export const DEFAULT_PROACTIVE_CHECK_INTERVAL_MS = 20000;
+// 主动消息冷却时间（毫秒），上次发送后多久内不再次发送
 export const DEFAULT_PROACTIVE_COOLDOWN_MS = 1800000;
+// 每日主动消息发送上限（自然日）
 export const DEFAULT_PROACTIVE_DAILY_MAX = 8;
+// 每日分享种子生成间隔（毫秒），每隔多久生成一次日常分享候选
 export const DEFAULT_DAILY_SHARE_SEED_INTERVAL_MS = 2700000;
+// 每日分享最小空闲时间（毫秒），用户持续不活跃多久后才考虑发送
 export const DEFAULT_DAILY_SHARE_MIN_IDLE_MS = 1800000;
+// 主动消息默认过期偏移（毫秒），到期未发送则作废
 export const DEFAULT_PROACTIVE_DEFAULT_EXPIRY_OFFSET_MS = 1800000;
+// 每日分享候选的默认调度偏移（毫秒），距 seed 生成后多久触发
 export const DEFAULT_DAILY_SHARE_DEFAULT_SCHEDULE_OFFSET_MS = 300000;
+// 每日分享候选的默认过期偏移（毫秒），到期未发送则作废
 export const DEFAULT_DAILY_SHARE_DEFAULT_EXPIRY_OFFSET_MS = 1800000;
+// 每日分享默认取消条件列表（自然语言描述）
 export const DEFAULT_DAILY_SHARE_DEFAULT_CANCEL_IF = ["用户已经开启新话题"];
 
+// RAG 记忆检索：返回条数上限
 export const DEFAULT_RAG_TOP_K = 6;
+// RAG 记忆检索：最低相似度分数阈值
 export const DEFAULT_RAG_MIN_SCORE = 0.48;
+// RAG 单条结果最大字符数
 export const DEFAULT_RAG_RESULT_MAX_CHARS = 3600;
+// RAG 检索调用超时（毫秒）
 export const DEFAULT_RAG_TIMEOUT_MS = 45000;
 
+// 日程检查间隔（毫秒），默认 24 小时
 export const DEFAULT_SCHEDULE_CHECK_INTERVAL_MS = 86400000;
+// 日程最终确认超时（毫秒），超时未确认的日程候选丢弃
 export const DEFAULT_SCHEDULE_FINALIZATION_TIMEOUT_MS = 60000;
+// 近期日程种类去重窗口（条数），同种类不会重复创建
 export const DEFAULT_SCHEDULE_RECENT_KINDS_LIMIT = 5;
+// 日程候选依据文本最大长度（字符）
 export const DEFAULT_SCHEDULE_BASIS_MAX_LENGTH = 300;
+// 日程弧线标题最大长度（字符）
 export const DEFAULT_SCHEDULE_ARC_TITLE_MAX_LENGTH = 80;
+// 日程结束后的过期缓冲时间（毫秒），避免刚结束就被清理
 export const DEFAULT_SCHEDULE_EXPIRY_AFTER_END_BUFFER_MS = 43200000;
+// 日程从创建到默认过期的时间（毫秒），默认 3 天
 export const DEFAULT_SCHEDULE_DEFAULT_EXPIRY_FROM_NOW_MS = 259200000;
 
+// 隐藏世界同时最多维护的 pending intent 数量
 export const DEFAULT_HIDDEN_WORLD_MAX_PENDING_INTENTS = 8;
 
+// 消息分块发送间隔（毫秒），避免连续发送过快
 export const DEFAULT_CHUNK_SEND_DELAY_MS = 450;
+// 取消原因文本最大长度（字符）
 export const DEFAULT_MAX_CANCEL_REASON_LENGTH = 500;
 
+// 回合计数器阈值，达到后触发场景重置 + 记忆批量更新
 export const DEFAULT_TURN_RESET_THRESHOLD = 16;
+// 状态过期阈值（毫秒），超时未更新的世界状态视为过期
 export const DEFAULT_STATE_STALE_THRESHOLD_MS = 1800000;
 
-// 日本季节/月历知识库（按月索引）
+// ─── 日本季节/月历知识库（按月索引）────────────────────────
+// 用于注入当前月份的季节感知上下文，帮助角色做出符合时节的回应
 export const DEFAULT_SEASONAL_MONTHLY_NOTES = {
   "1": ["新年氛围，初诣参拜、贺年卡、压岁钱", "成人礼（1月第2个周一），各地举办成人式", "寒冷严冬，北部有雪，东京偶尔积雪"],
   "2": ["节分（2月3日前后），撒豆驱鬼、吃惠方卷", "情人节（2月14日），女生送义理或本命巧克力", "考试季，大学入学共通考试后期", "札幌雪祭（2月上旬）"],
@@ -65,6 +97,9 @@ export const DEFAULT_SEASONAL_MONTHLY_NOTES = {
   "12": ["忘年会季节（12月），聚餐增多", "圣诞节（12月24-25日），日本传统是KFC炸鸡+蛋糕", "年末大扫除", "除夕（12月31日），吃跨年荞麦面，寺院敲钟108下", "寒假（12月下旬～1月中旬），返乡或旅行"],
 };
 
+// 规范化 RAG 关键词对象，缺失字段退回到 DEFAULT_RAG_KEYWORDS 默认值
+// 参数: value - 部分或完整的关键词对象 { lore?, names? }
+// 返回: 规范化后的 { lore, names } 对象
 export function normalizeRagKeywords(value = {}) {
   const lore = String(value?.lore ?? "").trim() || DEFAULT_RAG_KEYWORDS.lore;
   const names = String(value?.names ?? "").trim() || DEFAULT_RAG_KEYWORDS.names;

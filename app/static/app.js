@@ -418,8 +418,8 @@ async function renderPrompts() {
     `<div class="panel" id="hiddenWorldPromptSection">
       <div class="panel-head">
         <div>
-          <h2>Hidden World 与主动子系统</h2>
-          <p class="panel-subtitle">当前角色的场景生成、世界状态和主动消息配置。</p>
+          <h2>后台子系统及双阶段遗留</h2>
+          <p class="panel-subtitle">单 Actor 通用（日程提取、主动消息）在前；仅旧双阶段角色使用的专用组件与遗留项在后。</p>
         </div>
       </div>
     </div>`,
@@ -560,15 +560,20 @@ function switchTab(name) {
   render();
 }
 
+// 追踪哪些文本预览字段处于编辑状态，key 为字段名，值为 true/false
+// 切换角色时（promptsEditing = {}）清空所有编辑状态
 let promptsEditing = {};
 
+// ─── 渲染 Actor Mode 主流水线 ───
+// 单 Actor 架构核心：System Prompt → 动态上下文 → 输出与状态维护
+// 旧双阶段架构的子系统及专用组件移到下方 renderWorldPipeline
 function renderPromptsPipeline(p, profile, profiles) {
   const profileBody = `
     <div class="pipeline-preview">
       <span class="pipeline-preview-text">${escHtml(profile.prompt || "(empty)")}</span>
     </div>
     <div class="pipeline-table-actions" style="margin-top:8px">
-      <span style="color:var(--muted);font-size:12px">${Number(profile.bindings || 0)} 个绑定会话 · 通过右上角“管理角色”编辑 Profile</span>
+      <span style="color:var(--muted);font-size:12px">${Number(profile.bindings || 0)} 个绑定会话 · 通过右上角"管理角色"编辑 Profile</span>
     </div>`;
 
   return `
@@ -584,21 +589,23 @@ function renderPromptsPipeline(p, profile, profiles) {
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-sys"><span>阶段 1 — 稳定 System Context</span></div>
+        <div class="pipeline-phase-label phase-sys"><span>阶段 1 — Actor System Prompt</span></div>
         ${renderPipelineStep({
           n: 1,
           title: "Profile",
-          desc: "",
+          desc: "角色基础人设，注入 system prompt 头部。",
           wide: true,
           body: profileBody,
         })}
         ${renderPipelineStep({
           n: 2,
-          title: "表达能力",
-          desc: "",
+          title: "情景记忆 (System Prompt)",
+          desc: "Reset 后首轮注入：由 LLM 基于近期对话生成的上下文摘要，帮助角色在新 session 中保持连续性。仅 firstTurn=true 时注入。",
           body: `
-            <label class="pipeline-sub-label">表达能力</label>
-            ${renderTextPreview("expressionCapability", p.expressionCapability)}
+            <label class="pipeline-sub-label">情景记忆区块标题</label>
+            ${renderTextPreview("sceneMemorySystemBlockIntro", p.sceneMemorySystemBlockIntro)}
+            <label class="pipeline-sub-label">情景记忆生成指令（Reset 时使用）</label>
+            ${renderTextPreview("sceneMemoryPromptInstructions", p.sceneMemoryPromptInstructions)}
           `,
         })}
         ${renderPipelineStep({
@@ -610,6 +617,24 @@ function renderPromptsPipeline(p, profile, profiles) {
             ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
           `,
         })}
+        ${renderPipelineStep({
+          n: 4,
+          title: "Scenelet 指令",
+          desc: "核心指令，同时定义 inner_scenelet（内心叙事）与 visible_reply（用户可见回复）的写作规则、输出 JSON 格式及反模式。",
+          body: `
+            <label class="pipeline-sub-label">Scenelet 生成指令</label>
+            ${renderTextPreview("sceneletInstructions", p.sceneletInstructions)}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 5,
+          title: "Actor 内心风格",
+          desc: "约束角色内心世界的语言风格，维持角色连续而具体的生活状态。注入 system prompt 尾部。",
+          body: `
+            <label class="pipeline-sub-label">内心风格</label>
+            ${renderTextPreview("hiddenWorldChatStyle", p.hiddenWorldChatStyle)}
+          `,
+        })}
       </div>
     </div>
 
@@ -617,22 +642,35 @@ function renderPromptsPipeline(p, profile, profiles) {
       <div class="pipeline-phase-box">
         <div class="pipeline-phase-label phase-body"><span>阶段 2 — 动态上下文</span></div>
         ${renderPipelineStep({
-          n: 4,
-          title: "Hidden-world 输出",
-          desc: "",
+          n: 6,
+          title: "动态上下文补充",
+          desc: "自动注入时间、天气、场景信息，帮助角色感知当前状态。均条件触发，无需配置。",
+          body: `<p style="color:var(--muted);font-size:13px;margin:0">
+            <b>时间上下文</b>：自动注入当前时间 + Asia/Tokyo 时区 + 用户本地时区。<br>
+            <b>天气注入</b>：用户消息含天气关键词（<code>天气</code> <code>下雨</code> <code>气温</code> 等）时，自动注入角色所在城市天气信息。<br>
+            <b>场景投影</b>：用户消息含场景关键词（<code>在哪</code> <code>做什么</code> <code>醒了</code> 等）时，从 world_state 投影 location / activity / awake_state / current_plan。
+          </p>`,
+        })}
+        ${renderPipelineStep({
+          n: 7,
+          title: "聊天历史",
+          desc: "注入最近可见对话轮数到动态 prompt。单 Actor 模式使用 actorVisibleContextTurns，双阶段模式使用 visibleContextTurns。",
           body: `
-            <p style="color:var(--muted);font-size:13px;margin:0 0 8px">注入了 worldState（currentPlan、openThreads）、RAG 知识库检索、inner_scenelet 场景叙事、以及全部 life_arc 简述（title / kind / progress_note）。</p>
-            <label class="pipeline-sub-label">Inner Scenelet 引导说明</label>
-            ${renderTextPreview("innerSceneletIntro", p.innerSceneletIntro)}
-            <label class="pipeline-sub-label">Inner Scenelet 正文</label>
-            <a href="#hiddenWorldPromptSection" class="btn" style="margin:8px 0">查看下方 Hidden World 配置</a>
-            <label class="pipeline-sub-label">Scenelet 到回复桥接指令</label>
-            ${renderTextPreview("sceneletReplyBridgeInstruction", p.sceneletReplyBridgeInstruction)}
-            <hr style="border-color:var(--border);margin:14px 0 10px">
-            <label class="pipeline-sub-label" style="font-size:12px;font-weight:600;color:var(--accent)">RAG 知识库检索</label>
-            <p style="color:var(--muted);font-size:12px;margin:0 0 8px">RAG 检索结果注入 Hidden-world prompt，角色在内心独白中感知相关知识，不再直接出现在主回复中。</p>
+            <label class="pipeline-sub-label">聊天历史引导说明</label>
+            ${renderTextPreview("chatHistoryIntro", p.chatHistoryIntro)}
+            ${renderControlGrid([
+              renderNumberControl("visibleContextTurns", "双阶段可见轮数", p.visibleContextTurns || 8, 1, 30, "turns"),
+              renderNumberControl("actorVisibleContextTurns", "单 Actor 可见轮数", p.actorVisibleContextTurns || 1, 1, 30, "turns"),
+            ])}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 8,
+          title: "RAG 知识库检索",
+          desc: "当用户消息匹配关键词时触发检索，结果注入动态 prompt。ragContextInstruction 仅在 RAG 命中时注入，未触发不注入。",
+          body: `
             ${renderRagKeywordChips(p)}
-            <label class="pipeline-sub-label" style="margin-top:8px">RAG 上下文说明</label>
+            <label class="pipeline-sub-label" style="margin-top:8px">RAG 上下文说明（仅 RAG 命中时注入）</label>
             ${renderTextPreview("ragContextInstruction", p.ragContextInstruction)}
             ${renderControlGrid([
               renderNumberControl("ragTopK", "Top-K", p.ragTopK || 6, 1, 20, "docs"),
@@ -642,40 +680,35 @@ function renderPromptsPipeline(p, profile, profiles) {
             ])}
           `,
         })}
-        ${renderPipelineStep({
-          n: 5,
-          title: "聊天风格及现实",
-          desc: "",
-          body: `
-            <label class="pipeline-sub-label">聊天风格</label>
-            ${renderTextPreview("chatStyle", p.chatStyle)}
-            <label class="pipeline-sub-label">聊天现实</label>
-            ${renderTextPreview("chatRealityInstructions", p.chatRealityInstructions)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 6,
-          title: "用户消息",
-          desc: "",
-          body: `
-            <label class="pipeline-sub-label">Vision Caption Prompt</label>
-            ${renderTextPreview("visionCaptionPrompt", p.visionCaptionPrompt)}
-          `,
-        })}
       </div>
     </div>
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-model"><span>阶段 3 — 输出及memory维护</span></div>
-        ${renderPipelineStep({
-          n: 8,
-          title: "模型调用与输出",
-          desc: "",
-          body: `<p style="color:var(--muted);font-size:13px;margin:0">由上游控件组合最终 prompt，经模型生成回复后流式切分发送；成功轮次触发 memory 候选抽取与合并写入。</p>`,
-        })}
+        <div class="pipeline-phase-label phase-model"><span>阶段 3 — 输出与状态维护</span></div>
         ${renderPipelineStep({
           n: 9,
+          title: "Actor 输出格式",
+          desc: "单 Actor 模式下一次 API 调用同时输出 inner_scenelet（内心叙事）与 visible_reply（用户可见回复）。双阶段模式下仅输出 inner_scenelet，visible_reply 由独立回复模型生成。",
+          body: `<p style="color:var(--muted);font-size:13px;margin:0">输出格式由 sceneletInstructions 定义：<code>{"inner_scenelet":"...","visible_reply":"..."}</code>。发送前经 sanitizer 清洗。</p>`,
+        })}
+        ${renderPipelineStep({
+          n: 10,
+          title: "Sanitizer 清洗",
+          desc: "发送前对 visible_reply 做安全清洗，防止 JSON 泄漏与括号指令暴露。",
+          body: `<p style="color:var(--muted);font-size:13px;margin:0">自动执行，无需配置。清洗规则：过滤 <code>{</code> <code>}</code> 开头行、移除中英文括号包裹的指令文本、去除空回复。</p>`,
+        })}
+        ${renderPipelineStep({
+          n: 11,
+          title: "Continuity Update",
+          desc: "发送成功后执行的独立状态记账。Actor 不负责状态维护，由 Continuity Updater 基于本轮对话事实输出结构化 world_state patch 与 follow-up 候选。失败不影响已发送消息。",
+          body: `
+            <label class="pipeline-sub-label">Continuity Update Prompt</label>
+            ${renderTextPreview("continuityUpdatePrompt", p.continuityUpdatePrompt)}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 12,
           title: "Memory Update",
           desc: "Reset 时将当前记忆文档 + 积累的用户消息合并，让 LLM 直接输出更新后的完整 Markdown 文档。",
           body: `
@@ -688,6 +721,8 @@ function renderPromptsPipeline(p, profile, profiles) {
   `;
 }
 
+// ─── 渲染流水线单步卡片 ───
+// 统一的步骤展示组件：左侧序号+标题，右侧内容区
 function renderPipelineStep({ n, title, desc, body = "", wide = false }) {
   return `
     <div class="pipeline-row${wide ? " pipeline-row-wide" : ""}">
@@ -749,10 +784,13 @@ function renderNumberControl(key, label, value, min, max, unit, options = {}) {
   `;
 }
 
+// ─── 渲染可编辑文本预览/编辑区 ───
+// 点击"编辑"变为 textarea，点击"保存"/"取消"切换回预览
+// 长文本字段（sceneletInstructions、proactiveInstructions 等）使用更高编辑区
 function renderTextPreview(key, value) {
   const isOpen = promptsEditing[key];
   if (isOpen) {
-    const h = key === 'sceneletInstructions' || key === 'proactiveInstructions' || key === 'memoryUpdatePrompt' || key === 'scheduleCreatorInstructions' ? '440px' : '110px';
+    const h = key === 'sceneletInstructions' || key === 'proactiveInstructions' || key === 'memoryUpdatePrompt' || key === 'scheduleCreatorInstructions' || key === 'continuityUpdatePrompt' ? '440px' : '110px';
     return `<textarea id="prompt_${key}" class="prompts-editable prompts-textarea" data-key="${key}" style="min-height:${h}">${escHtml(value || '')}</textarea>
       <div class="editor-actions" style="margin-top:4px">
         <button class="btn btn-primary" data-action="save-text" data-key="${key}">保存</button>
@@ -900,32 +938,24 @@ async function openRoleManager(initialName = selectedRoleProfile) {
   await refresh();
 }
 
+// ─── 渲染 Hidden World 流水线（阶段1-4） ───
+// 展示角色的场景生成、世界状态、主动子系统的完整配置
+// 阶段1: System Prompt（Profile、Scenelet指令、特殊日期、长期记忆）
+// 阶段2: 动态上下文（可见聊天窗口、语言风格、时间戳Guard）
+// 阶段3: 输出（Actor输出、Continuity Update、Follow-up、World State Patch）
+// ─── 后台子系统及双阶段遗留组件 ───
+// 单 Actor 模式：日程提取、主动消息等后台子系统按原逻辑运行，不影响主回复生成
+// 双阶段架构专用组件仅旧双阶段角色使用
 function renderWorldPipeline(role, p) {
-  const world = role.worldSession || {};
-  const usage = world.lastUsage || {};
   return `
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-sys"><span>阶段 1 — System Prompt</span></div>
+        <div class="pipeline-phase-label phase-body"><span>后台子系统（单 Actor 通用）</span></div>
+        <div class="pipeline-phase-label phase-sys" style="margin-top:16px"><span>日程与计划</span></div>
         ${renderPipelineStep({
           n: 1,
-          title: "Profile",
-          desc: "",
-          body: `<p style="color:var(--muted);font-size:13px;margin:0">读取 profile template 构建角色底座，目标是世界连续性而非最终措辞。</p>`,
-        })}
-        ${renderPipelineStep({
-          n: 2,
-          title: "Scenelet 指令",
-          desc: "驱动 inner_scenelet 叙事 + world_state 更新。follow_up 已拆分为并行独立调用，daily_share 已解耦给 Seed，schedule 已解耦给 Extractor。",
-          body: `
-            <label class="pipeline-sub-label">Scenelet 生成指令</label>
-            ${renderTextPreview("sceneletInstructions", p.sceneletInstructions)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 3,
-          title: "背景补充",
-          desc: "",
+          title: "特殊日期与月度行事",
+          desc: "仅传给 Schedule Creator / Time Advancement，不注入 Actor System Prompt。",
           body: `
             <label class="pipeline-sub-label">特殊日期</label>
             ${renderScheduleCalendar(p.scheduleSpecialDates || '')}
@@ -934,82 +964,7 @@ function renderWorldPipeline(role, p) {
           `,
         })}
         ${renderPipelineStep({
-          n: 4,
-          title: "长期记忆 (System Prompt)",
-          desc: "通过 --append-system-prompt-file 注入 system prompt，自动缓存。",
-          body: `<p style="color:var(--muted);font-size:13px;margin:0">与上方主回复 Pipeline 共用同一份角色记忆上下文指令。</p>`,
-        })}
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-body"><span>阶段 2 — 动态上下文</span></div>
-        ${renderPipelineStep({
-          n: 5,
-          title: "最近可见聊天窗口",
-          desc: "",
-          body: `
-            <label class="pipeline-sub-label">聊天历史引导说明</label>
-            ${renderTextPreview("chatHistoryIntro", p.chatHistoryIntro)}
-            ${renderControlGrid([
-              renderNumberControl("visibleContextTurns", "可见轮次数", p.visibleContextTurns || 8, 1, 30, "turns"),
-            ])}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 6,
-          title: "语言风格约束",
-          desc: "",
-          body: `
-            <label class="pipeline-sub-label">语言风格约束</label>
-            ${renderTextPreview("hiddenWorldChatStyle", p.hiddenWorldChatStyle)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 7,
-          title: "时间戳 + Web/Search Guard",
-          desc: "",
-          body: `<p style="color:var(--muted);font-size:13px;margin:0">currentTimeContext() 提供双时区时间戳；WebSearch/WebFetch 权限规则在 sceneletInstructions 中定义。</p>`,
-        })}
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-model"><span>阶段 3 — 输出</span></div>
-        ${renderPipelineStep({
-          n: 8,
-          title: "Inner Scenelet",
-          desc: "",
-          body: `<p style="color:var(--muted);font-size:13px;margin:0">hidden-world 每轮输出的角色内在叙事文本，供主回复读取以保持角色一致性和生活连续性。</p>`,
-        })}
-        ${renderPipelineStep({
-          n: 9,
-          title: "Follow-up Candidates",
-          desc: "",
-          body: `
-            <p style="color:var(--muted);font-size:13px;margin:0 0 8px">每轮独立并行调用，基于 inner_scenelet 和 world_state 生成主动意图候选。daily_share 已解耦给独立 Seed 模块，schedule 已解耦给 Extractor 模块。</p>
-            <label class="pipeline-sub-label">Follow-up 生成 Prompt</label>
-            ${renderControlGrid([
-              renderNumberControl("hiddenWorldMaxPendingIntents", "最大待处理意图展示", p.hiddenWorldMaxPendingIntents || 8, 1, 20, "条"),
-            ])}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 10,
-          title: "World State Patch",
-          desc: "",
-          body: `<p style="color:var(--muted);font-size:13px;margin:0">结构化快照：location / activity / awake_state / current_plan / open_threads / last_world_event_at。具体内容在 Reset 快照页编辑。</p>`,
-        })}
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-post"><span>阶段 4 — 后台主动子系统</span></div>
-        ${renderPipelineStep({
-          n: 11,
+          n: 2,
           title: "Schedule Extractor",
           desc: "每轮从本轮消息 + inner_scenelet 中提取新的周期性/持续性候选，去重后累积到待审批队列。",
           body: `
@@ -1018,7 +973,7 @@ function renderWorldPipeline(role, p) {
           `,
         })}
         ${renderPipelineStep({
-          n: 12,
+          n: 3,
           title: "Life Arc 审批 (Schedule Creator)",
           desc: "定期审批 Extractor 积累的候选队列。审批标准：不从单次推断周期性、null time 不批。处理后清空队列。",
           body: `
@@ -1036,8 +991,9 @@ function renderWorldPipeline(role, p) {
             ])}
           `,
         })}
+        <div class="pipeline-phase-label phase-post" style="margin-top:20px"><span>主动消息</span></div>
         ${renderPipelineStep({
-          n: 13,
+          n: 4,
           title: "Daily Share Seed",
           desc: "沉默期独立创意种子。完全解耦对话上下文，只用时间/天气/位置/活动作为素材。Pro 模型运行。",
           body: `
@@ -1054,7 +1010,7 @@ function renderWorldPipeline(role, p) {
           `,
         })}
         ${renderPipelineStep({
-          n: 14,
+          n: 5,
           title: "Proactive 二次判断",
           desc: "",
           body: `
@@ -1067,6 +1023,82 @@ function renderWorldPipeline(role, p) {
               renderNumberControl("proactiveDefaultExpiryOffsetMs", "默认过期偏移", p.proactiveDefaultExpiryOffsetMs, 300, 7200, "s", { ms: true }),
             ])}
           `,
+        })}
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="pipeline-phase-box">
+        <div class="pipeline-phase-label phase-sys"><span>双阶段架构遗留（仅旧双阶段角色使用）</span></div>
+        ${renderPipelineStep({
+          n: 6,
+          title: "表达能力",
+          desc: "仅双阶段模式使用，定义角色在可见回复中的语言表达能力范围。",
+          body: `
+            <label class="pipeline-sub-label">表达能力</label>
+            ${renderTextPreview("expressionCapability", p.expressionCapability)}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 7,
+          title: "聊天风格",
+          desc: "仅双阶段模式使用，定义角色说话方式。",
+          body: `
+            <label class="pipeline-sub-label">聊天风格</label>
+            ${renderTextPreview("chatStyle", p.chatStyle)}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 8,
+          title: "聊天现实",
+          desc: "仅双阶段模式使用，定义角色时间空间感知。",
+          body: `
+            <label class="pipeline-sub-label">聊天现实指令</label>
+            ${renderTextPreview("chatRealityInstructions", p.chatRealityInstructions)}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 9,
+          title: "Inner Scenelet 引导",
+          desc: "仅双阶段模式使用，作为 inner_scenelet 生成的前置引导说明。",
+          body: `
+            <label class="pipeline-sub-label">Inner Scenelet 引导说明</label>
+            ${renderTextPreview("innerSceneletIntro", p.innerSceneletIntro)}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 10,
+          title: "Scenelet → 回复桥接指令",
+          desc: "仅双阶段模式使用，指导回复模型如何基于 inner_scenelet 生成用户可见文本。",
+          body: `
+            <label class="pipeline-sub-label">桥接指令</label>
+            ${renderTextPreview("sceneletReplyBridgeInstruction", p.sceneletReplyBridgeInstruction)}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 11,
+          title: "Vision Caption",
+          desc: "仅双阶段模式使用，用户发送图片时生成视觉描述文本。",
+          body: `
+            <label class="pipeline-sub-label">Vision Caption Prompt</label>
+            ${renderTextPreview("visionCaptionPrompt", p.visionCaptionPrompt)}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 12,
+          title: "Follow-up Candidates",
+          desc: "旧双阶段模式：每轮独立并行调用，基于 inner_scenelet 和 world_state 生成主动意图候选。",
+          body: `
+            ${renderControlGrid([
+              renderNumberControl("hiddenWorldMaxPendingIntents", "最大待处理意图展示", p.hiddenWorldMaxPendingIntents || 8, 1, 20, "条"),
+            ])}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 13,
+          title: "World State 快照",
+          desc: "",
+          body: `<p style="color:var(--muted);font-size:13px;margin:0">结构化快照：location / activity / awake_state / current_plan / open_threads / last_world_event_at。具体内容在 Reset 快照页编辑。</p>`,
         })}
       </div>
     </div>

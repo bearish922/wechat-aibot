@@ -57,14 +57,15 @@ import { uuid, sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost } from "./lib/wechat.mjs";
 import { loadMemoryDocument, loadWorldMemoryDocument } from "./lib/memory.mjs";
 import { loadAllEvents, loadRoleVisibleHistory } from "./lib/chat-history.mjs";
-import { getSceneConfig, emptyToolUsage, mergeToolUsage, sanitizeVisibleReplyText, normalizeLifeArcs } from "./lib/normalize.mjs";
+import { getSceneConfig, emptyToolUsage, mergeToolUsage, sanitizeVisibleReplyText, normalizeLifeArcs, normalizeWorldState, applyWorldStatePatch } from "./lib/normalize.mjs";
 import { envWithProxy, commandExists, isApiConfigured, resolveApiConfig, CLAUDE, CODEX, LOGS_DIR } from "./lib/claude-runner.mjs";
 import { startBackendChat } from "./lib/backend-adapter.mjs";
-import { sessionProfile, saveRoleWorlds, loadRoleWorlds, setSceneMemory, getRoleWorld, ensureWorldSession } from "./lib/world-state.mjs";
+import { sessionProfile, saveRoleWorlds, loadRoleWorlds, setSceneMemory, getRoleWorld, ensureWorldSession, lifeArcPromptItems } from "./lib/world-state.mjs";
 import { loadProfiles, makeSession, saveSessions, loadSessions, ensureUser, activeSession, sessionById, nextSessionName } from "./lib/session-store.mjs";
 import { handleHelp, handleCC, handleCodex, handleAPI, handleNew, handleSwitch, handleRename, handleSessions, handleProfile, handleClose, handleStatus, handleCancel } from "./lib/commands.mjs";
 import { buildTurnBody, appendVisibleHistory, getSceneMemorySystemBlock, recentVisibleContext } from "./lib/prompts.mjs";
-import { generateSceneletForTurn, buildSceneContextBlock, addFollowUpCandidates, recordChatHistory, sendFinalAssistantMessage, checkProactiveIntents, generateSceneMemory, batchUpdateMemory, runScheduleExtractor, replyPrefix } from "./lib/turn.mjs";
+import { generateSceneletForTurn, generateSingleActorReply, generateContinuityUpdateForTurn, buildSceneContextBlock, addFollowUpCandidates, recordChatHistory, sendFinalAssistantMessage, checkProactiveIntents, generateSceneMemory, batchUpdateMemory, runScheduleExtractor, replyPrefix } from "./lib/turn.mjs";
+
 
 // 当前用户主目录
 const USER_HOME = process.env.USERPROFILE || process.env.HOME || process.cwd();
@@ -381,14 +382,27 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
   let sceneletResult = null;
   let sceneletError = null;
   let ragUsage = null; // 本轮 RAG 检索统计（在 HW 调用中注入）
-  // 角色扮演模式下生成场景小剧场
+  const runtimePolicy = isProfileChat ? loadPrompts(turnProfile).runtimePolicy : { actorMode: "two_stage" };
+  // 角色扮演模式下生成场景小剧场 / 单 Actor 回复
   if (isProfileChat) {
     try {
-      // RAG 知识库查询：在 HW 调用之前执行，结果注入 inner scenelet 生成
+      // RAG 知识库查询：在 Actor 调用之前执行，结果注入 prompt
       const ragEligible = Boolean(RAG_ENABLED && !hasInboundAttachment(body) && shouldUseRagForTurn(body, turnProfile));
       const ragContext = ragEligible ? queryRag(body, turnProfile) : "";
       ragUsage = { eligible: ragEligible, used: Boolean(ragContext), chars: ragContext.length };
-      sceneletResult = await generateSceneletForTurn({ ai, userId, sess: styleState, profile: turnProfile, userBody: body, memoryPrompt, ragContext });
+      // 按 runtimePolicy.actorMode 分发到单 Actor 或双阶段路径
+      if (runtimePolicy.actorMode === "single") {
+        sceneletResult = await generateSingleActorReply({
+          ai, userId, sess: styleState, profile: turnProfile,
+          userBody: body, memoryPrompt, ragContext, runtimePolicy,
+        });
+      } else {
+        sceneletResult = await generateSceneletForTurn({
+          ai, userId, sess: styleState, profile: turnProfile,
+          userBody: body, memoryPrompt, ragContext,
+          maxVisibleTurns: runtimePolicy.visibleContextTurns || 0,
+        });
+      }
     } catch (e) {
       sceneletError = e.message;
       log("⚠", `[${sessionName}] scenelet fail: ${e.message}`);
@@ -446,7 +460,55 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
   const streamStartedAt = new Date().toISOString();  // 流式处理开始时间
 
   try {
-    // 稳定风格提示
+    const runtimePolicy = loadPrompts(turnProfile).runtimePolicy;
+    const useSceneletAsReply = isProfileChat && runtimePolicy.visibleReplySource === "scenelet";
+    if (useSceneletAsReply) {
+      assistantFullText = sceneletResult?.innerScenelet?.trim() || "";
+      if (!assistantFullText) throw new Error("scenelet-only role returned no valid inner_scenelet");
+      toolUsage = mergeToolUsage(sceneletResult?.toolUsage);
+      const sent = await sendFinalAssistantMessage(userId, assistantFullText, contextToken, prefix);
+      if (!sent) throw new Error("failed to send complete reply to WeChat");
+      turnSucceeded = true;
+      appendLog({
+        replySource: "scenelet",
+        ragChars: ragUsage?.chars || 0,
+        toolUsage: { webSearch: toolUsage.webSearch, webFetch: toolUsage.webFetch, tools: toolUsage.tools },
+      });
+      const replyBytes = Buffer.byteLength(assistantFullText, "utf-8");
+      log(">", `[${sessionName}] scenelet (${replyBytes}B) ${assistantFullText.slice(0, 60).replace(/\n/g, " ")}`);
+      return { turnSucceeded, assistantFullText, toolUsage, ragUsage, lastUsage };
+    }
+
+    // ═══════════ 单 Actor 架构 ═══════════
+    // visibleReply 已在 generateSingleActorReply 中与 inner_scenelet 同时生成，
+    // 此处直接发送，不再调用第二个回复模型。
+    // 与下方双阶段路径的关键差异：
+    //   - 双阶段：scenelet → buildSceneContextBlock → 第二个模型 → assistantFullText
+    //   - 单 Actor：sceneletResult.visibleReply 直接作为 assistantFullText
+    // 这消除了第二个模型造成的"内心→文字"信息损失，
+    // 但要求 Actor 模型同时具备心理模拟和文字表达能力。
+    if (isProfileChat && runtimePolicy.actorMode === "single" && sceneletResult?.visibleReply) {
+      const t = sanitizeVisibleReplyText(sceneletResult.visibleReply).trim();
+      if (!t) throw new Error("single actor returned empty visible_reply after sanitization");
+      // 直接发送 Actor 产出的 visibleReply，无中间处理环节
+      const sent = await sendFinalAssistantMessage(userId, t, contextToken, prefix);
+      if (!sent) throw new Error("failed to send complete reply to WeChat");
+      assistantFullText = t;
+      turnSucceeded = true;
+      // 工具使用统计来自 Actor 调用（不包含第二个模型）
+      toolUsage = mergeToolUsage(sceneletResult?.toolUsage);
+      appendLog({
+        replySource: "single_actor",
+        ragChars: ragUsage?.chars || 0,
+        toolUsage: { webSearch: toolUsage.webSearch, webFetch: toolUsage.webFetch, tools: toolUsage.tools },
+      });
+      const replyBytes = Buffer.byteLength(t, "utf-8");
+      log(">", `[${sessionName}] single-actor (${replyBytes}B) ${t.slice(0, 60).replace(/\n/g, " ")}`);
+      // 提前返回：绕过下方的双阶段路径（stableStyle / sceneContext / turnBody 构建 + 第二个模型调用）
+      return { turnSucceeded, assistantFullText, toolUsage, ragUsage, lastUsage };
+    }
+
+    // 双阶段架构的稳定风格提示（仅旧路径执行到这里）
     const stableStyle = isProfileChat ? expressionCapabilityPrompt(turnProfile) : "";
     // 构建场景上下文块
     const ctxParts = [];
@@ -629,6 +691,62 @@ async function finalizeTurnSuccess(params) {
 
   // 角色扮演模式的额外后处理
   if (isProfileChat && cleanText) {
+    // ═══════════ 单 Actor 模式：连续性记账 ═══════════
+    // 调用 continuity updater 独立记录本轮世界状态变化。
+    // 架构设计：Actor 只输出 inner_scenelet + visible_reply（心理模拟 + 文字表达），
+    // 不承担状态记账职责。世界状态的变化识别由 continuity updater 独立完成。
+    //
+    // 为什么不做在 Actor 内部：Actor 的 prompt 被优化为"自然对话"，
+    // 如果同时要求它输出精确的 worldStatePatch / openThreadOps，
+    // 会形成两套互斥的认知模式（自然表达 vs 结构化审计），降低回复质量。
+    //
+    // 失败处理：continuity update 失败不影响本轮流程——消息已发送给用户，
+    // worldState 保持本轮前状态，最多导致下轮 Actor 看到略微过时的世界，
+    // 连续性由 Actor 的 inner_scenelet 和 visibleContext 共同弥补。
+    if (sceneletResult?.replySource === "single_actor" && turnProfile !== "梦中的千圣") {
+      try {
+        const update = await generateContinuityUpdateForTurn({
+          ai,
+          worldState: normalizeWorldState(roleWorld._worldState),
+          lifeArcs: lifeArcPromptItems(roleWorld),
+          visibleContext: recentVisibleContext(styleState, 2),  // 最近 2 轮可见对话，用于事实核对
+          userBody: body,
+          assistantReply: cleanText,                             // 已发送的回复——不可撤回
+          innerScenelet: sceneletResult.innerScenelet || "",
+          profile: turnProfile,
+        });
+        if (update) {
+          // ① 应用世界状态补丁：增量化地更新 location / activity / awakeState 等字段
+          if (update.worldStatePatch) {
+            applyWorldStatePatch(roleWorld, update.worldStatePatch);
+          }
+          // ② 应用 open thread 操作：维护"未完成的话题"列表
+          //    add —— 本轮对话开启了一个需要后续跟进的话题
+          //    remove —— 某个 open thread 在本轮自然关闭（被回答或用户不再追问）
+          if (update.openThreadOps?.length) {
+            const current = roleWorld._worldState?.openThreads || [];
+            for (const op of update.openThreadOps) {
+              if (op.op === "add" && op.thread && !current.includes(op.thread)) {
+                current.push(op.thread);
+              } else if (op.op === "remove" && op.thread) {
+                const idx = current.indexOf(op.thread);
+                if (idx >= 0) current.splice(idx, 1);
+              }
+            }
+            if (!roleWorld._worldState) roleWorld._worldState = {};
+            roleWorld._worldState.openThreads = current.slice(0, 8);  // 上限 8 个，防止无限增长
+          }
+          // ③ 追加 follow_up 候选：continuity updater 识别到的潜在主动消息
+          //    复用 addFollowUpCandidates 的规范化+去重+限流逻辑
+          if (update.followUpCandidates?.length) {
+            await addFollowUpCandidates(styleState, { followUpCandidates: update.followUpCandidates }, body, roleWorld)
+              .catch(e => { log("⚠", `[${sessionName}] continuity follow_up fail: ${e.message}`); });
+          }
+          saveRoleWorlds();
+        }
+      } catch (e) { log("⚠", `[${sessionName}] continuity update fail: ${e.message}`); }
+    }
+
     // 日程提取器：从本轮对话中提取潜在日程安排
     try {
       const activeSchedules = normalizeLifeArcs(roleWorld._lifeArcs).filter(a => a.status === "active" && a.kind);

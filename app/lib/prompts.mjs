@@ -127,16 +127,39 @@ function currentTimeContext(date = new Date()) {
 // 并格式化为精简的 { role, time, kind, text } 数组，供 prompt 上下文使用。
 // 参数：
 //   sess - 会话对象，包含 _visibleHistory 数组
+//   maxTurns - 最大轮数（默认取全部，单 Actor 模式通常为 1）
 // 返回：精简后的最近对话历史数组
-function recentVisibleContext(sess) {
-  return normalizeVisibleHistory(sess?._visibleHistory)
+function recentVisibleContext(sess, maxTurns = 0) {
+  let items = normalizeVisibleHistory(sess?._visibleHistory)
     .map(item => ({
       role: item.role,
       time: item.timestamp || "",
       kind: item.kind || "chat",
       text: item.text,
     }));
+  // maxTurns > 0 时，从后往前数 N 个 assistant 消息作为轮次边界
+  if (maxTurns > 0 && items.length) {
+    const turnIndices = [];
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].role === "assistant") turnIndices.push(i);
+      if (turnIndices.length >= maxTurns) break;
+    }
+    if (turnIndices.length) {
+      const cutoff = turnIndices[turnIndices.length - 1];
+      // 包含 cutoff 之前的 user 消息以形成完整轮次
+      const start = Math.max(0, cutoff - 1);
+      items = items.slice(start);
+    }
+  }
+  return items;
 }
+
+// ═══════════ 天气注入触发器 ═══════════
+// weatherKeywordsRegex —— 天气相关关键词正则
+// 用于检测用户消息中是否涉及天气话题。仅单 Actor 动态 prompt 使用此正则：
+//   命中 → generateSingleActorReply 调用 getWeatherReality() 注入实时天气到 prompt
+//   未命中 → 跳过天气获取，节省 API 调用和 prompt token
+const weatherKeywordsRegex = /天气|气温|温度|湿度|下雨|下雪|晴天|阴天|刮风|台风|闷热|冷|热|凉|暖|潮湿|干燥|暴雨|阵雨|雷雨|霜冻|冰雹|雾霾|雾|大风/;
 
 // appendVisibleHistory —— 向会话的可见历史中追加一条消息
 // 将新消息追加到 sess._visibleHistory 数组末尾并做规范化处理。
@@ -234,7 +257,170 @@ function buildSceneMemorySummaryPrompt({ chatHistory, recentScenelets, worldStat
   ].join("\n");
 }
 
-// buildHiddenWorldSystemPrompt —— 构建 hidden-world 的 system prompt
+// projectActorScene —— 单 Actor 模式下的场景状态投影
+// 从角色世界状态中按用户消息关键词确定性地投影出当前轮相关的状态字段。
+// 这是窄而可控的规则匹配，不是语义检索——只能保证命中规则后的字段来源准确，
+// 不能保证语义召回准确。改写问法可能漏投影，模糊词也可能误命中。
+// 参数：
+//   userMessage - 用户消息文本（用于关键词匹配）
+//   worldState - 角色当前世界状态对象（含 location/activity/awakeState/currentPlan）
+// 返回：{ location?, activity?, awake_state?, current_plan? } 或 null
+function projectActorScene(userMessage, worldState) {
+  if (!userMessage || !worldState) return null;
+  const msg = String(userMessage);
+  const projected = {};
+  // 睡眠/清醒相关词 → 映射 worldState.awakeState 为 projected.awake_state
+  // 关键词：睡/醒/起/梦/困/倦/躺/卧/休息/眠/床
+  // 当用户问"睡了吗""醒了吗"时，向 Actor 提供角色的清醒/睡眠状态
+  if (/[睡醒起梦困倦躺卧休息眠床]/.test(msg)) {
+    projected.awake_state = worldState.awakeState || "awake";
+  }
+  // 位置/地点相关词 → 映射 worldState.location 为 projected.location
+  // 关键词：在哪/哪里/什么地方 + 各类地点名词（家/学校/教室/片场/咖啡店等）
+  // 当用户问"在哪""去不去学校"时，向 Actor 提供角色的当前位置
+  if (/[在到去往位置地方家里学校教室片场排练室公寓咖啡店图书馆商店超市车站路].*[哪呢吗？?]|[哪那]儿|哪里|在哪|什么地方/.test(msg)) {
+    projected.location = worldState.location || "";
+  }
+  // 正在做什么相关词 → 映射 worldState.activity 为 projected.activity
+  // 关键词：在/正 + 做/干/忙/搞/弄 + 什么/啥；干嘛；做什么
+  // 当用户问"在干嘛""现在做什么"时，向 Actor 提供角色的当前活动
+  if (/[在正]?[做干忙搞弄][什么啥]|现在.*[做干忙]|干嘛|做什么/.test(msg)) {
+    projected.activity = worldState.activity || "";
+  }
+  // 未来计划/日程相关词 → 映射 worldState.currentPlan 为 projected.current_plan
+  // 关键词：接下来/待会/一会/回头/等会 + 后/儿；计划/打算/准备/后面/然后/之后/安排/日程
+  // 当用户问"接下来干什么""有什么计划"时，向 Actor 提供角色的当前计划
+  if (/[接下待会一会回头等会][后儿]|接下来|计划|打算|准备|后面|然后|之后|安排|日程/.test(msg)) {
+    projected.current_plan = worldState.currentPlan || "";
+  }
+  return Object.keys(projected).length ? projected : null;
+}
+
+// hasWeatherKeywords —— 检查用户消息是否涉及天气相关话题
+// 由 generateSingleActorReply 在构建动态 prompt 前调用，作为天气注入的守门人：
+//   只有在用户主动提及天气时（正则命中）才触发 getWeatherReality()，
+//   避免每轮都无条件获取天气数据造成的 token 膨胀和 API 冗余调用。
+function hasWeatherKeywords(userMessage) {
+  return weatherKeywordsRegex.test(String(userMessage || ""));
+}
+
+// ═══════════ 单 Actor 模式 prompt 构建 ═══════════
+// buildSingleActorSystemPrompt —— 单 Actor 模式的 system prompt
+// 与双阶段 buildHiddenWorldSystemPrompt 的区别：
+//   不注入 scheduleSpecialDates、seasonalMonthlyNotes（避免无关议程显著性）
+//   注入完整的 sceneletInstructions（单 Actor 版本，含生活感、场景示例、反模式）
+// 参数：
+//   profile      - 角色标识
+//   sceneMemory  - 情景记忆文本（可选，reset 后首轮注入）
+//   memoryPrompt - 长期记忆提示词（可选）
+// 返回：完整的单 Actor system prompt 字符串
+function buildSingleActorSystemPrompt(profile, sceneMemory = "", memoryPrompt = "") {
+  const cfg = loadPrompts(profile);
+  const parts = [];
+  // ① 完整角色 Profile（从 wechat-profiles.json 读取）
+  //    提供角色基础人设：年龄、性格、说话风格、背景故事等
+  if (profile && profileTemplates[profile]) {
+    parts.push(profileTemplates[profile]);
+  }
+  // ② 情景记忆（reset 后首轮注入）
+  //    包含上一阶段的场景摘要，帮助 Actor 理解对话连续性
+  if (sceneMemory) {
+    parts.push("", sceneMemory);
+  }
+  // ③ 长期记忆 + 世界记忆
+  //    用户画像和世界知识，以"关于沃沃"章节呈现
+  if (memoryPrompt) {
+    parts.push("", "【关于沃沃 — 长期记忆】", memoryPrompt);
+  }
+  // ④ 单 Actor scenelet 指令 —— 核心
+  //    包含 inner_scenelet 格式定义（第一人称内心声音）、生活感约束、
+  //    场景叙事示例、反模式边界、visible_reply 输出格式
+  if (cfg.sceneletInstructions) {
+    parts.push("", cfg.sceneletInstructions);
+  }
+  // ⑤ RAG 知识库检索使用说明（如有配置）
+  //    告诉 Actor 如何利用 rag_context 中的外部知识
+  if (cfg.ragContextInstruction) {
+    parts.push(
+      "",
+      "【知识库检索】",
+      "本轮的 rag_context 字段包含知识库检索结果。",
+      cfg.ragContextInstruction,
+    );
+  }
+  // ⑥ hidden-world 聊天风格
+  //    角色专属的语气、表达习惯约束，与双阶段路径共享同一配置
+  if (cfg.hiddenWorldChatStyle) {
+    parts.push("", cfg.hiddenWorldChatStyle);
+  }
+  // 注意：不注入 scheduleSpecialDates 和 seasonalMonthlyNotes，
+  // 这两个字段服务于 hidden-world 的长期叙事规划（日程感知、季节事件），
+  // 对单 Actor 每轮"看消息→产出回复"的工作流属于无关议程，会污染 Actor 的即时判断。
+  return parts.filter(Boolean).join("\n");
+}
+
+// buildSingleActorDynamicPrompt —— 单 Actor 模式每轮动态 prompt
+// 与双阶段 buildHiddenWorldPrompt 的区别：
+//   只注入 actor_scene（投影的状态字段），不注入完整 worldState
+//   active_life_arcs 和 pending_proactive_intents 固定为空（不把后台管理对象变成回复议程）
+//   只注入最近 actorVisibleContextTurns 轮可见对话
+//   天气只在用户消息命中天气关键词时注入
+//   不注入 turn_style_reminder
+// 参数（解构自对象）：
+//   userId/userBody/profile/visibleContext/ragContext - 基础信息
+//   actorScene - projectActorScene 的返回结果（场景投影）
+//   worldSession - hidden-world session 信息
+//   weather - 实时天气字符串（仅在 hasWeatherKeywords 为 true 时传入）
+// 返回：完整的单 Actor 动态 prompt 字符串
+async function buildSingleActorDynamicPrompt({ userId, userBody, profile, visibleContext, ragContext = "", actorScene = null, worldSession = null, weather = "" }) {
+  const now = new Date();
+  const cfg = loadPrompts(profile);
+  const timeCtx = currentTimeContext(now);
+  return [
+    "你将收到本轮动态上下文。请按 system prompt 的规则输出 JSON。",
+    "",
+    "当前时间：",
+    JSON.stringify(timeCtx, null, 2),
+    ...(weather ? ["", weather] : []),   // 天气仅在 hasWeatherKeywords 命中时注入；未命中时此行为空
+    "",
+    "输入：",
+    JSON.stringify({
+      userId,
+      profile,
+      // hidden-world 自身会话摘要（持久 session 的连续性标识）
+      hidden_world_session: worldSession ? {
+        sid: worldSession.sid,
+        firstTurn: worldSession.firstTurn,
+        startedAt: worldSession.startedAt,
+        lastUsedAt: worldSession.lastUsedAt,
+      } : null,
+      // 场景投影：仅包含用户消息直接询问的状态字段（projectActorScene 的产物）
+      // 与双阶段路径传入完整 worldState 不同，此处是窄而可控的规则匹配结果
+      actor_scene: actorScene,
+      // 可见上下文使用说明：当前消息决定议程
+      visible_context_instruction: cfg.chatHistoryIntro || "以下是近期真实发送的微信内容；优先回应当前用户消息。",
+      // 最近的可见对话（仅取 actorVisibleContextTurns 轮，而非全量）
+      recent_visible_context: visibleContext,
+      // 微信引用回复格式说明：user_message 中可能出现 [引用: xxx] 前缀，
+      // 这是微信的引用回复标记，括号内是被引用的旧消息，括号后才是用户本轮新增的正文。
+      // 不要将引用部分的旧内容误判为用户重复发送。
+      user_message_format: "若消息以 [引用: ...] 开头，方括号内是用户引用的旧消息内容，不属于本轮新发言。请以引用标记之后的新增文本作为用户本轮实际消息来判断是否重复。",
+      // 用户的当前消息
+      user_message: userBody,
+      // RAG 知识库检索结果（如有命中则注入）
+      rag_context: ragContext || null,
+    }, null, 2),
+    // ═══ 以下字段在双阶段路径中存在，但在单 Actor 路径中有意排除 ═══
+    // active_life_arcs：life arcs 是后台调度对象（日程、长期叙事弧），
+    //   在双阶段路径中由 hidden-world 用于规划何时主动推进剧情。
+    //   单 Actor 只负责"看消息→产出回复"，不应被后台管理对象影响即时回复的自然度。
+    // pending_proactive_intents：主动意图是异步调度机制（定时触发、门控判断），
+    //   不属于单轮"用户发消息→角色回复"的同步流程。注入会导致 Actor 在回复中
+    //   刻意嵌套主动意图内容，破坏对话的自然节奏。
+    // turn_style_reminder：双阶段路径用于防止长期 session 中短期要求稀释，
+    //   但单 Actor 每轮只看到极少的上下文（1 轮可见对话），不存在稀释风险。
+  ].filter(Boolean).join("\n");
+}
 // 将角色人设模板、情景记忆、长期记忆、特殊日期、月度行事、scenelet 指令和聊天风格
 // 组装为 hidden-world 角色（内心世界 AI）的 system prompt。
 // 参数：
@@ -334,10 +520,16 @@ async function buildHiddenWorldPrompt({ userId, sessionName, profile, userBody, 
       active_life_arcs: lifeArcs,
       // 待处理的主动意图
       pending_proactive_intents: proactiveIntents,
+      // 每轮重复注入的角色级节奏提醒，避免长期 session 中的短期要求逐渐稀释
+      turn_style_reminder: cfg.runtimePolicy.sceneletTurnReminder || null,
       // 可见上下文使用说明
       visible_context_instruction: cfg.chatHistoryIntro,
       // 最近的可见对话
       recent_visible_context: visibleContext,
+      // 微信引用回复格式说明：user_message 中可能出现 [引用: xxx] 前缀，
+      // 这是微信的引用回复标记，括号内是被引用的旧消息，括号后才是用户本轮新增的正文。
+      // 不要将引用部分的旧内容误判为用户重复发送。
+      user_message_format: "若消息以 [引用: ...] 开头，方括号内是用户引用的旧消息内容，不属于本轮新发言。请以引用标记之后的新增文本作为用户本轮实际消息来判断是否重复。",
       // 用户的当前消息
       user_message: userBody,
       // RAG 知识库检索结果
@@ -472,6 +664,10 @@ export {
   buildSceneMemorySummaryPrompt,
   buildHiddenWorldSystemPrompt,
   buildHiddenWorldPrompt,
+  buildSingleActorSystemPrompt,
+  buildSingleActorDynamicPrompt,
+  projectActorScene,
+  hasWeatherKeywords,
   buildProactivePrompt,
   buildScheduleFinalizationPrompt,
 };

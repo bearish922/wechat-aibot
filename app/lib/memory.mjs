@@ -76,7 +76,7 @@ export async function updateMemoryDocument(userMessages, backend = "cc", profile
     "用户最近的消息（按时间顺序）：",
     msgs.map((m, i) => `[${i + 1}] ${m}`).join("\n\n"),
     "",
-    "请只输出 JSON：{\"result\":\"更新后的完整 Markdown 文档\"}",
+    "只输出以下 JSON（不要输出改动摘要、diff 或任何说明文字）：{\"result\":\"完整的更新后 Markdown 文档全文——不是你改了什么，而是改完之后的完整文档\"}",
   ].join("\n");
 
   const raw = await runBackendStructured(input, {

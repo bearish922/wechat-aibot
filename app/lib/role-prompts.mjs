@@ -1,13 +1,25 @@
+// role-prompts.mjs — 角色级 prompt 默认值、角色覆盖、合并逻辑与运行时策略解析。
+// 通用基线在 GENERIC_ROLE_PROMPTS 中定义，各角色可在 prompts.json 的 roles 字段中覆盖。
+// 对外暴露 mergeRolePrompts() 供 reply.mjs 使用，roleRuntimePolicy() 供 state/send-reply 使用。
+
+// 角色 prompt 字段清单，每个字段对应 GENERIC_ROLE_PROMPTS 中的一条 prompt 文本。
+// mergeRolePrompts() 遍历此列表，从 documents 顶层和角色专属配置中合并字段值。
 export const ROLE_PROMPT_FIELDS = [
+  // ── 核心聊天风格与表达 ──
   "chatStyle",
   "hiddenWorldChatStyle",
   "expressionCapability",
   "chatRealityInstructions",
+  // ── 场景/Scenelet 相关 ──
   "sceneletInstructions",
+  // ── 记忆更新 ──
   "memoryUpdatePrompt",
+  // ── 主动消息 ──
   "proactiveInstructions",
+  // ── 日程管理 ──
   "scheduleCreatorInstructions",
   "scheduleSpecialDates",
+  // ── RAG/上下文注入 ──
   "ragContextInstruction",
   "chatHistoryIntro",
   "innerSceneletIntro",
@@ -15,9 +27,13 @@ export const ROLE_PROMPT_FIELDS = [
   "memoryContextInstruction",
   "sceneMemorySystemBlockIntro",
   "sceneMemoryPromptInstructions",
+  // ── 每日分享种子生成 ──
   "dailyShareSeedPrompt",
+  // ── 时间推进与日程提取 ──
   "timeAdvancementPrompt",
   "scheduleExtractorPrompt",
+  // ── 单 Actor 模式连续性更新 ──
+  "continuityUpdatePrompt",
 ];
 
 const GENERIC_ROLE_PROMPTS = {
@@ -44,7 +60,7 @@ const GENERIC_ROLE_PROMPTS = {
     "输出格式：",
     "{\"inner_scenelet\":\"第一人称内心独白\",\"world_state_patch\":{\"location\":\"\",\"activity\":\"\",\"awake_state\":\"awake|sleeping|light_sleep|just_woke|unknown\",\"current_plan\":\"\",\"open_threads\":[],\"last_world_event_at\":\"ISO string\"},\"follow_up_candidates\":[]}",
   ].join("\n"),
-  memoryUpdatePrompt: "根据现有记忆与新增用户消息，输出更新后的完整 Markdown 记忆文档。只保留稳定、明确、对未来互动有用的信息；用户最新纠正覆盖旧推测。不要记录模型推测、一次性玩笑、短期动作或角色自行得出的说教结论。",
+  memoryUpdatePrompt: "根据现有记忆与新增用户消息，输出更新后的完整 Markdown 记忆文档——必须输出完整的更新后文档全文，不要只输出改动摘要或 diff。只保留稳定、明确、对未来互动有用的信息；用户最新纠正覆盖旧推测。不要记录模型推测、一次性玩笑、短期动作或角色自行得出的说教结论。",
   proactiveInstructions: [
     "你是当前 Profile 的角色。一条主动联系候选已经到时间，请判断此刻是否仍然自然。只输出 JSON。",
     "候选只是早先的假设。若已被新对话纠正、事情已经解决、会重复近期提醒或状态，应取消。",
@@ -68,18 +84,27 @@ const GENERIC_ROLE_PROMPTS = {
   dailyShareSeedPrompt: "基于当前 Profile、时间与世界状态，生成一条来自角色独立生活的自然分享候选。不要把当前对话中的未完成任务、健康提醒、催睡催出门或已经说过的计划改成 daily_share；没有新素材就返回空。只输出调用方要求的 JSON。",
   timeAdvancementPrompt: "根据经过的时间、已有世界状态、life_arc 和当前 Profile，自然推进角色的地点、活动、清醒状态与线下短期计划。current_plan 不写回复用户等聊天动作，推进结果也不代表下一条回复必须汇报。避免无依据的大幅跳转，只输出调用方要求的 JSON。",
   scheduleExtractorPrompt: "从近期对话和隐藏场景中提取真正需要跨天或周期性追踪的 schedule_candidates。不要把普通当日活动、即时动作、准备睡觉或出门、随口设想、已解决提醒升级为长期日程。用户最新纠正覆盖旧推测。只输出调用方要求的 JSON。",
+  continuityUpdatePrompt: "根据本轮对话事实，输出结构化状态更新。只记录确有依据的变化，不推测未发生的事。只输出调用方要求的 JSON。",
 };
 
+// 返回通用角色 prompt 默认值的浅拷贝，避免调用方意外修改内部常量
 export function getGenericRolePromptDefaults() {
   return { ...GENERIC_ROLE_PROMPTS };
 }
 
+// 从 document.roles[profile] 中提取角色专属 prompt 覆盖值。
+// 参数: document - prompts.json 解析后的配置对象；profile - 角色标识名（如 "白鹭千圣"）
+// 返回: 角色专属的 prompt 字段键值对对象，无匹配时返回空对象 {}
 export function rolePromptOverrides(document, profile) {
   if (!profile || !document?.roles || typeof document.roles !== "object") return {};
   const value = document.roles[profile];
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
+// 合并角色 prompt：通用默认值 + 文档层覆盖/角色专属覆盖，生成最终 prompt 配置。
+// 优先级：角色专属覆盖 > 文档顶层 legacy 字段 > 通用默认值
+// 参数: document - prompts.json 解析后的配置对象；profile - 角色标识名
+// 返回: 合并后的完整 prompt 键值对对象
 export function mergeRolePrompts(document, profile = "") {
   const base = getGenericRolePromptDefaults();
   const legacy = {};
@@ -93,4 +118,38 @@ export function mergeRolePrompts(document, profile = "") {
   return hasRoleSuites
     ? { ...base, ...rolePromptOverrides(document, profile) }
     : { ...base, ...legacy };
+}
+
+// 解析角色运行时策略配置，控制回复生成架构（单/双阶段）、上下文可见范围、life_arc 开关等。
+// 配置来源：document.roles[profile].runtimePolicy，缺失时各字段回退到安全默认值。
+// 参数: document - prompts.json 配置对象；profile - 角色标识名
+// 返回: { actorMode, actorVisibleContextTurns, visibleReplySource, lifeArcEnabled, sceneletTurnReminder, visibleContextTurns, proactiveEnabled, weatherEnabled }
+export function roleRuntimePolicy(document, profile = "") {
+  const raw = rolePromptOverrides(document, profile).runtimePolicy;
+  const policy = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  return {
+    // actorMode: "single" → 单 Actor 架构（一次调用同时生成 inner_scenelet 与 visible_reply）
+    // "two_stage" 或未设置 → 回退旧双阶段架构（hidden-world + 主回复模型）
+    actorMode: policy.actorMode === "single" ? "single" : "two_stage",
+    // actorVisibleContextTurns: 单 Actor 每轮动态 prompt 中注入的最近可见对话轮数
+    // 当前千圣生产值为 1；范围限制在 1 到 8
+    actorVisibleContextTurns: Math.max(1, Math.min(8, Number(policy.actorVisibleContextTurns) || 1)),
+    // visibleReplySource: "scenelet" → 角色直接以 inner_scenelet 作为回复发送（梦中千圣等特殊角色）
+    // "main" 或未设置 → 正常路径（双阶段用主回复模型，单 Actor 用 visible_reply）
+    visibleReplySource: policy.visibleReplySource === "scenelet" ? "scenelet" : "main",
+    // lifeArcEnabled: 是否启用跨天/周期性日程追踪（默认开启）
+    lifeArcEnabled: policy.lifeArcEnabled !== false,
+    // sceneletTurnReminder: 每轮注入的角色级节奏提醒文本（防止长期 session 中约束稀释）
+    sceneletTurnReminder: policy.sceneletTurnReminder
+      ? String(policy.sceneletTurnReminder).trim()
+      : "",
+    // visibleContextTurns: 双阶段/场景剧模式下注入 hidden world 的可见上下文轮数
+    // 默认为 0（使用全局 visibleContextTurns），角色可覆盖更小值以打破自我模式污染
+    visibleContextTurns: Number.isFinite(policy.visibleContextTurns) ? Math.max(0, policy.visibleContextTurns) : 0,
+    // proactiveEnabled: 是否启用主动消息（日常分享、日程提醒等）——角色级开关，默认启用
+    proactiveEnabled: policy.proactiveEnabled !== false,
+    // weatherEnabled: 是否在用户消息命中天气关键词时注入实时天气——角色级开关，默认启用
+    // cst18 等纯叙事角色关闭以避免现实数据污染内心独白
+    weatherEnabled: policy.weatherEnabled !== false,
+  };
 }
