@@ -1,17 +1,45 @@
 # Personal config (contains API keys, tokens, paths)
 config.json
 data/config.json
+data/config.json.backup
 data/wechat-token.json
 data/wechat-sessions.json
 data/wechat-sessions.bak.json
+data/wechat-sessions.json.bak
+data/wechat-sessions.json.rewrite-bak-*
+data/wechat-sessions.json.*.bak
 产品功能文档与Review.md
 
-# Personal memory (auto-generated per-user data)
+# Local sensitive role config (cst18 18+ prompts / profile) — not for upload
+data/prompts.local.json
+data/wechat-profiles.local.json
+
+# Prompts/profile backups (may contain sensitive cst18 content)
+data/prompts.json.bak
+data/prompts.json.backup-*
+data/prompts.json.*.bak
+data/wechat-profiles - *.json
+data/wechat-profiles*.bak.json
+data/wechat-profiles*.backup.json
+
+# cst18 chat export dumps (sensitive — personal intimate roleplay content)
+data/temp_cst18_*.txt
+
+# Accidental root-level prompts-master snapshots (Windows path misparse artifacts)
+:TEMPprompts-master.json
+C:Users*prompts-master.json
+*prompts-master.json
+
+# Personal memory (auto-generated per-user data, contains chat-derived content)
 wechat-memory.json
 data/wechat-memory.json
 data/wechat-memory.bak.json
+data/wechat-memory-*.md
+data/wechat-memory-*.bak.md
 data/wechat-worlds.json
 data/wechat-worlds.backup.json
+data/wechat-world-memory-*.md
+data/wechat-world-memory-*.bak.md
 
 # Runtime
 data/runtime/
@@ -38,9 +66,19 @@ data/chat-history.bak.json
 data/chat-history.db
 data/chat-history.db.bak
 data/chat-history.db.bak2
+data/chat-history.db.bak3
+data/chat-history.db.bak4
+data/chat-history.db.bak*
+data/chat-history.db.before-*
+data/chat-history.db.manual-rewrite-*
+data/chat-history.db.rewrite-bak-*
+data/chat-history.db.test-bak
 
-# Auto-generated markdown memory (personal data)
+# Auto-generated markdown memory (personal data, legacy flat-file paths)
 data/wechat-memory.md
 data/wechat-memory.bak.md
 data/wechat-world-memory.md
 data/wechat-world-memory.bak.md
+
+# Local backups directory (snapshots of prompts/profiles/code, may contain sensitive content)
+data/backups/

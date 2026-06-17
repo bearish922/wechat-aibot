@@ -1,13 +1,15 @@
 ﻿// reply.mjs — prompt 配置加载 + 回复文本拆分/格式化
 // 负责从 data/prompts.json 读取运行时配置，以及消息拆分、时间格式化等工具函数
 
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync as fsExistsSync } from "node:fs";
 import { rootPath } from "./paths.mjs";
-import { mergeRolePrompts } from "./role-prompts.mjs";
+import { mergeRolePrompts, roleRuntimePolicy } from "./role-prompts.mjs";
 export { getWeatherReality, formatWeatherReality } from "./weather.mjs";
 
 // 运行时 prompt 配置文件路径
 const PROMPTS_FILE = rootPath("data/prompts.json");
+// 本地敏感配置覆盖文件（如梦中的千圣的 18+ prompt），加入 .gitignore 不入库
+const PROMPTS_LOCAL_FILE = rootPath("data/prompts.local.json");
 
 import {
   DEFAULT_VISION_CAPTION_PROMPT,
@@ -43,17 +45,28 @@ import {
 
 // 从 data/prompts.json 加载运行时配置。角色文本由 role-prompts.mjs 提供完整基线，
 // 全局参数在文件缺失或解析失败时退回到本模块导入的 DEFAULT_* 默认值。
-// 返回的配置对象被多处引用（send-reply、claude-runner、state 等），每次调用都会重新读取文件
+// 返回的配置对象被多处引用（send-reply、claude-runner、state 等），每次调用都会重新读取文件。
+// 若 data/prompts.local.json 存在，其 roles 字段会整体覆盖主文件的同名 role——用于隔离敏感角色配置
 export function loadPromptDocument() {
   let data;
   try { data = JSON.parse(readFileSync(PROMPTS_FILE, "utf-8")); } catch { data = {}; }
-  return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  if (!data || typeof data !== "object" || Array.isArray(data)) data = {};
+  try {
+    if (fsExistsSync(PROMPTS_LOCAL_FILE)) {
+      const local = JSON.parse(readFileSync(PROMPTS_LOCAL_FILE, "utf-8"));
+      if (local && typeof local === "object" && !Array.isArray(local) && local.roles) {
+        data.roles = { ...(data.roles || {}), ...local.roles };
+      }
+    }
+  } catch {}
+  return data;
 }
 
 export function loadPrompts(profile = "") {
   const data = loadPromptDocument();
   const role = mergeRolePrompts(data, profile);
   return {
+    runtimePolicy: roleRuntimePolicy(data, profile),
     // ── 角色人设 prompt ──
     chatStyle: role.chatStyle,
     hiddenWorldChatStyle: role.hiddenWorldChatStyle,
@@ -113,6 +126,9 @@ export function loadPrompts(profile = "") {
     timeAdvancementPrompt: role.timeAdvancementPrompt,
     stateStaleThresholdMs: Number.isFinite(data.stateStaleThresholdMs) ? data.stateStaleThresholdMs : DEFAULT_STATE_STALE_THRESHOLD_MS,
     scheduleExtractorPrompt: role.scheduleExtractorPrompt,
+    // ── 单 Actor 模式：状态连续性记录 prompt ──
+    // 在每轮对话后调用 continuity updater，记录角色世界状态的增量变化（位置/活动/清醒状态等）
+    continuityUpdatePrompt: role.continuityUpdatePrompt,
   };
 }
 
@@ -338,3 +354,4 @@ export function splitSocialReply(text) {
   }
   return [text.trim()];
 }
+

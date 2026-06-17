@@ -9,9 +9,12 @@ import { normalizeFailedTurn, normalizeVisibleHistory, normalizeProactiveIntents
 const SESSION_FILE = dataPath("wechat-sessions.json");
 // 角色模板/profile 配置文件路径
 const PROFILE_FILE = dataPath("wechat-profiles.json");
+// 本地敏感 profile 覆盖文件（如梦中的千圣的 18+ 人设），加入 .gitignore 不入库
+const PROFILE_LOCAL_FILE = dataPath("wechat-profiles.local.json");
 
 // 从 wechat-profiles.json 加载角色模板到全局 profileTemplates 对象
-// 文件不存在或解析失败时，回退到只有 "默认" 模板
+// 文件不存在或解析失败时，回退到只有 "默认" 模板。
+// 若 wechat-profiles.local.json 存在，其 templates 字段会覆盖主文件的同名 template——用于隔离敏感角色人设
 export function loadProfiles() {
   // 先清空现有模板
   for (const k of Object.keys(profileTemplates)) delete profileTemplates[k];
@@ -25,6 +28,15 @@ export function loadProfiles() {
       Object.assign(profileTemplates, { "默认": "保持 AI 的默认风格" });
     }
   } catch { Object.assign(profileTemplates, { "默认": "保持 AI 的默认风格" }); }
+  // 合并本地敏感 profile 覆盖
+  try {
+    if (fs.existsSync(PROFILE_LOCAL_FILE)) {
+      const local = JSON.parse(fs.readFileSync(PROFILE_LOCAL_FILE, "utf-8"));
+      if (local && typeof local === "object" && local.templates) {
+        Object.assign(profileTemplates, local.templates);
+      }
+    }
+  } catch {}
 }
 
 // 创建一个全新的 session 对象，初始化所有运行时字段为默认值
