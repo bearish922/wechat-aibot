@@ -15,20 +15,20 @@ describe("Role prompt suites", () => {
       visibleContextTurns: 12,
       ragKeywords: { lore: ["shared"], names: [] },
       roles: {
-        A: { chatStyle: "style-a", sceneletInstructions: "scene-a" },
-        B: { chatStyle: "style-b", sceneletInstructions: "scene-b" },
+        A: { memoryUpdatePrompt: "memory-a", sceneletInstructions: "scene-a" },
+        B: { memoryUpdatePrompt: "memory-b", sceneletInstructions: "scene-b" },
       },
     };
 
-    assert.equal(mergeRolePrompts(document, "A").chatStyle, "style-a");
-    assert.equal(mergeRolePrompts(document, "B").chatStyle, "style-b");
+    assert.equal(mergeRolePrompts(document, "A").memoryUpdatePrompt, "memory-a");
+    assert.equal(mergeRolePrompts(document, "B").memoryUpdatePrompt, "memory-b");
     assert.notEqual(mergeRolePrompts(document, "A").sceneletInstructions, mergeRolePrompts(document, "B").sceneletInstructions);
   });
 
   // 遗留平铺格式（无 roles 对象）仍然可读，迁移前不破坏已有配置
   it("keeps legacy flat prompt documents readable before migration", () => {
-    const legacy = { chatStyle: "legacy-style", sceneletInstructions: "legacy-scene" };
-    assert.equal(mergeRolePrompts(legacy, "any-role").chatStyle, "legacy-style");
+    const legacy = { memoryUpdatePrompt: "legacy-memory", sceneletInstructions: "legacy-scene" };
+    assert.equal(mergeRolePrompts(legacy, "any-role").memoryUpdatePrompt, "legacy-memory");
     assert.equal(mergeRolePrompts(legacy, "any-role").sceneletInstructions, "legacy-scene");
   });
 
@@ -37,29 +37,22 @@ describe("Role prompt suites", () => {
     const document = loadPromptDocument();
     assert.equal(document.version, 2);
     assert.deepEqual(Object.keys(document.roles), ["千早爱音", "丸山彩", "长崎素世", "白鹭千圣", "梦中的千圣"]);
-    assert.equal(Object.keys(document.roles["白鹭千圣"]).length, ROLE_PROMPT_FIELDS.length + 1); // +1 为 runtimePolicy
+    assert.ok(ROLE_PROMPT_FIELDS.every(field => typeof document.roles["白鹭千圣"][field] === "string"));
+    assert.equal(document.roles["白鹭千圣"].runtimePolicy.actorMode, "single");
 
     const chisato = loadPrompts("白鹭千圣");
     const untuned = loadPrompts("新角色");
-    assert.notEqual(chisato.chatStyle, untuned.chatStyle);
-    assert.match(chisato.sceneletReplyBridgeInstruction, /千圣/);
-    assert.doesNotMatch(untuned.sceneletReplyBridgeInstruction, /千圣|小彩|PasPale|Leo/);
+    assert.notEqual(chisato.hiddenWorldChatStyle, untuned.hiddenWorldChatStyle);
     assert.deepEqual(chisato.ragKeywords, untuned.ragKeywords);
   });
 
   // 千圣内心因果链条完整，但不泄露内心独白到用户可见输出——桥接指令过滤语言成品
   it("keeps Chisato inner emotion causal without leaking inner prose", () => {
     const scenelet = loadPrompts("白鹭千圣").sceneletInstructions;
-    const bridge = loadPrompts("白鹭千圣").sceneletReplyBridgeInstruction;
     assert.match(scenelet, /新事实、纠正前提或说明自己已有经验时，先更新判断/);
     assert.match(scenelet, /普通低风险日常不主动发明专业审查项/);
-    assert.match(bridge, /过滤的是语言成品/);
-    assert.match(bridge, /感性金句.*外溢/);
-    assert.match(bridge, /保留的是表达选择和互动后果/);
-    assert.match(bridge, /不是强制每轮显露温柔/);
-    assert.match(bridge, /不自动禁止它对语气、取舍和让步产生影响/);
-    assert.match(bridge, /角色一致性不等于坚持旧判断/);
-    assert.match(bridge, /给最少够用的答案，不自动扩写成完整检查表/);
+    assert.match(scenelet, /visible_reply 是千圣在微信里实际发给沃沃的中文消息/);
+    assert.match(scenelet, /不是 inner_scenelet 的摘要或改写/);
   });
 
   // 特定角色运行时策略例外（如"梦中的千圣"的 scenelet 回复模式）不影响其他角色默认的完整 pipeline
@@ -67,34 +60,41 @@ describe("Role prompt suites", () => {
     const document = loadPromptDocument();
     assert.deepEqual(roleRuntimePolicy(document, "梦中的千圣"), {
       actorMode: "single",
-      actorVisibleContextTurns: 1,
+      actorVisibleContextTurns: 2,
       visibleReplySource: "scenelet",
       lifeArcEnabled: false,
-      sceneletTurnReminder: "本轮写到一个自然停顿点即可。允许叙事悬而未决，不要总结、收束、压缩前文，也不要为了完整覆盖所有想法而继续展开。可以中断叙事，但不能中断句子。该停的时候就停。",
-      visibleContextTurns: 2,
+      visibleContextTurns: 0,
       proactiveEnabled: false,
       weatherEnabled: false,
     });
     assert.deepEqual(roleRuntimePolicy(document, "白鹭千圣"), {
       actorMode: "single",
-      actorVisibleContextTurns: 1,
+      actorVisibleContextTurns: 2,
       visibleReplySource: "main",
       lifeArcEnabled: true,
-      sceneletTurnReminder: "",
       visibleContextTurns: 0,
       proactiveEnabled: true,
       weatherEnabled: true,
     });
     assert.deepEqual(loadPrompts("新角色").runtimePolicy, {
-      actorMode: "two_stage",
-      actorVisibleContextTurns: 1,
+      actorMode: "single",
+      actorVisibleContextTurns: 8,
       visibleReplySource: "main",
       lifeArcEnabled: true,
-      sceneletTurnReminder: "",
       visibleContextTurns: 0,
       proactiveEnabled: true,
       weatherEnabled: true,
     });
+  });
+
+  it("keeps every single-actor main-reply prompt compatible with its validator", () => {
+    const document = loadPromptDocument();
+    for (const profile of Object.keys(document.roles)) {
+      const prompts = loadPrompts(profile);
+      if (prompts.runtimePolicy.actorMode !== "single" || prompts.runtimePolicy.visibleReplySource !== "main") continue;
+      assert.match(prompts.sceneletInstructions, /visible_reply/, `${profile} must request visible_reply`);
+    }
+    assert.match(loadPrompts("新角色").sceneletInstructions, /visible_reply/);
   });
 
   // 每个角色域字段都有完整的中性基线值，不会缺失而导致运行时错误

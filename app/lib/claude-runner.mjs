@@ -5,7 +5,8 @@ import { spawn, spawnSync, execSync } from "node:child_process";
 import { configValue, envOrConfig, configBool, configNumber } from "./config.mjs";
 import { RUNTIME_DIR, dataPath, ensureDir } from "./paths.mjs";
 import { log } from "./utils.mjs";
-import { loadPrompts } from "./reply.mjs";
+import { loadPrompts, beijingISO } from "./reply.mjs";
+import { buildRagContextBlock } from "./prompts.mjs";
 import { profileTemplates } from "./state.mjs";
 import { apiChatStream, apiChatJson, apiChatWithTools, isApiConfigured, resolveApiConfig } from "./api-client.mjs";
 
@@ -199,22 +200,33 @@ function envWithProxy(proxyUrl, extra = {}) {
 // 用于按 profile 路由到不同的 cc-switch provider（如 cst18 走 DeepSeek，
 // 其他 profile 跟随 ~/.claude/settings.json 的当前选择）
 // 参数: profile - 角色模板名称（可为空）
-// 返回: 配置目录路径字符串；未配置则返回 null（claude.exe 使用默认 ~/.claude）
+// 返回: 配置目录路径字符串；未配置或目录/settings.json 不存在则返回 null
 function claudeConfigDirFor(profile) {
   if (!profile) return null;
   const map = configValue("paths.profileClaudeConfigDirs", {});
   if (!map || typeof map !== "object") return null;
   const dir = map[profile];
-  return dir && String(dir).trim() ? String(dir).trim() : null;
+  if (!dir || !String(dir).trim()) return null;
+  const resolved = String(dir).trim();
+  if (!fs.existsSync(path.join(resolved, "settings.json"))) return null;
+  return resolved;
 }
 
 // envForProfile - 为指定 profile 构建 Claude 子进程环境
 // 在代理环境之上，按 profile 注入 CLAUDE_CONFIG_DIR，让 claude.exe 加载独立的 settings.json
+// 走独立配置目录的 profile（如 cst18 直连 DeepSeek）必须清除继承的 ANTHROPIC_* 环境变量，
+// 否则父 shell 残留的 cc-switch 配置（如 GLM 的 BASE_URL）会压过 profile settings.json。
 function envForProfile(proxyUrl, profile, extra = {}) {
   const env = envWithProxy(proxyUrl, extra);
   const dir = claudeConfigDirFor(profile);
-  if (dir) env.CLAUDE_CONFIG_DIR = dir;
-  else delete env.CLAUDE_CONFIG_DIR;
+  if (dir) {
+    env.CLAUDE_CONFIG_DIR = dir;
+    for (const key of Object.keys(env)) {
+      if (key.startsWith("ANTHROPIC_")) delete env[key];
+    }
+  } else {
+    delete env.CLAUDE_CONFIG_DIR;
+  }
   return env;
 }
 
@@ -322,6 +334,10 @@ function usageSummary(raw = null, modelUsage = null) {
   const costFromModels = models && typeof models === "object"
     ? Object.values(models).reduce((sum, item) => sum + (Number(item?.costUSD || 0) || 0), 0)
     : 0;
+  // 从 modelUsage 各条目提取 contextWindow，取最大值作为 model_context_window
+  const modelContextWindow = models && typeof models === "object"
+    ? Object.values(models).reduce((max, item) => Math.max(max, Number(item?.contextWindow || 0) || 0), 0)
+    : 0;
   return {
     // 输入 token 数（包括缓存命中和缓存写入）
     input_tokens: Number(usage.input_tokens || 0) || 0,
@@ -335,6 +351,8 @@ function usageSummary(raw = null, modelUsage = null) {
     cost_usd: Number(raw?.total_cost_usd || costFromModels || 0) || 0,
     // 按模型拆分的原始用量数据
     modelUsage: models || null,
+    // 模型上下文窗口（从 modelUsage 提取，0 表示未知）
+    model_context_window: modelContextWindow,
   };
 }
 
@@ -369,9 +387,12 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
   // Claude 命令不可用时直接返回 null
   if (!commandExists(CLAUDE)) return null;
   // 记录调用开始时间和模型
-  const startedAt = new Date().toISOString();
+  const startedAt = beijingISO();
   const startedMs = Date.now();
+  // Claude Code provider 使用 [1m] 作为 1M 上下文 alias 的一部分，必须原样传递。
+  // 直连 OpenAI-compatible API 的裸模型名清洗由 apiModelName() 单独负责。
   const selectedModel = model || CLAUDE_MAIN_MODEL;
+  const profileConfigDir = claudeConfigDirFor(profile);
   // 如果有系统提示词，写入临时文件（通过 --append-system-prompt-file 传给 Claude）
   const systemPromptFile = systemPrompt
     ? path.join(RUNTIME_DIR, `.hidden_system_${label}_${crypto.randomUUID()}.txt`)
@@ -382,8 +403,17 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
     "--output-format", "json",
     "--permission-mode", "bypassPermissions",
     "--tools", "WebSearch,WebFetch",
+    "--strict-mcp-config",
     "--model", selectedModel,
   ];
+  // --bare 模式下 claude.exe 不读取 CLAUDE_CONFIG_DIR 指向的 settings.json env block，
+  // 必须通过 --settings 显式指向独立 profile 的 settings.json 才能正确路由（如 cst18 → DeepSeek）
+  if (profileConfigDir) {
+    const profileSettingsFile = path.join(profileConfigDir, "settings.json");
+    if (fs.existsSync(profileSettingsFile)) {
+      args.push("--settings", profileSettingsFile);
+    }
+  }
   // 设置会话名称（避免交互式提示）
   if (sessionName) args.push("--name", sessionName);
   // 根据 persist 标志决定会话持久化方式
@@ -404,11 +434,12 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
     args.push("--append-system-prompt-file", systemPromptFile);
   }
   // 启动子进程，设置工作目录、隐藏窗口、管道 I/O
+  const childEnv = envForProfile(CLAUDE_HTTPS_PROXY, profile);
   const proc = spawnCli(CLAUDE, args, {
     cwd: AI_WORK_DIR,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
-    env: envForProfile(CLAUDE_HTTPS_PROXY, profile),
+    env: childEnv,
   });
   // 忽略 stdin 错误，将 prompt 写入 stdin 后关闭
   proc.stdin.on("error", () => {});
@@ -462,6 +493,19 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
   try {
     // 解析 Claude 的外层 JSON 输出
     const outer = parseHiddenJson(stdout);
+    // claude.exe 把 API 错误包装为 {"is_error":true, "api_error_status":..., "result":"API Error: ..."} 仍 exit 0
+    // 这种情况必须显式识别为失败，否则错误字符串会作为"成功内容"返回，污染 scene_memory 等下游
+    if (outer && (outer.is_error === true || outer.api_error_status)) {
+      const errText = String(outer.result || outer.message || outer.text || "claude.exe wrapped API error");
+      log("warn", label + " api_error: " + errText.slice(0, 300));
+      writeHiddenUsageEvent({
+        ...baseUsageEvent,
+        duration_ms: Date.now() - startedMs,
+        success: false,
+        error: "api_error " + (outer.api_error_status || "?") + ": " + errText.slice(0, 300),
+      });
+      return null;
+    }
     // 提取实际内容（优先取 result 字段，其次 message、text，最后使用原始 stdout）
     const content = outer.result || outer.message || outer.text || stdout;
     let parsed;
@@ -487,6 +531,16 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
       };
       // 将成功的调用写入用量日志
       writeHiddenUsageEvent(parsed._hiddenCall);
+    } else {
+      writeHiddenUsageEvent({
+        ...baseUsageEvent,
+        session_id: outer.session_id || sessionId || null,
+        duration_ms: Date.now() - startedMs,
+        success: false,
+        error: "structured output was not an object",
+        output_chars: String(content || "").length,
+        ...usageSummary(outer, outer.modelUsage),
+      });
     }
     return parsed;
   } catch (e) {
@@ -501,6 +555,43 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
     });
     return null;
   }
+}
+
+// 计算 Claude Code 项目 session 目录
+// AI_WORK_DIR 对应的项目 slug 由绝对路径变换而来
+function sessionProjectDir() {
+  const slug = AI_WORK_DIR.replace(/^([A-Za-z]):/, '$1-').replace(/[/\\]/g, '-');
+  return path.join(USER_HOME, '.claude', 'projects', slug);
+}
+
+// 查找 session 对应的持久化文件路径
+// 优先按 sessionId 精确匹配；若未找到，扫描目录按 sessionName（customTitle/agentName）匹配
+export function findSessionFile(sessionId, sessionName) {
+  const dir = sessionProjectDir();
+  if (!fs.existsSync(dir)) return null;
+  const exact = path.join(dir, `${sessionId}.jsonl`);
+  if (fs.existsSync(exact)) return exact;
+  if (!sessionName) return null;
+  // 按 sessionName 搜索（可能有多份同名 session，取最新修改的）
+  let best = null;
+  let bestMtime = 0;
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) continue;
+      const fp = path.join(dir, f);
+      try {
+        const head = fs.readFileSync(fp, 'utf-8').slice(0, 400);
+        const firstLine = head.split('\n')[0];
+        const parsed = JSON.parse(firstLine);
+        if (parsed.sessionId === sessionId) return fp;
+        if (parsed.customTitle === sessionName || parsed.agentName === sessionName) {
+          const st = fs.statSync(fp);
+          if (st.mtimeMs > bestMtime) { best = fp; bestMtime = st.mtimeMs; }
+        }
+      } catch {}
+    }
+  } catch {}
+  return best;
 }
 
 // runClaudeStream - 以 stream-json 模式启动 Claude Code 进行流式对话
@@ -555,11 +646,20 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
     // 后续轮次：恢复已有会话
     args.push("--resume", sid);
   }
-  // 指定主模型
+  // Claude Code provider 需要保留 [1m] alias，才能选择真实的 1M 上下文模型。
   args.push("--model", CLAUDE_MAIN_MODEL);
   // 配置 fallback 模型（主模型不可用时的备选）
   if (CLAUDE_FALLBACK_MODEL && CLAUDE_FALLBACK_MODEL !== CLAUDE_MAIN_MODEL) {
     args.push("--fallback-model", CLAUDE_FALLBACK_MODEL);
+  }
+  // 独立 profile（如 cst18）通过 --settings 显式加载独立 settings.json，
+  // 确保非 --bare 流式路径也能正确路由到 profile 配置的 provider
+  const streamProfileDir = claudeConfigDirFor(profileOverride);
+  if (streamProfileDir) {
+    const streamSettingsFile = path.join(streamProfileDir, "settings.json");
+    if (fs.existsSync(streamSettingsFile)) {
+      args.push("--settings", streamSettingsFile);
+    }
   }
   // 将系统提示词写入临时文件
   if (systemPromptFile) {
@@ -629,20 +729,6 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
   return promise;
 }
 
-// buildRagContextBlock - 构建 RAG（检索增强生成）上下文块
-// 将知识库检索结果与配置中的引导指令拼接为结构化文本块
-// 参数: ragContext - RAG 检索结果文本（可为空）
-// 返回: 格式化后的上下文块字符串，ragContext 为空时返回空字符串
-function buildRagContextBlock(ragContext, profile = "") {
-  if (!ragContext) return "";
-  const cfg = loadPrompts(profile);
-  return [
-    "【本轮知识库检索结果】",
-    cfg.ragContextInstruction,
-    ragContext,
-  ].filter(Boolean).join("\n");
-}
-
 // buildCodexPrompt - 构建用于 Codex（OpenAI Codex CLI）的完整提示文本
 // 将角色配置、风格提示、RAG 上下文和用户消息拼接为单一提示字符串
 // 参数:
@@ -657,7 +743,7 @@ function buildCodexPrompt(ai, userBody, ragContext, profile = "") {
   // 如果有 RAG 检索结果，将其作为最高优先级的上下文块前置
   if (ragContext) {
     prompt = [
-      buildRagContextBlock(ragContext, profile),
+      buildRagContextBlock(ragContext, profile, "【本轮知识库检索结果】"),
       "",
       "---",
       "",
@@ -679,7 +765,7 @@ function codexSystemPrompt(stylePrompt, memoryPrompt = "", profileOverride = nul
   return parts.join("\n\n---\n\n");
 }
 
-function codexUsageSummary(usage = null) {
+function codexUsageSummary(usage = null, { total = null, modelContextWindow = 0 } = {}) {
   if (!usage || typeof usage !== "object") return null;
   return {
     input_tokens: Number(usage.input_tokens || 0) || 0,
@@ -687,7 +773,18 @@ function codexUsageSummary(usage = null) {
     cache_creation_input_tokens: 0,
     output_tokens: Number(usage.output_tokens || 0) || 0,
     reasoning_output_tokens: Number(usage.reasoning_output_tokens || 0) || 0,
+    total_input_tokens: Number(total?.input_tokens || 0) || 0,
+    total_output_tokens: Number(total?.output_tokens || 0) || 0,
+    model_context_window: Number(modelContextWindow || usage.model_context_window || 0) || 0,
   };
+}
+
+// Continuity-sensitive callers must use exact SID matching. Name lookup is
+// diagnostic-only because multiple generations intentionally share one title.
+export function findExactSessionFile(sessionId) {
+  if (!sessionId) return null;
+  const exact = path.join(sessionProjectDir(), `${sessionId}.jsonl`);
+  return fs.existsSync(exact) ? exact : null;
 }
 
 function codexToolName(item = null) {
@@ -719,7 +816,16 @@ function reduceCodexEvent(state, event) {
       if (tool === "WebSearch") state.toolUsage.webSearch += 1;
     }
   }
-  if (event?.type === "turn.completed") state.usage = codexUsageSummary(event.usage);
+  if (event?.type === "event_msg" && event.payload?.type === "token_count") {
+    const info = event.payload.info || {};
+    state.usage = codexUsageSummary(info.last_token_usage || info.total_token_usage, {
+      total: info.total_token_usage || null,
+      modelContextWindow: info.model_context_window,
+    });
+  }
+  if (event?.type === "turn.completed" && !state.usage) {
+    state.usage = codexUsageSummary(event.usage);
+  }
   return state;
 }
 
@@ -895,11 +1001,7 @@ function runCodexAppServer(prompt, {
       };
       let threadResult;
       if (sessionId) {
-        try {
-          threadResult = await request("thread/resume", { ...threadParams, threadId: sessionId });
-        } catch {
-          threadResult = await request("thread/start", { ...threadParams, ephemeral: !persist });
-        }
+        threadResult = await request("thread/resume", { ...threadParams, threadId: sessionId });
       } else {
         threadResult = await request("thread/start", { ...threadParams, ephemeral: !persist });
       }
@@ -1054,7 +1156,7 @@ function runCodexStream(ai, sid, sessionName, body, firstTurn, onEvent, ragConte
 
 async function runCodexJson(prompt, { label = "hidden", timeoutMs = 300_000, model = null, sessionId = "", firstTurn = false, persist = false, systemPrompt = "", outputSchema = null } = {}) {
   if (!commandExists(CODEX)) return null;
-  const startedAt = new Date().toISOString();
+  const startedAt = beijingISO();
   const startedMs = Date.now();
   const task = runCodexExec(prompt, {
     sessionId: persist && !firstTurn ? sessionId : "",
@@ -1179,7 +1281,7 @@ async function runApiStream({ systemPrompt = "", body = "", messages = null, ses
 // 返回: API 响应结果对象，成功时附加 _apiCall 用量元数据；失败时记录错误日志
 async function runApiJson({ systemPrompt = "", body = "", label = "api_hidden", model = null, timeoutMs = 300_000 } = {}) {
   // 记录调用开始时间
-  const startedAt = new Date().toISOString();
+  const startedAt = beijingISO();
   const startedMs = Date.now();
   // 去除模型名后缀标记
   const selectedModel = apiModelName(model);

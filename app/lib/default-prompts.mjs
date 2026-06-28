@@ -67,8 +67,6 @@ export const DEFAULT_SCHEDULE_EXPIRY_AFTER_END_BUFFER_MS = 43200000;
 // 日程从创建到默认过期的时间（毫秒），默认 3 天
 export const DEFAULT_SCHEDULE_DEFAULT_EXPIRY_FROM_NOW_MS = 259200000;
 
-// 隐藏世界同时最多维护的 pending intent 数量
-export const DEFAULT_HIDDEN_WORLD_MAX_PENDING_INTENTS = 8;
 
 // 消息分块发送间隔（毫秒），避免连续发送过快
 export const DEFAULT_CHUNK_SEND_DELAY_MS = 450;
@@ -76,7 +74,8 @@ export const DEFAULT_CHUNK_SEND_DELAY_MS = 450;
 export const DEFAULT_MAX_CANCEL_REASON_LENGTH = 500;
 
 // 回合计数器阈值，达到后触发场景重置 + 记忆批量更新
-export const DEFAULT_TURN_RESET_THRESHOLD = 16;
+export const DEFAULT_CONTEXT_RESET_RATIO = 0.5;
+export const DEFAULT_TURN_RESET_THRESHOLD = 30;
 // 状态过期阈值（毫秒），超时未更新的世界状态视为过期
 export const DEFAULT_STATE_STALE_THRESHOLD_MS = 1800000;
 

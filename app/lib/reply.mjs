@@ -35,9 +35,9 @@ import {
   DEFAULT_SCHEDULE_ARC_TITLE_MAX_LENGTH,
   DEFAULT_SCHEDULE_EXPIRY_AFTER_END_BUFFER_MS,
   DEFAULT_SCHEDULE_DEFAULT_EXPIRY_FROM_NOW_MS,
-  DEFAULT_HIDDEN_WORLD_MAX_PENDING_INTENTS,
   DEFAULT_CHUNK_SEND_DELAY_MS,
   DEFAULT_MAX_CANCEL_REASON_LENGTH,
+  DEFAULT_CONTEXT_RESET_RATIO,
   DEFAULT_TURN_RESET_THRESHOLD,
   DEFAULT_STATE_STALE_THRESHOLD_MS,
   normalizeRagKeywords,
@@ -55,7 +55,22 @@ export function loadPromptDocument() {
     if (fsExistsSync(PROMPTS_LOCAL_FILE)) {
       const local = JSON.parse(readFileSync(PROMPTS_LOCAL_FILE, "utf-8"));
       if (local && typeof local === "object" && !Array.isArray(local) && local.roles) {
-        data.roles = { ...(data.roles || {}), ...local.roles };
+        const mergedRoles = { ...(data.roles || {}) };
+        for (const roleName of Object.keys(local.roles)) {
+          const mainRole = mergedRoles[roleName] || {};
+          const localRole = local.roles[roleName] || {};
+          // 合并角色配置，但对于 runtimePolicy 子对象做深度合并：
+          // local.json 里定义的 runtimePolicy 字段覆盖主文件，但 local 未定义的字段保留主文件值
+          mergedRoles[roleName] = {
+            ...mainRole,
+            ...localRole,
+            runtimePolicy: {
+              ...(mainRole.runtimePolicy || {}),
+              ...(localRole.runtimePolicy || {}),
+            },
+          };
+        }
+        data.roles = mergedRoles;
       }
     }
   } catch {}
@@ -68,10 +83,7 @@ export function loadPrompts(profile = "") {
   return {
     runtimePolicy: roleRuntimePolicy(data, profile),
     // ── 角色人设 prompt ──
-    chatStyle: role.chatStyle,
     hiddenWorldChatStyle: role.hiddenWorldChatStyle,
-    expressionCapability: role.expressionCapability,
-    chatRealityInstructions: role.chatRealityInstructions,
     // ── 行为控制参数 ──
     visibleContextTurns: Number.isFinite(data.visibleContextTurns) ? data.visibleContextTurns : DEFAULT_VISIBLE_CONTEXT_TURNS,
     proactiveCheckIntervalMs: Number.isFinite(data.proactiveCheckIntervalMs) ? data.proactiveCheckIntervalMs : DEFAULT_PROACTIVE_CHECK_INTERVAL_MS,
@@ -94,8 +106,6 @@ export function loadPrompts(profile = "") {
     // ── 日程/计划相关参数 ──
     scheduleSpecialDates: role.scheduleSpecialDates,
     scheduleCheckIntervalMs: Number.isFinite(data.scheduleCheckIntervalMs) ? data.scheduleCheckIntervalMs : DEFAULT_SCHEDULE_CHECK_INTERVAL_MS,
-    // ── 隐藏世界 + follow-up ──
-    hiddenWorldMaxPendingIntents: Number.isFinite(data.hiddenWorldMaxPendingIntents) ? data.hiddenWorldMaxPendingIntents : DEFAULT_HIDDEN_WORLD_MAX_PENDING_INTENTS,
     // ── 每日分享 / 主动消息参数 ──
     dailyShareDefaultScheduleOffsetMs: Number.isFinite(data.dailyShareDefaultScheduleOffsetMs) ? data.dailyShareDefaultScheduleOffsetMs : DEFAULT_DAILY_SHARE_DEFAULT_SCHEDULE_OFFSET_MS,
     dailyShareDefaultExpiryOffsetMs: Number.isFinite(data.dailyShareDefaultExpiryOffsetMs) ? data.dailyShareDefaultExpiryOffsetMs : DEFAULT_DAILY_SHARE_DEFAULT_EXPIRY_OFFSET_MS,
@@ -115,10 +125,9 @@ export function loadPrompts(profile = "") {
     visionCaptionPrompt: data.visionCaptionPrompt || DEFAULT_VISION_CAPTION_PROMPT,
     ragContextInstruction: role.ragContextInstruction,
     chatHistoryIntro: role.chatHistoryIntro,
-    innerSceneletIntro: role.innerSceneletIntro,
-    sceneletReplyBridgeInstruction: role.sceneletReplyBridgeInstruction,
     memoryContextInstruction: role.memoryContextInstruction,
     ragKeywords: normalizeRagKeywords(data.ragKeywords),
+    contextResetRatio: Number.isFinite(data.contextResetRatio) ? data.contextResetRatio : DEFAULT_CONTEXT_RESET_RATIO,
     turnResetThreshold: Number.isFinite(data.turnResetThreshold) ? data.turnResetThreshold : DEFAULT_TURN_RESET_THRESHOLD,
     sceneMemorySystemBlockIntro: role.sceneMemorySystemBlockIntro,
     sceneMemoryPromptInstructions: role.sceneMemoryPromptInstructions,
@@ -129,70 +138,35 @@ export function loadPrompts(profile = "") {
     // ── 单 Actor 模式：状态连续性记录 prompt ──
     // 在每轮对话后调用 continuity updater，记录角色世界状态的增量变化（位置/活动/清醒状态等）
     continuityUpdatePrompt: role.continuityUpdatePrompt,
+    // ── 日程预生成器 ──
+    workEventConfig: role.workEventConfig ? {
+      enabled: role.workEventConfig.enabled !== false,
+      workHoursPerDay: role.workEventConfig.workHoursPerDay || 8,
+      generationIntervalMs: role.workEventConfig.generationIntervalMs || 43200000,
+      maxEventsPerGeneration: role.workEventConfig.maxEventsPerGeneration || 1,
+      minLeadHours: {
+        light: role.workEventConfig.minLeadHours?.light || 24,
+        medium: role.workEventConfig.minLeadHours?.medium || 48,
+        heavy: role.workEventConfig.minLeadHours?.heavy || 72,
+      },
+      conflictPolicy: {
+        light: { allow: role.workEventConfig.conflictPolicy?.light?.allow || false },
+        medium: { allow: role.workEventConfig.conflictPolicy?.medium?.allow || false },
+        heavy: { allow: role.workEventConfig.conflictPolicy?.heavy?.allow || "school_only" },
+        minGapBetweenEventsMinutes: role.workEventConfig.conflictPolicy?.minGapBetweenEventsMinutes ?? 60,
+      },
+    } : null,
+    workEventPrompt: role.workEventPrompt || "",
+    workEventTemplates: role.workEventTemplates || null,
   };
 }
 
-// 获取聊天风格 prompt（便捷访问器）
-export function getChatStyle(profile = "") {
-  return loadPrompts(profile).chatStyle;
-}
 
 // WeChat ilink API 单条消息字节上限约 2048 字节，留安全余量设为 1800
 export const MAX_REPLY_LEN = 1800;
 const MAX_SOCIAL_PARTS = 8;
 
-// 根据小时数返回中文时间段称谓
-function timePeriodFromHour(hour) {
-  if (hour < 5) return "凌晨";
-  if (hour < 8) return "早上";
-  if (hour < 11) return "上午";
-  if (hour < 13) return "中午";
-  if (hour < 18) return "下午";
-  if (hour < 23) return "晚上";
-  return "深夜";
-}
-
-// 将日期按指定时区格式化为中文时间片段，返回 stamp、weekday、shortWeekday、period
-export function formatZonedTimeParts(date = new Date(), timeZone = "Asia/Shanghai") {
-  const weekdays = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
-  const shortWeekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-  const parts = Object.fromEntries(new Intl.DateTimeFormat("zh-CN", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(date).filter(p => p.type !== "literal").map(p => [p.type, p.value]));
-  const weekdayValue = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short" }).format(date);
-  const weekdayIndex = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(weekdayValue);
-  const hour = Number(parts.hour || 0);
-  const stamp = `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
-  return {
-    stamp,
-    weekday: weekdays[weekdayIndex] || weekdays[date.getDay()],
-    shortWeekday: shortWeekdays[weekdayIndex] || shortWeekdays[date.getDay()],
-    period: timePeriodFromHour(hour),
-    timeZone,
-  };
-}
-
-// 生成双时区时间感知文本：用户侧北京时间 + 角色侧东京时间
-export function formatLocalChatReality(date = new Date(), profile = "") {
-  const beijing = formatZonedTimeParts(date, "Asia/Shanghai");
-  const tokyo = formatZonedTimeParts(date, "Asia/Tokyo");
-  return [
-    `当前用户侧时间：${beijing.stamp}，${beijing.weekday}，${beijing.period}（北京时间，Asia/Shanghai）。`,
-    `当前角色侧时间：${tokyo.stamp}，${tokyo.weekday}，${tokyo.period}（东京时间，Asia/Tokyo；角色所处时间以此为准）。`,
-    "",
-    loadPrompts(profile).chatRealityInstructions,
-  ].join("\n");
-}
-
-export function expressionCapabilityPrompt(profile = "") {
-  return loadPrompts(profile).expressionCapability;
-}
+export { beijingISO, tokyoISO, formatZonedTimeParts } from "./time-utils.mjs";
 
 // ─── 消息拆分 ────────────────────────────────────────────────
 

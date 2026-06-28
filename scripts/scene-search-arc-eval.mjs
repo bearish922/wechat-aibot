@@ -3,17 +3,35 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { loadPrompts, getChatStyle, expressionCapabilityPrompt, formatLocalChatReality } from "../app/lib/reply.mjs";
+import { loadPrompts } from "../app/lib/reply.mjs";
+import { beijingISO, formatZonedTimeParts } from "../app/lib/time-utils.mjs";
 import { memoryItemsText } from "../app/lib/memory.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PROFILE = "白鹭千圣";
 const USER_ID = "o9cq804e1i6BqI31DcyKJi6xToQc@im.wechat";
-const OUT_DIR = path.join(ROOT, "data", "runtime", "scene-search-arc-eval", new Date().toISOString().replace(/[:.]/g, "-"));
+const OUT_DIR = path.join(ROOT, "data", "runtime", "scene-search-arc-eval", beijingISO().replace(/[:.]/g, "-"));
 const HISTORY_PATH = path.join(ROOT, "data", "chat-history.json");
 const PROFILE_PATH = path.join(ROOT, "wechat-profiles.json");
 const CONFIG_PATH = path.join(ROOT, "data", "config.json");
 const RAG_SCRIPT = path.join(ROOT, "app", "rag.py");
+const PROMPTS_DOC = JSON.parse(fs.readFileSync(path.join(ROOT, "data", "prompts.json"), "utf-8"));
+
+// reply.mjs 已移除以下三个导出，在脚本中提供本地等价定义
+function getChatStyle() { return PROMPTS_DOC.chatStyle || ""; }
+function expressionCapabilityPrompt() { return PROMPTS_DOC.expressionCapability || ""; }
+function formatLocalChatReality(date = new Date()) {
+  const beijing = formatZonedTimeParts(date, "Asia/Shanghai");
+  const tokyo = formatZonedTimeParts(date, "Asia/Tokyo");
+  const instructions = PROMPTS_DOC.chatRealityInstructions || "";
+  return [
+    `当前用户侧时间：${beijing.stamp}，${beijing.weekday || beijing.shortWeekday}，${beijing.period}（北京时间，Asia/Shanghai）。`,
+    `当前角色侧时间：${tokyo.stamp}，${tokyo.weekday || tokyo.shortWeekday}，${tokyo.period}（东京时间，Asia/Tokyo；角色所处时间以此为准）。`,
+    "",
+    instructions,
+  ].join("\n");
+}
+
 const REAL_SINGLE_COUNT = Number(arg("--real-single", "32"));
 const SYNTH_SINGLE_COUNT = Number(arg("--synth-single", "10"));
 const REAL_SEGMENT_COUNT = Number(arg("--real-segments", "3"));
@@ -196,7 +214,7 @@ function buildSceneletPrompt({ item, profiles, prompts, memoryPrompt, carriedSce
     "",
     "【当前时间】",
     JSON.stringify({
-      iso: now.toISOString(),
+      iso: beijingISO(now),
       local: now.toLocaleString("zh-CN", { hour12: false }),
       timezone: "Asia/Shanghai",
     }, null, 2),
@@ -328,7 +346,7 @@ function buildDailyShareSeedPrompt({ profiles, prompts, memoryPrompt, visibleCon
     "",
     "【当前时间】",
     JSON.stringify({
-      iso: now.toISOString(),
+      iso: beijingISO(now),
       local: now.toLocaleString("zh-CN", { hour12: false }),
       timezone: "Asia/Shanghai",
     }, null, 2),
@@ -379,7 +397,7 @@ function buildProactiveDecisionPrompt({ profiles, prompts, memoryPrompt, visible
     "",
     "【当前时间】",
     JSON.stringify({
-      iso: now.toISOString(),
+      iso: beijingISO(now),
       local: now.toLocaleString("zh-CN", { hour12: false }),
       timezone: "Asia/Shanghai",
     }, null, 2),
@@ -712,7 +730,7 @@ async function main() {
   const shadowCheckpoints = pickShadowCheckpoints(history);
 
   const manifest = {
-    createdAt: new Date().toISOString(),
+    createdAt: beijingISO(),
     profile: PROFILE,
     label: EVAL_LABEL,
     realSingles: singles.filter(x => x.source === "real").length,
@@ -828,7 +846,7 @@ async function main() {
     }
     results.proactiveShadow.push({
       checkpointNo: i + 1,
-      now: cp.now.toISOString(),
+      now: beijingISO(cp.now),
       sourceEventIndex: cp.eventIndex,
       afterKind: cp.afterKind,
       afterText: cp.afterText,

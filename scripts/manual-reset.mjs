@@ -1,9 +1,11 @@
 // manual-reset.mjs — clean hallucinated world state + regenerate scene memory
 import { loadProfiles, loadSessions, saveSessions } from "../app/lib/session-store.mjs";
-import { loadRoleWorlds, getRoleWorld, saveRoleWorlds, setSceneMemory, ensureWorldSession } from "../app/lib/world-state.mjs";
-import { generateSceneMemory } from "../app/lib/turn.mjs";
+import { loadRoleWorlds, getRoleWorld, saveRoleWorlds, setSceneMemory, ensureWorldSession, resetWorldSession } from "../app/lib/world-state.mjs";
+import { generateSceneMemory, batchUpdateMemory } from "../app/lib/turn.mjs";
+import { loadAllEvents } from "../app/lib/chat-history.mjs";
 import { loadMemoryDocument } from "../app/lib/memory.mjs";
 import { sessions } from "../app/lib/state.mjs";
+import { beijingISO } from "../app/lib/time-utils.mjs";
 import { uuid } from "../app/lib/utils.mjs";
 
 const roleWorlds = new Map();
@@ -21,6 +23,9 @@ const sess = u.list.find(s => s.id === u.activeId);
 if (!sess) { console.error("No active session"); process.exit(1); }
 const profile = "白鹭千圣";
 const roleWorld = getRoleWorld(profile);
+const actorSession = ensureWorldSession(roleWorld, "cc");
+const actorStartedMs = Date.parse(actorSession.startedAt || "");
+if (!Number.isFinite(actorStartedMs)) throw new Error("CC Actor reset blocked: session start time is missing");
 
 console.log("=== BEFORE RESET ===");
 console.log("turnCount:", sess._turnCount);
@@ -41,8 +46,8 @@ if (ws) {
   ws.activity = "日常";
   ws.currentPlan = "";
   ws.awakeState = "awake";
-  ws.lastWorldEventAt = new Date().toISOString();
-  ws.updatedAt = new Date().toISOString();
+  ws.lastWorldEventAt = beijingISO();
+  ws.updatedAt = beijingISO();
   console.log("openThreads cleaned, location/activity reset to neutral");
 }
 
@@ -60,8 +65,42 @@ if (classArc) {
 // Look for any arc that created the "weekly drum class" assumption
 // The drum class was a single Saturday event, not weekly
 
-// ─── 4. Reset session state ──────────────────────────────────
+// ─── 4. Preserve the complete reset interval ─────────────────
 const oldTurnCount = sess._turnCount || 0;
+console.log("\nCalling model to generate scene memory...");
+const start = Date.now();
+const summary = await generateSceneMemory({
+  ai: "cc",
+  userId,
+  sess,
+  profile,
+  roleWorld,
+  maxTurns: actorSession.turnCount || 30,
+  since: actorSession.startedAt,
+});
+if (!String(summary || "").trim()) {
+  throw new Error("CC Actor reset blocked: scene memory generation returned empty");
+}
+const allEvents = await loadAllEvents();
+const userMessages = allEvents
+  .filter(event => {
+    if (event.userId !== userId || event.profile !== profile || event.role !== "user" || !event.text) return false;
+    const eventMs = Date.parse(event.timestamp || "");
+    return Number.isFinite(eventMs) && eventMs >= actorStartedMs;
+  })
+  .map(event => event.text);
+await batchUpdateMemory({ ai: "cc", userId, userMessages, profile });
+
+const elapsed = Date.now() - start;
+setSceneMemory(roleWorld, summary, "cc");
+console.log(`Done in ${elapsed}ms (${summary.length} chars)`);
+console.log("\n" + "=".repeat(60));
+console.log("=== NEW SCENE MEMORY ===");
+console.log("=".repeat(60));
+console.log(summary);
+console.log("=".repeat(60));
+
+// ─── 5. Reset session state ──────────────────────────────────
 sess._turnCount = 0;
 sess._firstTurn = true;
 sess.sid = uuid();
@@ -71,36 +110,11 @@ sess._lastFailedTurn = null;
 sess._lastProactiveAt = null;
 
 // Reset world session
-const hw = ensureWorldSession(roleWorld);
-hw.sid = uuid();
-hw.firstTurn = true;
-hw.startedAt = new Date().toISOString();
-hw.resetReason = `manual reset (was ${oldTurnCount} turns)`;
+resetWorldSession(roleWorld, "cc", `manual reset (was ${oldTurnCount} turns)`, beijingISO());
 
 console.log("session reset: turnCount " + oldTurnCount + " → 0");
 
-// ─── 5. Generate new scene memory ───────────────────────────
-console.log("\nCalling model to generate scene memory...");
-const start = Date.now();
-try {
-  const summary = await generateSceneMemory({ userId, sess, profile, roleWorld });
-  const elapsed = Date.now() - start;
-  if (summary) {
-    setSceneMemory(roleWorld, summary);
-    console.log(`Done in ${elapsed}ms (${summary.length} chars)`);
-    console.log("\n" + "=".repeat(60));
-    console.log("=== NEW SCENE MEMORY ===");
-    console.log("=".repeat(60));
-    console.log(summary);
-    console.log("=".repeat(60));
-  } else {
-    console.log("WARNING: generateSceneMemory returned empty — scene memory not updated");
-  }
-} catch (e) {
-  console.error("generateSceneMemory failed:", e.message);
-}
-
 // ─── 6. Save everything ─────────────────────────────────────
-saveRoleWorlds();
+if (!saveRoleWorlds()) throw new Error("CC Actor reset blocked: failed to persist the new session");
 saveSessions();
 console.log("\nAll state saved. Restart bot to pick up changes.");

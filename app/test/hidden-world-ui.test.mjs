@@ -16,15 +16,12 @@ describe("Hidden World pipeline UI", () => {
       "proactiveInstructions",
       "scheduleCreatorInstructions",
       "chatHistoryIntro",
-      "innerSceneletIntro",
-      "sceneletReplyBridgeInstruction",
     ]) {
       assert.match(appJs, new RegExp(`renderTextPreview\\("${key}"`), `${key} should be editable in Hidden World`);
     }
     // scheduleSpecialDates uses a dedicated calendar renderer
     assert.match(appJs, /renderScheduleCalendar/, "scheduleSpecialDates should be editable in Hidden World");
     for (const key of [
-      "visibleContextTurns",
       "dailyShareSeedIntervalMs",
       "dailyShareMinIdleMs",
       "dailyShareDefaultScheduleOffsetMs",
@@ -40,20 +37,22 @@ describe("Hidden World pipeline UI", () => {
       "proactiveCooldownMs",
       "proactiveDailyMax",
       "proactiveDefaultExpiryOffsetMs",
-      "hiddenWorldMaxPendingIntents",
     ]) {
       assert.match(appJs, new RegExp(`renderNumberControl\\("${key}"`), `${key} should be editable in Hidden World`);
     }
+    assert.match(appJs, /renderNumberControl\("runtimePolicy\.actorVisibleContextTurns"/);
     assert.doesNotMatch(appJs, /renderNumberControl\("sceneContextMaxLifeArcs"/);
     assert.doesNotMatch(appJs, /renderNumberControl\("chunkSendDelayMs"/);
-    assert.doesNotMatch(appJs, /renderNumberControl\("maxCancelReasonLength"/);
+    assert.match(appJs, /renderNumberControl\("maxCancelReasonLength"/);
     assert.match(appJs, /renderArrayTextarea\("dailyShareDefaultCancelIf"/, "dailyShareDefaultCancelIf should be editable");
   });
 
   it("uses a role-level hidden-world session with a system prompt", () => {
     assert.match(turn, /const roleWorld = getRoleWorld\(profile\)/);
-    assert.match(turn, /sessionName: `hidden-world-\$\{roleWorldKey\(profile\)\}`/);
-    assert.match(turn, /systemPrompt: buildHiddenWorldSystemPrompt\(profile, sceneMemoryBlock, memoryPrompt\)/);
+    assert.match(turn, /const sessionName = `hidden-world-\$\{roleWorldKey\(profile\)\}`/);
+    assert.match(turn, /const systemPrompt = buildSingleActorSystemPrompt\(profile, sceneMemoryBlock, memoryPrompt\)/);
+    assert.match(turn, /sessionName,\s*sessionId: world\.sid/);
+    assert.match(turn, /systemPrompt,\s*profile/);
     assert.match(claudeRunner, /--append-system-prompt-file/);
   });
 
@@ -68,8 +67,8 @@ describe("Hidden World pipeline UI", () => {
     assert.deepEqual(activeSessionEntriesForProfile(sessionMap, "白鹭千圣"), [
       { userId: "user-a", user: sessionMap.get("user-a"), session: activeTarget },
     ]);
-    assert.match(guiWorld, /Object\.entries\(sessions\)\.flatMap/);
-    assert.match(guiWorld, /Object\.entries\(roleWorld\?\._worldSessions \|\| \{\}\)/);
+    assert.match(guiWorld, /activeSessionEntriesForProfile\(sessions\[activeAI\]/);
+    assert.match(guiWorld, /const worldSession = roleWorld\?\._worldSessions\?\.\[activeAI\]/);
     assert.doesNotMatch(guiWorld, /if \(!s\.active\) continue;/);
   });
 
@@ -78,5 +77,8 @@ describe("Hidden World pipeline UI", () => {
     assert.match(appJs, /完成提示出现前，请暂时不要向机器人发送新的消息/);
     assert.match(appJs, /button\.disabled = true/);
     assert.match(appJs, /await renderStatus\(\)/);
+    assert.match(guiWorld, /Actor reset blocked: scene memory generation returned empty/);
+    assert.match(guiWorld, /const summaries = new Map\(\)/);
+    assert.match(guiWorld, /if \(!saveWorlds\(\)\) throw new Error/);
   });
 });

@@ -5,6 +5,7 @@ import { log } from "./utils.mjs";
 import { DATA_DIR, dataPath, ensureDir } from "./paths.mjs";
 import { sessions, profileTemplates } from "./state.mjs";
 import { normalizeWorldState, normalizeWorldSession, normalizeLifeArcs, getSceneConfig } from "./normalize.mjs";
+import { beijingISO } from "./reply.mjs";
 import { backendModel, normalizeBackend } from "./backend-adapter.mjs";
 
 function normalizeSceneMemoryMap(raw) {
@@ -55,38 +56,65 @@ function sessionProfile(sess) {
   return sess?._profile ?? null;
 }
 
-// 确保 session 拥有一个有效的 worldSession 对象，不存在则创建，已存在则规范化并补全缺失字段
-// 参数: sess - session 对象
-// 返回: 规范化后的 worldSession 对象
-function ensureWorldSession(sess, backend = "cc") {
+// 显式创建一个新的后端 Actor session。只有首次初始化和 reset 可以调用。
+function initializeWorldSession(sess, backend = "cc", { reason = "initial", now = beijingISO() } = {}) {
   const provider = normalizeBackend(backend);
   if (!sess._worldSessions || typeof sess._worldSessions !== "object") sess._worldSessions = {};
-  if (!sess._worldSessions[provider]) {
-    // 首次创建 worldSession
-    const nowIso = new Date().toISOString();
-    sess._worldSessions[provider] = {
-      sid: uuid(),
-      firstTurn: true,
-      model: backendModel(provider),
-      startedAt: nowIso,
-      lastUsedAt: null,
-      resetReason: "",
-      lastUsage: null,
-      turnCount: 0,
-    };
-  } else {
-    // 已有则通过规范化器清洗，若清洗失败则递归重建
-    sess._worldSessions[provider] = normalizeWorldSession(sess._worldSessions[provider]) || null;
-    if (!sess._worldSessions[provider]) return ensureWorldSession(sess, provider);
-    // 缺少 sid 时重新生成
-    if (!sess._worldSessions[provider].sid) {
-      sess._worldSessions[provider].sid = uuid();
-      sess._worldSessions[provider].firstTurn = true;
-    }
-    // 缺少 model 时补默认值
-    if (!sess._worldSessions[provider].model) sess._worldSessions[provider].model = backendModel(provider);
+  const previous = normalizeWorldSession(sess._worldSessions[provider]);
+  if (previous?.sid) {
+    throw new Error(`${provider} Actor session already exists; reset is required before replacing its SID`);
   }
+  const generation = Math.max(0, Number(previous?.generation || 0) || 0) + 1;
+  sess._worldSessions[provider] = {
+    sid: uuid(),
+    firstTurn: true,
+    model: backendModel(provider),
+    startedAt: now,
+    lastUsedAt: null,
+    resetReason: reason,
+    lastUsage: null,
+    turnCount: 0,
+    generation,
+  };
+  log("↻", `[${sess.profile || "角色"}] ${provider} Actor session initialized: ${reason}`);
   return sess._worldSessions[provider];
+}
+
+// 获取已有 worldSession。缺失或损坏时必须显式报错，不能静默补 SID。
+// 参数: sess - session 对象
+// 返回: 已存在且包含 SID 的规范化 worldSession 对象
+function ensureWorldSession(sess, backend = "cc") {
+  const provider = normalizeBackend(backend);
+  const raw = sess?._worldSessions?.[provider];
+  if (!raw) {
+    throw new Error(`${provider} Actor session is not initialized; explicit initialization or reset is required`);
+  }
+  sess._worldSessions[provider] = normalizeWorldSession(raw);
+  if (!sess._worldSessions[provider]?.sid) {
+    throw new Error(`${provider} Actor session SID is missing; reset is required before opening a new session`);
+  }
+  if (!sess._worldSessions[provider].model) sess._worldSessions[provider].model = backendModel(provider);
+  return sess._worldSessions[provider];
+}
+
+function resetWorldSession(roleWorld, backend = "cc", reason = "reset", now = beijingISO()) {
+  const provider = normalizeBackend(backend);
+  const current = ensureWorldSession(roleWorld, provider);
+  const oldSid = current.sid;
+  const generation = Math.max(0, Number(current.generation || 0) || 0) + 1;
+  Object.assign(current, {
+    sid: uuid(),
+    firstTurn: true,
+    startedAt: now,
+    lastUsedAt: null,
+    resetReason: reason,
+    lastUsage: null,
+    turnCount: 0,
+    generation,
+  });
+  roleWorld.updatedAt = now;
+  log("↻", `[${roleWorld.profile || "角色"}] ${provider} Actor SID ${oldSid} -> ${current.sid}: ${reason}`);
+  return current;
 }
 
 function normalizeWorldSessions(raw = {}) {
@@ -111,7 +139,7 @@ function roleWorldKey(profile) {
 // 参数: raw - 原始世界数据对象; profile - 角色名称
 // 返回: 规范化后的角色世界对象(包含 _worldState、_worldSession、_lifeArcs 等)
 function normalizeRoleWorld(raw = {}, profile = "默认") {
-  const nowIso = new Date().toISOString();
+  const nowIso = beijingISO();
   const worldSessions = normalizeWorldSessions(raw._worldSessions || raw.worldSessions);
   const legacyWorldSession = normalizeWorldSession(raw._worldSession || raw.worldSession);
   if (legacyWorldSession && !worldSessions.cc) worldSessions.cc = legacyWorldSession;
@@ -135,6 +163,8 @@ function normalizeRoleWorld(raw = {}, profile = "默认") {
     // 主动意图列表（跨后端共享）
     _proactiveIntents: Array.isArray(raw._proactiveIntents) ? raw._proactiveIntents : [],
     _lastProactiveAt: raw._lastProactiveAt ? String(raw._lastProactiveAt) : null,
+    _lastWorkEventGenerationAt: raw._lastWorkEventGenerationAt ? String(raw._lastWorkEventGenerationAt) : null,
+    _lastGenerationTemplateIndices: Array.isArray(raw._lastGenerationTemplateIndices) ? raw._lastGenerationTemplateIndices : [],
     // 更新时间
     updatedAt: raw.updatedAt ? String(raw.updatedAt) : nowIso,
   };
@@ -156,7 +186,9 @@ function roleWorldSnapshot(world) {
     _sceneMemoryAt: normalizeSceneMemoryMap(world?._sceneMemoryAt),
     _proactiveIntents: Array.isArray(world?._proactiveIntents) ? world._proactiveIntents : [],
     _lastProactiveAt: world?._lastProactiveAt || null,
-    updatedAt: world?.updatedAt || new Date().toISOString(),
+    _lastWorkEventGenerationAt: world?._lastWorkEventGenerationAt || null,
+    _lastGenerationTemplateIndices: Array.isArray(world?._lastGenerationTemplateIndices) ? world._lastGenerationTemplateIndices : [],
+    updatedAt: world?.updatedAt || beijingISO(),
   };
 }
 
@@ -172,6 +204,7 @@ function lifeArcPromptItems(roleWorld) {
     kind: arc.kind || null,
     time_start: arc.timeStart || null,
     time_end: arc.timeEnd || null,
+    time_slots: arc.timeSlots || null,
     updated_at: arc.updatedAt,
     expires_at: arc.expiresAt,
   }));
@@ -213,15 +246,16 @@ export function setSceneMemory(roleWorld, text, backend = "cc") {
   if (!roleWorld._sceneMemoryAt || typeof roleWorld._sceneMemoryAt !== "object") {
     roleWorld._sceneMemoryAt = { cc: null, codex: null, api: null };
   }
-  roleWorld._sceneMemoryAt[b] = new Date().toISOString();
-  roleWorld.updatedAt = new Date().toISOString();
+  roleWorld._sceneMemoryAt[b] = beijingISO();
+  roleWorld.updatedAt = beijingISO();
 }
 
 // 将所有角色世界数据持久化到 JSON 文件(wechat-worlds.json)
 export function saveRoleWorlds() {
+  let tempFile = "";
   try {
     const worlds = roleWorldsMap();
-    if (!worlds) return;
+    if (!worlds) return false;
     ensureDir(DATA_DIR);
     // 构建序列化数据结构: { version, roles: { profileName: snapshot } }
     const data = { version: 1, roles: {} };
@@ -229,10 +263,17 @@ export function saveRoleWorlds() {
       // 每个角色世界取其快照(仅保留可持久化字段)
       data.roles[profile] = roleWorldSnapshot(world);
     }
-    // 同步写入文件，末尾加换行符
-    fs.writeFileSync(ROLE_WORLD_FILE, JSON.stringify(data, null, 2) + "\n", "utf-8");
+    // 先写临时文件，再原子替换，避免进程中断留下半截 JSON。
+    tempFile = `${ROLE_WORLD_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2) + "\n", "utf-8");
+    fs.renameSync(tempFile, ROLE_WORLD_FILE);
+    return true;
   } catch (e) {
     log("⚠️", `save hidden worlds failed: ${e.message}`);
+    if (tempFile) {
+      try { fs.rmSync(tempFile, { force: true }); } catch {}
+    }
+    return false;
   }
 }
 
@@ -240,21 +281,22 @@ export function saveRoleWorlds() {
 export function loadRoleWorlds() {
   const worlds = roleWorldsMap();
   if (!worlds) return;
-  // 清空现有数据准备重新加载
-  worlds.clear();
+  const loaded = new Map();
   try {
     if (fs.existsSync(ROLE_WORLD_FILE)) {
       const data = JSON.parse(fs.readFileSync(ROLE_WORLD_FILE, "utf-8"));
       // 解析 roles 字段，兼容空对象
       const roles = data?.roles && typeof data.roles === "object" ? data.roles : {};
       for (const [profile, raw] of Object.entries(roles)) {
-        // 逐条规范化后放入 Map
-        worlds.set(roleWorldKey(profile), normalizeRoleWorld(raw, profile));
+        loaded.set(roleWorldKey(profile), normalizeRoleWorld(raw, profile));
       }
     }
   } catch (e) {
     log("⚠️", `load hidden worlds failed: ${e.message}`);
+    throw new Error(`hidden world state is unreadable; refusing to replace it: ${e.message}`);
   }
+  worlds.clear();
+  for (const [profile, world] of loaded) worlds.set(profile, world);
   // 确保所有已注册的 profile 模板都有对应的世界对象
   for (const profile of Object.keys(profileTemplates || {})) getRoleWorld(profile);
   // 迁移：将旧版 session 级 _proactiveIntents 合并到 roleWorld
@@ -263,14 +305,25 @@ export function loadRoleWorlds() {
   saveRoleWorlds();
 }
 
+export function activeWorldSessionIds() {
+  const ids = new Set();
+  for (const world of roleWorldsMap()?.values?.() || []) {
+    for (const raw of Object.values(world?._worldSessions || {})) {
+      const sid = normalizeWorldSession(raw)?.sid;
+      if (sid) ids.add(sid);
+    }
+  }
+  return ids;
+}
+
 // 对角色世界的生活弧线执行批量操作(create/update/close)，由 scenelet 输出驱动
 // 参数: roleWorld - 角色世界对象; rawOps - 操作数组，每项包含 op、id/title、各字段值
 export function applyLifeArcOps(roleWorld, rawOps = []) {
   if (!roleWorld || !Array.isArray(rawOps) || !rawOps.length) return;
   const now = new Date();
-  const nowIso = now.toISOString();
+  const nowIso = beijingISO(now);
   // 计算默认过期时间
-  const defaultExpiresAt = new Date(now.getTime() + getSceneConfig().scheduleDefaultExpiryFromNowMs).toISOString();
+  const defaultExpiresAt = beijingISO(new Date(now.getTime() + getSceneConfig().scheduleDefaultExpiryFromNowMs));
   // 获取当前所有弧线(含已关闭的)
   const arcs = normalizeLifeArcs(roleWorld._lifeArcs, { includeClosed: true });
   // 辅助函数：通过 id 或 title 查找已有弧线
@@ -312,6 +365,28 @@ export function applyLifeArcOps(roleWorld, rawOps = []) {
     // 校验 kind 和 subject 是否在合法枚举中
     const kind = lifeArcKinds.includes(raw.kind) ? raw.kind : (existing?.kind || null);
     const subject = lifeArcSubjects.includes(raw.subject) ? raw.subject : (existing?.subject || null);
+    // time_slots: 可选的结构化时间段，create/update 均可传入
+    let timeSlots = existing?.timeSlots || null;
+    if (raw.time_slots !== undefined || raw.timeSlots !== undefined) {
+      const rawSlots = raw.time_slots ?? raw.timeSlots;
+      if (Array.isArray(rawSlots) && rawSlots.length) {
+        timeSlots = rawSlots.map(s => {
+          if (!s || typeof s !== "object") return null;
+          const slot = {};
+          if (s.dayOfWeek || s.day_of_week) {
+            const dow = Number(s.dayOfWeek ?? s.day_of_week);
+            if (Number.isFinite(dow) && dow >= 1 && dow <= 7) slot.dayOfWeek = dow;
+          }
+          if (s.date) slot.date = String(s.date);
+          if (s.start) slot.start = String(s.start);
+          if (s.end) slot.end = String(s.end);
+          return (slot.dayOfWeek || slot.date) && slot.start && slot.end ? slot : null;
+        }).filter(Boolean);
+        if (!timeSlots.length) timeSlots = null;
+      } else {
+        timeSlots = null;
+      }
+    }
     const patch = {
       title: raw.title ? String(raw.title).trim().slice(0, 80) : existing?.title || "",
       summary: raw.summary ? String(raw.summary).trim().slice(0, 500) : existing?.summary || "",
@@ -321,6 +396,7 @@ export function applyLifeArcOps(roleWorld, rawOps = []) {
       subject,
       timeStart: raw.time_start || raw.timeStart ? String(raw.time_start || raw.timeStart) : (existing?.timeStart || null),
       timeEnd: raw.time_end || raw.timeEnd ? String(raw.time_end || raw.timeEnd) : (existing?.timeEnd || null),
+      timeSlots,
       expiresAt,
     };
     // 如果没有有效内容则跳过
@@ -350,7 +426,9 @@ export function applyLifeArcOps(roleWorld, rawOps = []) {
 
 export {
   sessionProfile,
+  initializeWorldSession,
   ensureWorldSession,
+  resetWorldSession,
   roleWorldKey,
   lifeArcPromptItems,
 };

@@ -6,7 +6,6 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildSceneContextBlock } from "../lib/turn.mjs";
 
 const bot = readFileSync(join(import.meta.dirname, "..", "bot.mjs"), "utf-8");
 const commands = readFileSync(join(import.meta.dirname, "..", "lib", "commands.mjs"), "utf-8");
@@ -14,6 +13,10 @@ const history = readFileSync(join(import.meta.dirname, "..", "lib", "chat-histor
 const server = readFileSync(join(import.meta.dirname, "..", "lib", "server.mjs"), "utf-8");
 const turn = readFileSync(join(import.meta.dirname, "..", "lib", "turn.mjs"), "utf-8");
 const prompts = readFileSync(join(import.meta.dirname, "..", "lib", "prompts.mjs"), "utf-8");
+const claudeRunner = readFileSync(join(import.meta.dirname, "..", "lib", "claude-runner.mjs"), "utf-8");
+const claudeContext = readFileSync(join(import.meta.dirname, "..", "lib", "claude-context.mjs"), "utf-8");
+const worldState = readFileSync(join(import.meta.dirname, "..", "lib", "world-state.mjs"), "utf-8");
+const workEventGenerator = readFileSync(join(import.meta.dirname, "..", "lib", "work-event-generator.mjs"), "utf-8");
 
 describe("core runtime invariants", () => {
   // 失败后仅允许一次即时重试，使用 _lastFailedTurn 标记防止无限循环
@@ -25,13 +28,68 @@ describe("core runtime invariants", () => {
 
   // hidden-world 重试复用已有 session，不复用会创建孤立 session 并丢失状态连续性
   it("keeps hidden-world retries in the existing session", () => {
-    const retryStart = turn.indexOf('label: "hidden_world_retry"');
-    const retryEnd = turn.indexOf("if (!result?.innerScenelet) throw", retryStart);
+    const retryStart = turn.indexOf('label: "single_actor_retry"');
+    const retryEnd = turn.indexOf("// 两次调用都无效", retryStart);
     const retryBlock = turn.slice(retryStart, retryEnd);
     assert.ok(retryStart >= 0 && retryEnd > retryStart);
-    assert.match(retryBlock, /sessionId: world\.sid/);
-    assert.match(retryBlock, /firstTurn: false/);
-    assert.doesNotMatch(retryBlock, /world\.sid\s*=\s*uuid\(|world\.firstTurn\s*=\s*true/);
+    assert.match(turn, /reset is required before opening a new hidden-world session/);
+    assert.match(turn, /findExactSessionFile\(world\.sid\)/);
+    assert.doesNotMatch(turn, /findSessionFile\(world\.sid,\s*sessionName\)/);
+    assert.match(turn, /sessionId: world\.sid/);
+    assert.match(turn, /runBackendStructured\(prompt,\s*\{\s*\.\.\.structuredOptions,\s*label: "single_actor_retry"/);
+    assert.match(turn, /let retryFirstTurn = firstAttemptWasFirstTurn/);
+    assert.match(turn, /fs\.rmSync\(createdSessionFile, \{ force: true \}\)/);
+    assert.match(retryBlock, /firstTurn: retryFirstTurn/);
+    assert.doesNotMatch(turn.slice(retryEnd, turn.indexOf("// ⑤ 更新 world session 元数据", retryEnd)), /world\.sid\s*=\s*uuid\(|world\.firstTurn\s*=\s*true/);
+  });
+
+  it("rejects unexpected SID changes", () => {
+    assert.match(turn, /Actor backend changed SID unexpectedly/);
+    assert.match(claudeRunner, /outer\.result \|\| outer\.message \|\| outer\.text \|\| stdout/);
+  });
+
+  it("protects persisted Actor state and active session files", () => {
+    assert.match(worldState, /SID is missing; reset is required before opening a new session/);
+    assert.doesNotMatch(worldState, /if \(!sess\._worldSessions\[provider\]\.sid\)[\s\S]*uuid\(\)/);
+    assert.match(worldState, /fs\.renameSync\(tempFile, ROLE_WORLD_FILE\)/);
+    assert.match(worldState, /refusing to replace it/);
+    assert.match(claudeContext, /protectedSessionIds/);
+    assert.match(claudeContext, /protectedIds\.has\(fileSessionId\)/);
+    assert.match(bot, /Actor reset blocked: scene memory generation returned empty/);
+    assert.match(bot, /if \(!saveRoleWorlds\(\)\)/);
+    assert.match(turn, /const recentScenelets = memoryEvents/);
+    assert.doesNotMatch(turn, /filter\(e => e\.userId === userId && e\.profile === profile && e\.role === "assistant" && e\.scenelet\)\s*\.slice\(-5\)/);
+  });
+
+  it("keeps the 1M alias on Claude Code while stripping it only for direct API calls", () => {
+    assert.doesNotMatch(claudeRunner, /function cleanModelForProfile/);
+    assert.match(claudeRunner, /const selectedModel = model \|\| CLAUDE_MAIN_MODEL/);
+    assert.match(claudeRunner, /args\.push\("--model", CLAUDE_MAIN_MODEL\)/);
+    assert.match(claudeRunner, /function apiModelName\(model\)/);
+    assert.ok(claudeRunner.includes('return String(model || CLAUDE_MAIN_MODEL).replace(/\\[.*\\]$/, "");'));
+  });
+
+  it("resets the shared Actor session from context pressure with turn fallback", () => {
+    assert.match(bot, /const actorTurnCount = actorSession\?\.turnCount \|\| 0/);
+    assert.match(bot, /shouldResetActorSession\(\{/);
+    assert.match(bot, /ratioThreshold: sceneCfg\.contextResetRatio \?\? 0\.5/);
+    assert.match(bot, /if \(resetDecision\.shouldReset\)/);
+    assert.match(bot, /reason === "context"/);
+    assert.doesNotMatch(bot, /if \(styleState\._turnCount >= threshold\)/);
+  });
+
+  it("registers the schedule timer unconditionally and commits against current world state", () => {
+    assert.match(bot, /const runWorkEventTick = \(\) => runWorkEventGenerator\(\)/);
+    assert.match(bot, /runWorkEventTick\(\);\s*setInterval\(runWorkEventTick, WORK_EVENT_GEN_INTERVAL_MS\)/);
+    assert.doesNotMatch(bot, /if \(hasEnabledRoles\(\)\)/);
+    assert.match(workEventGenerator, /config\.generationIntervalMs \|\| 12 \* 3600000/);
+    assert.match(workEventGenerator, /const currentArcs = normalizeLifeArcs\(roleWorld\._lifeArcs/);
+    assert.match(workEventGenerator, /applyLifeArcOps\(roleWorld, \[lifeArcOp\]\)/);
+    assert.doesNotMatch(workEventGenerator, /_pendingGeneratedEvents\.push/);
+  });
+
+  it("has no stale stable chatstyle reference in the single-Actor path", () => {
+    assert.doesNotMatch(bot, /stableChatStyle|stableStyle/);
   });
 
   // 只有完整回复成功发送后才标记 turnSucceeded，防止未送达的回复被当作成功
@@ -46,18 +104,15 @@ describe("core runtime invariants", () => {
   it("supports role-scoped scenelet replies without changing the default main reply path", () => {
     assert.match(bot, /runtimePolicy\.visibleReplySource === "scenelet"/);
     assert.match(bot, /assistantFullText = sceneletResult\?\.innerScenelet\?\.trim\(\) \|\| ""/);
-    assert.match(bot, /return \{ turnSucceeded, assistantFullText, toolUsage, ragUsage, lastUsage \};\s*}\s*\/\/ (单 Actor|双阶段).*架构/);
+    assert.match(bot, /if \(useSceneletAsReply\)/);
+    assert.match(bot, /throw new Error\(sceneletError \|\| "single actor returned no valid inner_scenelet and visible_reply"\)/);
+    assert.doesNotMatch(bot, /stylePrompt: stableStyle/);
     assert.match(bot, /const startChatAttempt = \(sessionId, isFirstTurn\) => startBackendChat/);
     assert.match(turn, /if \(!loadPrompts\(profile\)\.runtimePolicy\.lifeArcEnabled\) return \[\];/);
     assert.match(turn, /if \(!loadPrompts\(profile\)\.runtimePolicy\.lifeArcEnabled\) return false;/);
   });
 
-  // sceneletTurnReminder 注入每轮 hidden-world turn 中，控制叙事节奏/长度
-  it("injects role-scoped scenelet pacing guidance into every hidden-world turn", () => {
-    assert.match(prompts, /turn_style_reminder: cfg\.runtimePolicy\.sceneletTurnReminder \|\| null/);
-  });
-
-  // 关闭排队 session 时清空队列并从列表移除，不留悬空队列条目
+// 关闭排队 session 时清空队列并从列表移除，不留悬空队列条目
   it("closes queued sessions without leaving an unreachable queue", () => {
     assert.match(commands, /target\.queue\.length = 0;\s*u\.list\.splice\(targetIdx, 1\)/);
   });
@@ -80,7 +135,7 @@ describe("core runtime invariants", () => {
     assert.match(history, /WHERE sessionKey = \? AND text != '' AND role IN \('user','assistant'\)/);
     assert.match(bot, /styleState\._visibleHistory = await loadRoleVisibleHistory\(userId, turnProfile\)/);
     const sharedHistoryAt = bot.indexOf("styleState._visibleHistory = await loadRoleVisibleHistory");
-    const sceneletAt = bot.indexOf("sceneletResult = await generateSceneletForTurn", sharedHistoryAt);
+    const sceneletAt = bot.indexOf("sceneletResult = await generateSingleActorReply", sharedHistoryAt);
     assert.ok(sharedHistoryAt >= 0 && sceneletAt > sharedHistoryAt);
   });
 
@@ -99,9 +154,6 @@ describe("core runtime invariants", () => {
         }],
       }],
     ]);
-    const text = buildSceneContextBlock({ _profile: "丸山彩" }, { innerScenelet: "正在准备。" });
-    assert.match(text, /丸山彩生活中跨越多天的安排/);
-    assert.doesNotMatch(text, /千圣生活中跨越多天的安排/);
     assert.match(turn, /`\$\{profile \|\| "角色"\}的实际回复：`/);
   });
 });

@@ -3,7 +3,8 @@ import { token, activeAI, sessions, modelNames } from "./state.mjs";
 import { sessionProfile, getRoleWorld } from "./world-state.mjs";
 import { getSceneConfig } from "./normalize.mjs";
 import { configNumber } from "./config.mjs";
-import { readClaudeSessionContext } from "./claude-context.mjs";
+import { contextTokensForUsage, contextWindowForUsage } from "./context-pressure.mjs";
+import { repairCodexUsageFromSession } from "./codex-session-usage.mjs";
 
 function activeSessionForBackend(backend) {
   let newest = null;
@@ -23,20 +24,17 @@ function activeSessionForBackend(backend) {
   return newest;
 }
 
-function contextTokens(usage, backend) {
-  if (!usage) return 0;
-  const input = Number(usage.input_tokens || 0) || 0;
-  const output = Number(usage.output_tokens || 0) || 0;
-  if (backend === "codex" || backend === "api") return input + output;
-  return input
-    + (Number(usage.cache_read_input_tokens || 0) || 0)
-    + (Number(usage.cache_creation_input_tokens || 0) || 0)
-    + output;
+function contextTokens(usage, backend = "") {
+  return contextTokensForUsage(usage, backend);
 }
 
-function contextMax(backend) {
-  if (backend === "codex") return configNumber("models.codexContextMax", 1_000_000);
-  return configNumber("models.claudeContextMax", 1_000_000);
+function contextMax(backend, usage) {
+  const cfgMax = backend === "codex"
+    ? configNumber("models.codexContextMax", 1_000_000)
+    : configNumber("models.claudeContextMax", 1_000_000);
+  // 上游有真实窗口上报时必须如实显示；配置值只用于未上报场景。
+  // 这样错误选到 200k alias 时不会被默认 1M 静默掩盖。
+  return contextWindowForUsage(usage, cfgMax);
 }
 
 export function registerStatusRoutes() {
@@ -58,26 +56,50 @@ export function registerStatusRoutes() {
       const roleWorld = profile ? getRoleWorld(profile) : null;
       const worldSession = roleWorld?._worldSessions?.[activeAI] || null;
       const cfg = getSceneConfig();
-      const userTranscript = activeAI === "cc" ? readClaudeSessionContext(activeSess.sid) : null;
-      const hwTranscript = activeAI === "cc" ? readClaudeSessionContext(worldSession?.sid) : null;
-      const max = Number(activeSess._lastUsage?.model_context_window || 0) || contextMax(activeAI);
-      const worldMax = Number(worldSession?.lastUsage?.model_context_window || 0) || max;
+
+      // 按后端选择累计 token 来源
+      let userTokens, userTurns, hwTokens, hwTurns;
+      if (activeAI === "cc") {
+        // 单 Actor 架构：user 和 hidden world 共用一个 world session，直接读内存 usage
+        const usage = worldSession?.lastUsage;
+        userTokens = contextTokens(usage, activeAI);
+        userTurns = worldSession?.turnCount || activeSess._turnCount || 0;
+        hwTokens = userTokens;
+        hwTurns = userTurns;
+      } else if (activeAI === "codex") {
+        // Codex reports current context pressure in last_token_usage; total_token_usage is billing-style cumulative usage.
+        const uu = repairCodexUsageFromSession(activeSess._lastUsage, activeSess._lastUsage?.session_id || activeSess.sid);
+        const wu = repairCodexUsageFromSession(worldSession?.lastUsage, worldSession?.lastUsage?.session_id || worldSession?.sid);
+        userTokens = contextTokens(uu, activeAI);
+        userTurns = activeSess._turnCount || 0;
+        hwTokens = contextTokens(wu, activeAI);
+        hwTurns = worldSession?.turnCount || 0;
+      } else {
+        userTokens = contextTokens(activeSess._lastUsage, activeAI);
+        userTurns = activeSess._turnCount || 0;
+        hwTokens = contextTokens(worldSession?.lastUsage, activeAI);
+        hwTurns = worldSession?.turnCount || 0;
+      }
+
+      const activeUsage = activeAI === "codex"
+        ? repairCodexUsageFromSession(activeSess._lastUsage, activeSess._lastUsage?.session_id || activeSess.sid)
+        : activeSess._lastUsage;
+      const worldUsage = activeAI === "codex"
+        ? repairCodexUsageFromSession(worldSession?.lastUsage, worldSession?.lastUsage?.session_id || worldSession?.sid)
+        : worldSession?.lastUsage;
+      const max = contextMax(activeAI, activeUsage);
+      const worldMax = contextMax(activeAI, worldUsage) || max;
+
       ccContext = {
         backend: activeAI,
         backendLabel: activeAI === "codex" ? "Codex" : "CC",
         profile: profile || "",
-        turnCount: activeSess._turnCount || 0,
+        // 顶部 Turn 是自动 reset 的计数器：角色会话使用共享 Actor 主 session 调用次数。
+        turnCount: worldSession?.turnCount || activeSess._turnCount || 0,
         turnThreshold: cfg.turnResetThreshold,
-        userCtx: {
-          tokens: userTranscript?.tokens ?? contextTokens(activeSess._lastUsage, activeAI),
-          max,
-          turns: userTranscript?.promptCount || activeSess._turnCount || 0,
-        },
-        hwCtx: {
-          tokens: hwTranscript?.tokens ?? contextTokens(worldSession?.lastUsage, activeAI),
-          max: worldMax,
-          turns: hwTranscript?.promptCount || worldSession?.turnCount || 0,
-        },
+        contextResetRatio: cfg.contextResetRatio,
+        userCtx: { tokens: userTokens, max, turns: userTurns },
+        hwCtx: { tokens: hwTokens, max: worldMax, turns: hwTurns },
         sceneMemory: roleWorld?._sceneMemory?.[activeAI] || "",
       };
     }

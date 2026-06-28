@@ -50,7 +50,30 @@ process.stdout.write(JSON.stringify({
   item: { type: "agent_message", text: input.includes("SECOND") ? "SECOND_OK" : "FIRST_OK" },
 }) + "\n");
 process.stdout.write(JSON.stringify({
+  type: "event_msg",
+  payload: {
+    type: "token_count",
+    info: {
+      total_token_usage: {
+        input_tokens: resumeIndex >= 0 ? 300 : 100,
+        cached_input_tokens: 50,
+        output_tokens: resumeIndex >= 0 ? 20 : 10,
+        reasoning_output_tokens: resumeIndex >= 0 ? 4 : 2,
+        total_tokens: resumeIndex >= 0 ? 324 : 112,
+      },
+      last_token_usage: {
+        input_tokens: resumeIndex >= 0 ? 200 : 100,
+        cached_input_tokens: 50,
+        output_tokens: 10,
+        reasoning_output_tokens: 2,
+        total_tokens: resumeIndex >= 0 ? 212 : 112,
+      },
+      model_context_window: 1000000,
+    },
+  },
+}) + "\n");
+process.stdout.write(JSON.stringify({
   type: "turn.completed",
-  usage: { input_tokens: resumeIndex >= 0 ? 200 : 100, cached_input_tokens: 50, output_tokens: 10 },
+  usage: { input_tokens: resumeIndex >= 0 ? 300 : 100, cached_input_tokens: 50, output_tokens: resumeIndex >= 0 ? 20 : 10 },
 }) + "\n");
 }

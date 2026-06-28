@@ -60,7 +60,10 @@ function serveStatic(urlPath, res) {
     try { if (!statSync(fullPath).isFile()) return false; } catch { return false; }
 
     const ext = extname(fullPath).toLowerCase();
-    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
+    res.writeHead(200, {
+      "Content-Type": MIME[ext] || "application/octet-stream",
+      "Cache-Control": "no-cache, no-store, must-revalidate",
+    });
     res.end(readFileSync(fullPath));
     return true;
   } catch {

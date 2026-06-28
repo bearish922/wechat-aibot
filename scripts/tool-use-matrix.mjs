@@ -2,10 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { beijingISO } from "../app/lib/time-utils.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG_PATH = path.join(ROOT, "data", "config.json");
-const OUT_DIR = path.join(ROOT, "data", "runtime", "tool-use-matrix", new Date().toISOString().replace(/[:.]/g, "-"));
+const OUT_DIR = path.join(ROOT, "data", "runtime", "tool-use-matrix", beijingISO().replace(/[:.]/g, "-"));
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));

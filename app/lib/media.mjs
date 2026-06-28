@@ -7,7 +7,7 @@ import { configValue, envOrConfig, configBool, configNumber } from "./config.mjs
 import { dataPath, RUNTIME_DIR, appPath, ensureDir } from "./paths.mjs";
 import { log } from "./utils.mjs";
 import { usableConfigString, spawnCli, commandExists, LOGS_DIR } from "./claude-runner.mjs";
-import { loadPrompts } from "./reply.mjs";
+import { loadPrompts, beijingISO } from "./reply.mjs";
 import { recentInputs } from "./state.mjs";
 import { CDN_BASE_URL } from "./wechat.mjs";
 import { resolveProjectPath } from "./paths.mjs";
@@ -47,7 +47,7 @@ export function logInboundMedia(msg) {
   try {
     if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
     fs.appendFileSync(mediaLogPath(), JSON.stringify({
-      timestamp: new Date().toISOString(),
+      timestamp: beijingISO(),
       from_user_id: msg.from_user_id,
       context_token: msg.context_token,
       item_list: msg.item_list,
@@ -206,7 +206,7 @@ function saveInboundBuffer(buf, { kind, mime, originalFilename }) {
   const safeOriginal = sanitizeFilename(originalFilename || `${kind}${fallbackExt}`);
   const ext = path.extname(safeOriginal) || fallbackExt;
   const base = path.basename(safeOriginal, path.extname(safeOriginal));
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const stamp = beijingISO().replace(/[:.]/g, "-");
   const filePath = path.join(INBOUND_MEDIA_DIR, `${stamp}-${crypto.randomUUID().slice(0, 8)}-${base}${ext}`);
   fs.writeFileSync(filePath, buf);
   return filePath;

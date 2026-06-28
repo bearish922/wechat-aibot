@@ -9,7 +9,7 @@ import {
   createCodexEventState,
   reduceCodexEvent,
 } from "../lib/claude-runner.mjs";
-import { ensureWorldSession } from "../lib/world-state.mjs";
+import { initializeWorldSession } from "../lib/world-state.mjs";
 
 const adapterSource = readFileSync(join(import.meta.dirname, "..", "lib", "backend-adapter.mjs"), "utf-8");
 const botSource = readFileSync(join(import.meta.dirname, "..", "bot.mjs"), "utf-8");
@@ -17,21 +17,47 @@ const turnSource = readFileSync(join(import.meta.dirname, "..", "lib", "turn.mjs
 const historySource = readFileSync(join(import.meta.dirname, "..", "lib", "gui-history.mjs"), "utf-8");
 
 describe("Codex backend contract", () => {
-  it("parses the real Codex JSONL protocol and captures the actual thread id", () => {
+  it("uses Codex token_count last usage as the current accumulated context", () => {
     const state = createCodexEventState("placeholder");
     reduceCodexEvent(state, { type: "thread.started", thread_id: "thread-real" });
     reduceCodexEvent(state, { type: "item.completed", item: { type: "agent_message", text: "hello" } });
     reduceCodexEvent(state, { type: "item.completed", item: { type: "web_search" } });
-    reduceCodexEvent(state, { type: "turn.completed", usage: { input_tokens: 1200, cached_input_tokens: 900, output_tokens: 80 } });
+    reduceCodexEvent(state, {
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            input_tokens: 944733,
+            cached_input_tokens: 622976,
+            output_tokens: 10197,
+            reasoning_output_tokens: 4054,
+            total_tokens: 954930,
+          },
+          last_token_usage: {
+            input_tokens: 86821,
+            cached_input_tokens: 82816,
+            output_tokens: 405,
+            reasoning_output_tokens: 94,
+            total_tokens: 87226,
+          },
+          model_context_window: 258400,
+        },
+      },
+    });
+    reduceCodexEvent(state, { type: "turn.completed", usage: { input_tokens: 944733, cached_input_tokens: 622976, output_tokens: 10197 } });
 
     assert.equal(state.threadId, "thread-real");
     assert.equal(state.text, "hello");
     assert.deepEqual(state.usage, {
-      input_tokens: 1200,
-      cache_read_input_tokens: 900,
+      input_tokens: 86821,
+      cache_read_input_tokens: 82816,
       cache_creation_input_tokens: 0,
-      output_tokens: 80,
-      reasoning_output_tokens: 0,
+      output_tokens: 405,
+      reasoning_output_tokens: 94,
+      total_input_tokens: 944733,
+      total_output_tokens: 10197,
+      model_context_window: 258400,
     });
     assert.equal(state.toolUsage.webSearch, 1);
   });
@@ -100,8 +126,8 @@ describe("Codex backend contract", () => {
 
   it("keeps role world content shared while provider runtime threads stay separate", () => {
     const roleWorld = { _worldState: { location: "Tokyo" }, _lifeArcs: [{ id: "arc" }] };
-    const cc = ensureWorldSession(roleWorld, "cc");
-    const codex = ensureWorldSession(roleWorld, "codex");
+    const cc = initializeWorldSession(roleWorld, "cc");
+    const codex = initializeWorldSession(roleWorld, "codex");
 
     assert.notEqual(cc.sid, codex.sid);
     assert.equal(roleWorld._worldState.location, "Tokyo");
@@ -122,14 +148,26 @@ describe("Codex backend contract", () => {
     assert.doesNotMatch(historySource, /sessions\.cc/);
   });
 
-  it("does not replace a missing Claude conversation outside reset", () => {
+  it("does not silently replace a missing Claude conversation with a fresh session", () => {
     assert.match(botSource, /ai === "cc"[\s\S]*!assistantFullText[\s\S]*!streamResult\?\.text/);
     assert.match(botSource, /No conversation found with session ID/i);
-    assert.match(botSource, /CC conversation is missing; reset the session before retrying/);
     const missingSessionBlock = botSource.slice(
       botSource.indexOf("const missingCcSession"),
       botSource.indexOf("if (!assistantFullText && streamResult?.text)"),
     );
-    assert.doesNotMatch(missingSessionBlock, /uuid\(|_firstTurn\s*=|startChatAttempt\(/);
+    assert.match(missingSessionBlock, /reset is required before opening a new session/);
+    assert.doesNotMatch(missingSessionBlock, /uuid\(\)/);
+    assert.doesNotMatch(missingSessionBlock, /_firstTurn\s*=\s*true/);
+    assert.doesNotMatch(missingSessionBlock, /startChatAttempt\(/);
+  });
+
+  it("does not start a new Codex thread when resume fails", () => {
+    const runnerSource = readFileSync(join(import.meta.dirname, "..", "lib", "claude-runner.mjs"), "utf-8");
+    const resumeBlock = runnerSource.slice(
+      runnerSource.indexOf("if (sessionId) {", runnerSource.indexOf("function runCodexAppServer")),
+      runnerSource.indexOf("const turnResult", runnerSource.indexOf("function runCodexAppServer")),
+    );
+    assert.match(resumeBlock, /thread\/resume/);
+    assert.doesNotMatch(resumeBlock, /catch[\s\S]*thread\/start/);
   });
 });

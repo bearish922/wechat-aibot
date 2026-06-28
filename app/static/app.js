@@ -204,7 +204,7 @@ async function pollStatusUpdate() {
       const title = document.querySelector('[data-cc="title"]');
       if (title) title.textContent = `${contextBackendLabel(s.ccContext)} Context — ${s.ccContext.profile}`;
       const turn = document.querySelector('[data-cc="turn"]'); if (turn) turn.textContent = `${s.ccContext.turnCount}/${s.ccContext.turnThreshold}`;
-      const uc = document.querySelector('[data-cc="userCtx"]'); if (uc) uc.textContent = ctxPct(s.ccContext.userCtx);
+      const resetRule = document.querySelector('[data-cc="resetRule"]'); if (resetRule) resetRule.textContent = contextResetRule(s.ccContext);
       const hc = document.querySelector('[data-cc="hwCtx"]'); if (hc) hc.textContent = ctxPct(s.ccContext.hwCtx);
     }
   } catch {} // swallow poll errors
@@ -221,6 +221,12 @@ function contextBackendLabel(context) {
   return context?.backendLabel || (context?.backend === "codex" ? "Codex" : "CC");
 }
 
+function contextResetRule(context) {
+  const ratio = Number(context?.contextResetRatio ?? 0.5);
+  const pct = Number.isFinite(ratio) ? Math.round(ratio * 100) : 50;
+  return `Context >= ${pct}% · fallback ${context?.turnThreshold || 30} turns`;
+}
+
 function startStatusPoll() {
   clearStatusPoll();
   _statusPollTimer = setInterval(pollStatusUpdate, 4000);
@@ -231,7 +237,7 @@ function renderCCContext(s) {
   if (!cc) return `<div class="panel" data-panel="cc-context" style="display:none"></div>`;
   const backendLabel = contextBackendLabel(cc);
   const turn = `${cc.turnCount}/${cc.turnThreshold}`;
-  const userCtx = ctxPct(cc.userCtx);
+  const resetRule = contextResetRule(cc);
   const hwCtx = ctxPct(cc.hwCtx);
   const hasScene = cc.sceneMemory && cc.sceneMemory.length > 0;
   return `
@@ -245,8 +251,8 @@ function renderCCContext(s) {
       </div>
       <div class="stat-grid">
         <div class="stat-tile"><span>Turn</span><strong data-cc="turn">${turn}</strong></div>
-        <div class="stat-tile"><span>User Context</span><strong data-cc="userCtx">${userCtx}</strong></div>
-        <div class="stat-tile"><span>HW Context</span><strong data-cc="hwCtx">${hwCtx}</strong></div>
+        <div class="stat-tile"><span>Auto Reset</span><strong data-cc="resetRule">${resetRule}</strong></div>
+        <div class="stat-tile"><span>Actor 会话</span><strong data-cc="hwCtx">${hwCtx}</strong></div>
       </div>
     </div>`;
 }
@@ -388,7 +394,23 @@ function debounce(fn, ms) {
 
 async function savePromptField(key, value, silent = false) {
   try {
-    const body = { profile: selectedRoleProfile, [key]: value };
+    const body = { profile: selectedRoleProfile };
+    // runtimePolicy.* 字段发送为嵌套对象
+    if (key.startsWith("runtimePolicy.")) {
+      const subKey = key.slice("runtimePolicy.".length);
+      body.runtimePolicy = { [subKey]: value };
+    } else if (key.startsWith("workEventConfig.")) {
+      const subPath = key.slice("workEventConfig.".length).split(".");
+      const nested = {};
+      let cur = nested;
+      for (let i = 0; i < subPath.length - 1; i++) {
+        cur = cur[subPath[i]] = {};
+      }
+      cur[subPath[subPath.length - 1]] = value;
+      body.workEventConfig = nested;
+    } else {
+      body[key] = value;
+    }
     const r = await api("PUT", "/api/prompts", body);
     if (!r.ok) {
       toast(r.error || `保存失败: ${key}`, false);
@@ -414,16 +436,8 @@ async function renderPrompts() {
   window._ragKwEdits = JSON.parse(JSON.stringify(p.ragKeywords || {}));
 
   content.innerHTML = [
-    renderPromptsPipeline(p, selectedProfile, profiles),
-    `<div class="panel" id="hiddenWorldPromptSection">
-      <div class="panel-head">
-        <div>
-          <h2>后台子系统及双阶段遗留</h2>
-          <p class="panel-subtitle">单 Actor 通用（日程提取、主动消息）在前；仅旧双阶段角色使用的专用组件与遗留项在后。</p>
-        </div>
-      </div>
-    </div>`,
-    renderWorldPipeline(role, p),
+    renderMainReplyPipeline(p, selectedProfile, profiles),
+    renderAuxModules(role, p),
   ].join("");
 
   content.querySelector("#promptProfileSelect")?.addEventListener("change", e => {
@@ -433,7 +447,7 @@ async function renderPrompts() {
   });
   content.querySelector("#manageProfilesBtn")?.addEventListener("click", () => openRoleManager());
 
-  // Number inputs: auto-save on change with debounce
+  // Number inputs: auto-save on input/change with debounce
   const debouncedSaveNum = debounce(async (el) => {
     const key = el.dataset.key;
     if (!key) return;
@@ -441,20 +455,35 @@ async function renderPrompts() {
     if (el.dataset.ms === 'h') val = fromH(val);
     else if (el.dataset.ms === 'd') val = fromD(val);
     else if (el.dataset.ms === '1') val = fromS(val);
-    await savePromptField(key, val, true);
+    await savePromptField(key, val);
   }, 300);
 
   content.querySelectorAll('.prompts-editable').forEach(el => {
     if (el.classList.contains('prompts-num')) {
+      // 同时绑定 input（实时）和 change（blur 兜底），debounce 防止重复保存
+      el.addEventListener('input', () => debouncedSaveNum(el));
       el.addEventListener('change', () => debouncedSaveNum(el));
+    } else if (el.classList.contains('prompts-toggle')) {
+      el.addEventListener('change', async () => {
+        const key = el.dataset.key;
+        if (!key) return;
+        await savePromptField(key, el.checked);
+      });
+    } else if (el.classList.contains('prompts-select')) {
+      el.addEventListener('change', async () => {
+        const key = el.dataset.key;
+        if (!key) return;
+        await savePromptField(key, el.value);
+      });
     } else if (el.tagName === 'TEXTAREA' && !el.classList.contains('prompts-textarea')) {
-      // Array textarea (e.g. dailyShareDefaultCancelIf) — auto-save on change
+      // Array textarea (e.g. dailyShareDefaultCancelIf) — auto-save on input
       const debouncedSaveArr = debounce(async (ta) => {
         const key = ta.dataset.key;
         if (!key) return;
         const lines = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
-        await savePromptField(key, lines, true);
+        await savePromptField(key, lines);
       }, 300);
+      el.addEventListener('input', () => debouncedSaveArr(el));
       el.addEventListener('change', () => debouncedSaveArr(el));
     }
   });
@@ -473,7 +502,7 @@ async function renderPrompts() {
   content.querySelectorAll('[data-action="save-text"]').forEach(btn => {
     btn.addEventListener("click", async () => {
       const key = btn.dataset.key;
-      const el = content.querySelector(`#prompt_${key}`);
+      const el = content.querySelector(`#${CSS.escape('prompt_' + key)}`);
       const val = el ? el.value : '';
       promptsEditing[key] = false;
       await savePromptField(key, val);
@@ -566,8 +595,7 @@ let promptsEditing = {};
 
 // ─── 渲染 Actor Mode 主流水线 ───
 // 单 Actor 架构核心：System Prompt → 动态上下文 → 输出与状态维护
-// 旧双阶段架构的子系统及专用组件移到下方 renderWorldPipeline
-function renderPromptsPipeline(p, profile, profiles) {
+function renderMainReplyPipeline(p, profile, profiles) {
   const profileBody = `
     <div class="pipeline-preview">
       <span class="pipeline-preview-text">${escHtml(profile.prompt || "(empty)")}</span>
@@ -579,7 +607,7 @@ function renderPromptsPipeline(p, profile, profiles) {
   return `
     <div class="panel">
       <div class="panel-head">
-        <h2>角色 Prompt 管理</h2>
+        <h2>主回复</h2>
         <div class="memory-toolbar">
           <button class="btn" id="manageProfilesBtn">管理角色</button>
           <select id="promptProfileSelect">${roleSelectOptions(profiles)}</select>
@@ -589,7 +617,7 @@ function renderPromptsPipeline(p, profile, profiles) {
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-sys"><span>阶段 1 — Actor System Prompt</span></div>
+        <div class="pipeline-phase-label phase-sys"><span>角色 Prompt 管道</span></div>
         ${renderPipelineStep({
           n: 1,
           title: "Profile",
@@ -599,26 +627,6 @@ function renderPromptsPipeline(p, profile, profiles) {
         })}
         ${renderPipelineStep({
           n: 2,
-          title: "情景记忆 (System Prompt)",
-          desc: "Reset 后首轮注入：由 LLM 基于近期对话生成的上下文摘要，帮助角色在新 session 中保持连续性。仅 firstTurn=true 时注入。",
-          body: `
-            <label class="pipeline-sub-label">情景记忆区块标题</label>
-            ${renderTextPreview("sceneMemorySystemBlockIntro", p.sceneMemorySystemBlockIntro)}
-            <label class="pipeline-sub-label">情景记忆生成指令（Reset 时使用）</label>
-            ${renderTextPreview("sceneMemoryPromptInstructions", p.sceneMemoryPromptInstructions)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 3,
-          title: "长期记忆 (System Prompt)",
-          desc: "通过 --append-system-prompt-file 注入 system prompt，Claude 自动缓存，不占 turn body。",
-          body: `
-            <label class="pipeline-sub-label">记忆上下文指令</label>
-            ${renderTextPreview("memoryContextInstruction", p.memoryContextInstruction)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 4,
           title: "Scenelet 指令",
           desc: "核心指令，同时定义 inner_scenelet（内心叙事）与 visible_reply（用户可见回复）的写作规则、输出 JSON 格式及反模式。",
           body: `
@@ -627,7 +635,7 @@ function renderPromptsPipeline(p, profile, profiles) {
           `,
         })}
         ${renderPipelineStep({
-          n: 5,
+          n: 3,
           title: "Actor 内心风格",
           desc: "约束角色内心世界的语言风格，维持角色连续而具体的生活状态。注入 system prompt 尾部。",
           body: `
@@ -640,34 +648,34 @@ function renderPromptsPipeline(p, profile, profiles) {
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-body"><span>阶段 2 — 动态上下文</span></div>
+        <div class="pipeline-phase-label phase-body"><span>动态上下文</span></div>
         ${renderPipelineStep({
-          n: 6,
+          n: 4,
           title: "动态上下文补充",
-          desc: "自动注入时间、天气、场景信息，帮助角色感知当前状态。均条件触发，无需配置。",
+          desc: "每轮对话自动注入完整的世界状态与活跃日程，供模型感知角色当前所处的时空场景。均无需关键词触发。",
           body: `<p style="color:var(--muted);font-size:13px;margin:0">
             <b>时间上下文</b>：自动注入当前时间 + Asia/Tokyo 时区 + 用户本地时区。<br>
-            <b>天气注入</b>：用户消息含天气关键词（<code>天气</code> <code>下雨</code> <code>气温</code> 等）时，自动注入角色所在城市天气信息。<br>
-            <b>场景投影</b>：用户消息含场景关键词（<code>在哪</code> <code>做什么</code> <code>醒了</code> 等）时，从 world_state 投影 location / activity / awake_state / current_plan。
+            <b>世界状态</b>：直接注入完整 world_state（location / activity / awake_state / current_plan / open_threads）。<br>
+            <b>活跃日程</b>：直接注入全部 active life_arcs 内容（id / title / summary / progress_note / kind / time_start / time_end / time_slots）。<br>
+            <b>天气注入</b>：用户消息含天气关键词时，条件注入角色所在城市天气信息。
           </p>`,
         })}
         ${renderPipelineStep({
-          n: 7,
+          n: 5,
           title: "聊天历史",
-          desc: "注入最近可见对话轮数到动态 prompt。单 Actor 模式使用 actorVisibleContextTurns，双阶段模式使用 visibleContextTurns。",
+          desc: "注入最近可见对话轮数到动态 prompt。轮数由运行时策略 actorVisibleContextTurns 控制（默认 8，范围 1–12）。",
           body: `
             <label class="pipeline-sub-label">聊天历史引导说明</label>
             ${renderTextPreview("chatHistoryIntro", p.chatHistoryIntro)}
             ${renderControlGrid([
-              renderNumberControl("visibleContextTurns", "双阶段可见轮数", p.visibleContextTurns || 8, 1, 30, "turns"),
-              renderNumberControl("actorVisibleContextTurns", "单 Actor 可见轮数", p.actorVisibleContextTurns || 1, 1, 30, "turns"),
+              renderNumberControl("runtimePolicy.actorVisibleContextTurns", "单 Actor 可见轮数", p.runtimePolicy?.actorVisibleContextTurns || 8, 1, 12, "turns"),
             ])}
           `,
         })}
         ${renderPipelineStep({
-          n: 8,
+          n: 6,
           title: "RAG 知识库检索",
-          desc: "当用户消息匹配关键词时触发检索，结果注入动态 prompt。ragContextInstruction 仅在 RAG 命中时注入，未触发不注入。",
+          desc: "当用户消息匹配关键词时触发检索，结果注入动态 prompt。ragContextInstruction 仅在 RAG 命中时注入。",
           body: `
             ${renderRagKeywordChips(p)}
             <label class="pipeline-sub-label" style="margin-top:8px">RAG 上下文说明（仅 RAG 命中时注入）</label>
@@ -678,42 +686,6 @@ function renderPromptsPipeline(p, profile, profiles) {
               renderNumberControl("ragResultMaxChars", "最大字符数", p.ragResultMaxChars || 3600, 500, 10000, "chars"),
               renderNumberControl("ragTimeoutMs", "超时", p.ragTimeoutMs, 5, 120, "s", { ms: true }),
             ])}
-          `,
-        })}
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-model"><span>阶段 3 — 输出与状态维护</span></div>
-        ${renderPipelineStep({
-          n: 9,
-          title: "Actor 输出格式",
-          desc: "单 Actor 模式下一次 API 调用同时输出 inner_scenelet（内心叙事）与 visible_reply（用户可见回复）。双阶段模式下仅输出 inner_scenelet，visible_reply 由独立回复模型生成。",
-          body: `<p style="color:var(--muted);font-size:13px;margin:0">输出格式由 sceneletInstructions 定义：<code>{"inner_scenelet":"...","visible_reply":"..."}</code>。发送前经 sanitizer 清洗。</p>`,
-        })}
-        ${renderPipelineStep({
-          n: 10,
-          title: "Sanitizer 清洗",
-          desc: "发送前对 visible_reply 做安全清洗，防止 JSON 泄漏与括号指令暴露。",
-          body: `<p style="color:var(--muted);font-size:13px;margin:0">自动执行，无需配置。清洗规则：过滤 <code>{</code> <code>}</code> 开头行、移除中英文括号包裹的指令文本、去除空回复。</p>`,
-        })}
-        ${renderPipelineStep({
-          n: 11,
-          title: "Continuity Update",
-          desc: "发送成功后执行的独立状态记账。Actor 不负责状态维护，由 Continuity Updater 基于本轮对话事实输出结构化 world_state patch 与 follow-up 候选。失败不影响已发送消息。",
-          body: `
-            <label class="pipeline-sub-label">Continuity Update Prompt</label>
-            ${renderTextPreview("continuityUpdatePrompt", p.continuityUpdatePrompt)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 12,
-          title: "Memory Update",
-          desc: "Reset 时将当前记忆文档 + 积累的用户消息合并，让 LLM 直接输出更新后的完整 Markdown 文档。",
-          body: `
-            <label class="pipeline-sub-label">Memory Update Prompt</label>
-            ${renderTextPreview("memoryUpdatePrompt", p.memoryUpdatePrompt)}
           `,
         })}
       </div>
@@ -780,6 +752,35 @@ function renderNumberControl(key, label, value, min, max, unit, options = {}) {
     <label class="pipeline-control">
       <span>${escHtml(label)}</span>
       <div class="pipeline-num-group"><input ${attrs}><span class="pipeline-num-unit">${escHtml(unit)}</span></div>
+    </label>
+  `;
+}
+
+// 布尔开关控件 — 自动保存
+function renderToggleControl(key, label, checked, desc = "") {
+  return `
+    <label class="pipeline-control pipeline-control-toggle">
+      <span>
+        ${escHtml(label)}
+        ${desc ? `<small style="display:block;color:var(--muted);font-weight:400">${escHtml(desc)}</small>` : ""}
+      </span>
+      <label class="toggle-switch">
+        <input type="checkbox" class="prompts-editable prompts-toggle" data-key="${escAttr(key)}"${checked ? " checked" : ""}>
+        <span class="toggle-slider"></span>
+      </label>
+    </label>
+  `;
+}
+
+// 下拉选择控件 — 自动保存
+function renderSelectControl(key, label, value, options = []) {
+  const opts = options.map(o =>
+    `<option value="${escAttr(o.value)}"${o.value === value ? " selected" : ""}>${escHtml(o.label)}</option>`
+  ).join("");
+  return `
+    <label class="pipeline-control">
+      <span>${escHtml(label)}</span>
+      <select class="prompts-editable prompts-select" data-key="${escAttr(key)}">${opts}</select>
     </label>
   `;
 }
@@ -938,22 +939,114 @@ async function openRoleManager(initialName = selectedRoleProfile) {
   await refresh();
 }
 
-// ─── 渲染 Hidden World 流水线（阶段1-4） ───
-// 展示角色的场景生成、世界状态、主动子系统的完整配置
-// 阶段1: System Prompt（Profile、Scenelet指令、特殊日期、长期记忆）
-// 阶段2: 动态上下文（可见聊天窗口、语言风格、时间戳Guard）
-// 阶段3: 输出（Actor输出、Continuity Update、Follow-up、World State Patch）
-// ─── 后台子系统及双阶段遗留组件 ───
-// 单 Actor 模式：日程提取、主动消息等后台子系统按原逻辑运行，不影响主回复生成
-// 双阶段架构专用组件仅旧双阶段角色使用
-function renderWorldPipeline(role, p) {
+// ─── 后台子系统 & 运行时策略 ───
+// 日程提取、主动消息等后台子系统 + 角色级运行时策略开关与参数
+function renderAuxModules(role, p) {
   return `
     <div class="panel">
+      <div class="panel-head">
+        <h2>辅助独立模块</h2>
+        <p class="panel-subtitle">后台子系统与运行时策略，各模块独立运行、独立配置。</p>
+      </div>
+    </div>
+
+    <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-body"><span>后台子系统（单 Actor 通用）</span></div>
-        <div class="pipeline-phase-label phase-sys" style="margin-top:16px"><span>日程与计划</span></div>
+        <div class="pipeline-phase-label phase-sys"><span>continuity</span></div>
         ${renderPipelineStep({
           n: 1,
+          title: "Continuity Update",
+          desc: "发送成功后执行的独立状态记账。基于本轮对话输出结构化 world_state patch 与 follow-up 候选。失败不影响已发送消息。",
+          body: `
+            <label class="pipeline-sub-label">Continuity Update Prompt</label>
+            ${renderTextPreview("continuityUpdatePrompt", p.continuityUpdatePrompt)}
+          `,
+        })}
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="pipeline-phase-box">
+        <div class="pipeline-phase-label phase-body"><span>proactive</span></div>
+        ${renderPipelineStep({
+          n: 2,
+          title: "Daily Share Seed",
+          desc: "沉默期独立创意种子。完全解耦对话上下文，只用时间/天气/位置/活动作为素材。Pro 模型运行。",
+          body: `
+            <label class="pipeline-sub-label">Seed Prompt</label>
+            ${renderTextPreview("dailyShareSeedPrompt", p.dailyShareSeedPrompt)}
+            <label class="pipeline-sub-label">调度参数</label>
+            ${renderControlGrid([
+              renderNumberControl("dailyShareSeedIntervalMs", "Seed 间隔", p.dailyShareSeedIntervalMs, 600, 86400, "s", { ms: true }),
+              renderNumberControl("dailyShareMinIdleMs", "最小沉默时间", p.dailyShareMinIdleMs, 300, 86400, "s", { ms: true }),
+              renderNumberControl("dailyShareDefaultScheduleOffsetMs", "默认延迟", p.dailyShareDefaultScheduleOffsetMs, 60, 1800, "s", { ms: true }),
+              renderNumberControl("dailyShareDefaultExpiryOffsetMs", "默认过期", p.dailyShareDefaultExpiryOffsetMs, 300, 7200, "s", { ms: true }),
+            ])}
+            ${renderArrayTextarea("dailyShareDefaultCancelIf", "默认取消条件（每行一条）", p.dailyShareDefaultCancelIf)}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 3,
+          title: "Proactive 二次判断",
+          desc: "对候选消息做二次质量审查，决定是否发送。",
+          body: `
+            <label class="pipeline-sub-label">Proactive 二次判断指令</label>
+            ${renderTextPreview("proactiveInstructions", p.proactiveInstructions)}
+            ${renderControlGrid([
+              renderNumberControl("proactiveCheckIntervalMs", "检查间隔", p.proactiveCheckIntervalMs, 5, 300, "s", { ms: true }),
+              renderNumberControl("proactiveCooldownMs", "冷却时间", p.proactiveCooldownMs, 60, 86400, "s", { ms: true }),
+              renderNumberControl("proactiveDailyMax", "每日上限", p.proactiveDailyMax || 8, 1, 24, "条"),
+              renderNumberControl("proactiveDefaultExpiryOffsetMs", "默认过期偏移", p.proactiveDefaultExpiryOffsetMs, 300, 7200, "s", { ms: true }),
+            ])}
+          `,
+        })}
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="pipeline-phase-box">
+        <div class="pipeline-phase-label phase-post"><span>reset</span></div>
+        ${renderPipelineStep({
+          n: 4,
+          title: "情景记忆 (Scene Memory)",
+          desc: "Reset 后首轮注入：由 LLM 基于近期对话生成的上下文摘要，帮助角色在新 session 中保持连续性。仅 firstTurn=true 时注入。",
+          body: `
+            <label class="pipeline-sub-label">情景记忆区块标题</label>
+            ${renderTextPreview("sceneMemorySystemBlockIntro", p.sceneMemorySystemBlockIntro)}
+            <label class="pipeline-sub-label">情景记忆生成指令（Reset 时使用）</label>
+            ${renderTextPreview("sceneMemoryPromptInstructions", p.sceneMemoryPromptInstructions)}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 5,
+          title: "长期记忆维护 (Memory Update)",
+          desc: "Reset 时将当前记忆文档 + 积累的用户消息合并，让 LLM 直接输出更新后的完整 Markdown 文档。",
+          body: `
+            <label class="pipeline-sub-label">Memory Update Prompt</label>
+            ${renderTextPreview("memoryUpdatePrompt", p.memoryUpdatePrompt)}
+          `,
+        })}
+        ${renderPipelineStep({
+          n: 6,
+          title: "Reset 参数",
+          desc: "控制上下文重置与退出判断的行为参数。",
+          body: `
+            ${renderControlGrid([
+              renderNumberControl("contextResetRatio", "上下文压力阈值", p.contextResetRatio ?? 0.5, 0.1, 0.95, "ratio", { step: "0.05" }),
+              renderNumberControl("turnResetThreshold", "轮数兜底阈值", p.turnResetThreshold || 30, 4, 48, "turns"),
+              renderNumberControl("stateStaleThresholdMs", "状态过期阈值", p.stateStaleThresholdMs, 10, 3600, "s", { ms: true }),
+              renderNumberControl("maxCancelReasonLength", "取消原因上限", p.maxCancelReasonLength || 100, 20, 500, "字符"),
+            ])}
+          `,
+        })}
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="pipeline-phase-box">
+        <div class="pipeline-phase-label phase-model"><span>lifearc</span></div>
+        ${renderPipelineStep({
+          n: 7,
           title: "特殊日期与月度行事",
           desc: "仅传给 Schedule Creator / Time Advancement，不注入 Actor System Prompt。",
           body: `
@@ -964,7 +1057,7 @@ function renderWorldPipeline(role, p) {
           `,
         })}
         ${renderPipelineStep({
-          n: 2,
+          n: 8,
           title: "Schedule Extractor",
           desc: "每轮从本轮消息 + inner_scenelet 中提取新的周期性/持续性候选，去重后累积到待审批队列。",
           body: `
@@ -973,7 +1066,7 @@ function renderWorldPipeline(role, p) {
           `,
         })}
         ${renderPipelineStep({
-          n: 3,
+          n: 9,
           title: "Life Arc 审批 (Schedule Creator)",
           desc: "定期审批 Extractor 积累的候选队列。审批标准：不从单次推断周期性、null time 不批。处理后清空队列。",
           body: `
@@ -991,36 +1084,51 @@ function renderWorldPipeline(role, p) {
             ])}
           `,
         })}
-        <div class="pipeline-phase-label phase-post" style="margin-top:20px"><span>主动消息</span></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="pipeline-phase-box">
+        <div class="pipeline-phase-label phase-body"><span>work</span></div>
         ${renderPipelineStep({
-          n: 4,
-          title: "Daily Share Seed",
-          desc: "沉默期独立创意种子。完全解耦对话上下文，只用时间/天气/位置/活动作为素材。Pro 模型运行。",
+          n: 10,
+          title: "日程预生成器",
+          desc: "基于模板库 + AI 自动预生成工作日程（如配音、摄影、杂志拍摄等），写入 life_arcs 后由 Schedule Creator 感知后统一编排。",
           body: `
-            <label class="pipeline-sub-label">Seed Prompt</label>
-            ${renderTextPreview("dailyShareSeedPrompt", p.dailyShareSeedPrompt)}
-            <label class="pipeline-sub-label">调度参数</label>
             ${renderControlGrid([
-              renderNumberControl("dailyShareSeedIntervalMs", "Seed 间隔", p.dailyShareSeedIntervalMs, 600, 86400, "s", { ms: true }),
-              renderNumberControl("dailyShareMinIdleMs", "最小沉默时间", p.dailyShareMinIdleMs, 300, 86400, "s", { ms: true }),
-              renderNumberControl("dailyShareDefaultScheduleOffsetMs", "默认延迟", p.dailyShareDefaultScheduleOffsetMs, 60, 1800, "s", { ms: true }),
-              renderNumberControl("dailyShareDefaultExpiryOffsetMs", "默认过期", p.dailyShareDefaultExpiryOffsetMs, 300, 7200, "s", { ms: true }),
+              renderToggleControl("workEventConfig.enabled", "启用", p.workEventConfig?.enabled !== false, "开启后定期生成艺人工作日程"),
             ])}
-            ${renderArrayTextarea("dailyShareDefaultCancelIf", "默认取消条件（每行一条）", p.dailyShareDefaultCancelIf)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 5,
-          title: "Proactive 二次判断",
-          desc: "",
-          body: `
-            <label class="pipeline-sub-label">Proactive 二次判断指令</label>
-            ${renderTextPreview("proactiveInstructions", p.proactiveInstructions)}
+            <label class="pipeline-sub-label" style="margin-top:12px">生成参数</label>
             ${renderControlGrid([
-              renderNumberControl("proactiveCheckIntervalMs", "检查间隔", p.proactiveCheckIntervalMs, 5, 300, "s", { ms: true }),
-              renderNumberControl("proactiveCooldownMs", "冷却时间", p.proactiveCooldownMs, 60, 86400, "s", { ms: true }),
-              renderNumberControl("proactiveDailyMax", "每日上限", p.proactiveDailyMax || 8, 1, 24, "条"),
-              renderNumberControl("proactiveDefaultExpiryOffsetMs", "默认过期偏移", p.proactiveDefaultExpiryOffsetMs, 300, 7200, "s", { ms: true }),
+              renderNumberControl("workEventConfig.workHoursPerDay", "每日工作上限", p.workEventConfig?.workHoursPerDay || 8, 1, 24, "h"),
+              renderNumberControl("workEventConfig.generationIntervalMs", "生成间隔", p.workEventConfig?.generationIntervalMs || 43200000, 1, 24, "h", { ms: 'h' }),
+              renderNumberControl("workEventConfig.maxEventsPerGeneration", "每次最大事件数", p.workEventConfig?.maxEventsPerGeneration || 1, 1, 5, "个"),
+            ])}
+            <label class="pipeline-sub-label" style="margin-top:12px">提前生成时限 (minLeadHours)</label>
+            ${renderControlGrid([
+              renderNumberControl("workEventConfig.minLeadHours.light", "轻量 (≤3h)", p.workEventConfig?.minLeadHours?.light || 24, 1, 168, "h"),
+              renderNumberControl("workEventConfig.minLeadHours.medium", "中等 (4-7h)", p.workEventConfig?.minLeadHours?.medium || 48, 1, 168, "h"),
+              renderNumberControl("workEventConfig.minLeadHours.heavy", "重度 (≥8h)", p.workEventConfig?.minLeadHours?.heavy || 72, 1, 168, "h"),
+            ])}
+            <label class="pipeline-sub-label" style="margin-top:12px">冲突策略 (conflictPolicy)</label>
+            ${renderControlGrid([
+              renderNumberControl("workEventConfig.conflictPolicy.minGapBetweenEventsMinutes", "事件最小间隔", p.workEventConfig?.conflictPolicy?.minGapBetweenEventsMinutes ?? 60, 0, 240, "min"),
+            ])}
+            <label class="pipeline-sub-label" style="margin-top:8px">各等级允许排入已有日程</label>
+            ${renderControlGrid([
+              renderSelectControl("workEventConfig.conflictPolicy.light.allow", "轻量冲突策略", String(p.workEventConfig?.conflictPolicy?.light?.allow ?? false), [
+                { value: "false", label: "禁止冲突" },
+                { value: "true", label: "允许冲突" },
+              ]),
+              renderSelectControl("workEventConfig.conflictPolicy.medium.allow", "中等冲突策略", String(p.workEventConfig?.conflictPolicy?.medium?.allow ?? false), [
+                { value: "false", label: "禁止冲突" },
+                { value: "true", label: "允许冲突" },
+              ]),
+              renderSelectControl("workEventConfig.conflictPolicy.heavy.allow", "重度冲突策略", String(p.workEventConfig?.conflictPolicy?.heavy?.allow ?? "school_only"), [
+                { value: "false", label: "禁止冲突" },
+                { value: "true", label: "允许冲突" },
+                { value: "school_only", label: "仅学校日程允许" },
+              ]),
             ])}
           `,
         })}
@@ -1029,76 +1137,31 @@ function renderWorldPipeline(role, p) {
 
     <div class="panel">
       <div class="pipeline-phase-box">
-        <div class="pipeline-phase-label phase-sys"><span>双阶段架构遗留（仅旧双阶段角色使用）</span></div>
-        ${renderPipelineStep({
-          n: 6,
-          title: "表达能力",
-          desc: "仅双阶段模式使用，定义角色在可见回复中的语言表达能力范围。",
-          body: `
-            <label class="pipeline-sub-label">表达能力</label>
-            ${renderTextPreview("expressionCapability", p.expressionCapability)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 7,
-          title: "聊天风格",
-          desc: "仅双阶段模式使用，定义角色说话方式。",
-          body: `
-            <label class="pipeline-sub-label">聊天风格</label>
-            ${renderTextPreview("chatStyle", p.chatStyle)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 8,
-          title: "聊天现实",
-          desc: "仅双阶段模式使用，定义角色时间空间感知。",
-          body: `
-            <label class="pipeline-sub-label">聊天现实指令</label>
-            ${renderTextPreview("chatRealityInstructions", p.chatRealityInstructions)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 9,
-          title: "Inner Scenelet 引导",
-          desc: "仅双阶段模式使用，作为 inner_scenelet 生成的前置引导说明。",
-          body: `
-            <label class="pipeline-sub-label">Inner Scenelet 引导说明</label>
-            ${renderTextPreview("innerSceneletIntro", p.innerSceneletIntro)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 10,
-          title: "Scenelet → 回复桥接指令",
-          desc: "仅双阶段模式使用，指导回复模型如何基于 inner_scenelet 生成用户可见文本。",
-          body: `
-            <label class="pipeline-sub-label">桥接指令</label>
-            ${renderTextPreview("sceneletReplyBridgeInstruction", p.sceneletReplyBridgeInstruction)}
-          `,
-        })}
+        <div class="pipeline-phase-label phase-sys"><span>其他</span></div>
         ${renderPipelineStep({
           n: 11,
-          title: "Vision Caption",
-          desc: "仅双阶段模式使用，用户发送图片时生成视觉描述文本。",
-          body: `
-            <label class="pipeline-sub-label">Vision Caption Prompt</label>
-            ${renderTextPreview("visionCaptionPrompt", p.visionCaptionPrompt)}
-          `,
-        })}
-        ${renderPipelineStep({
-          n: 12,
-          title: "Follow-up Candidates",
-          desc: "旧双阶段模式：每轮独立并行调用，基于 inner_scenelet 和 world_state 生成主动意图候选。",
+          title: "行为开关",
+          desc: "独立控制日程追踪、主动消息、天气注入的启用状态。",
           body: `
             ${renderControlGrid([
-              renderNumberControl("hiddenWorldMaxPendingIntents", "最大待处理意图展示", p.hiddenWorldMaxPendingIntents || 8, 1, 20, "条"),
+              renderToggleControl("runtimePolicy.lifeArcEnabled", "Life Arc（日程追踪）", p.runtimePolicy?.lifeArcEnabled !== false, "启用跨天/周期性日程的提取与审批"),
+              renderToggleControl("runtimePolicy.proactiveEnabled", "主动消息", p.runtimePolicy?.proactiveEnabled !== false, "启用 Daily Share 与 Proactive 主动联系消息"),
+              renderToggleControl("runtimePolicy.weatherEnabled", "天气注入", p.runtimePolicy?.weatherEnabled !== false, "用户消息含天气关键词时注入实时天气。纯叙事角色（如 cst18）建议关闭"),
             ])}
           `,
         })}
         ${renderPipelineStep({
-          n: 13,
-          title: "World State 快照",
-          desc: "",
-          body: `<p style="color:var(--muted);font-size:13px;margin:0">结构化快照：location / activity / awake_state / current_plan / open_threads / last_world_event_at。具体内容在 Reset 快照页编辑。</p>`,
+          n: 12,
+          title: "回复来源",
+          desc: "控制用户可见回复的生成来源。",
+          body: `
+            ${renderControlGrid([
+              renderSelectControl("runtimePolicy.visibleReplySource", "回复来源", p.runtimePolicy?.visibleReplySource || "main", [
+                { value: "main", label: "正常回复（visible_reply）" },
+                { value: "scenelet", label: "内心独白作为回复（inner_scenelet）" },
+              ]),
+            ])}
+          `,
         })}
       </div>
     </div>

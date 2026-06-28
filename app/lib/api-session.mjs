@@ -1,6 +1,7 @@
 // api-session.mjs — API session state: messages array, reset, persistence, token stats
 // Replaces Claude Code's internal --resume session management.
 import { uuid } from "./utils.mjs";
+import { beijingISO } from "./reply.mjs";
 
 /**
  * Create a fresh API session.
@@ -76,7 +77,7 @@ export function resetApiSession(sess, { keepTurns = 4, sceneMemory = "" } = {}) 
   sess.messages = newMessages;
   sess.turnCount = 0;
   sess.firstTurn = true;
-  sess.lastResetAt = new Date().toISOString();
+  sess.lastResetAt = beijingISO();
   sess.sceneMemory = sceneMemory || sess.sceneMemory;
   sess.sid = uuid();
 }

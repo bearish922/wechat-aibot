@@ -1,7 +1,7 @@
 import { addRoute } from "./server.mjs";
 import { sessions, activeAI } from "./state.mjs";
 
-function hiddenWorldForProfile(profile, ai) {
+function sceneletSessionForProfile(profile, ai) {
   const worlds = globalThis.__wechatRoleWorlds;
   const world = worlds?.get?.(profile || "默认");
   return world?._worldSessions?.[ai] || null;
@@ -23,7 +23,7 @@ export function registerSessionRoutes() {
             queue: s.queue?.length || 0,
             profile: s._profile || "默认",
             firstTurn: s._firstTurn,
-            hiddenWorld: hiddenWorldForProfile(s._profile || "默认", ai),
+            hiddenWorld: sceneletSessionForProfile(s._profile || "默认", ai),
           });
         }
       }
@@ -44,7 +44,7 @@ export function registerSessionRoutes() {
         for (const s of u.list) {
           const active = s.id === u.activeId ? " [当前]" : "";
           const profile = s._profile || "默认";
-          const hiddenWorld = hiddenWorldForProfile(profile, ai);
+          const hiddenWorld = sceneletSessionForProfile(profile, ai);
           const command = ai === "cc" ? `claude --resume ${s.sid}` : ai === "codex" ? `codex resume ${s.sid}` : "API context is stored in wechat-sessions.json";
           lines.push(`  ${s.name}${active}`);
           lines.push(`    角色: ${profile}`);

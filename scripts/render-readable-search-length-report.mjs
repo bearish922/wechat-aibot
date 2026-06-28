@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { beijingISO } from "../app/lib/time-utils.mjs";
 
 const dir = process.argv[2] || "data/runtime/search-length-eval/2026-06-05T02-06-20-015Z";
 const resultsPath = path.join(dir, "results.json");
@@ -159,7 +160,7 @@ function renderReport() {
   const lines = [];
   lines.push("# Search Architecture and Reply Length Eval");
   lines.push("");
-  lines.push(`Generated: ${new Date().toISOString()}`);
+  lines.push(`Generated: ${beijingISO()}`);
   lines.push("");
   lines.push("这是一版为侧边栏阅读重排的报告。旧宽表已备份为 `report-wide-table-backup.md`。");
   lines.push("");

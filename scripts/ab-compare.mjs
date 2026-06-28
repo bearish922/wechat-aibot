@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn, execSync } from "node:child_process";
+import { beijingISO } from "../app/lib/time-utils.mjs";
 
 // ─── Path setup — ensure imports from app/lib resolve correctly ───
 const SCRIPT_DIR = import.meta.dirname;
@@ -106,7 +107,7 @@ function formatZonedTimeParts(date, tz) {
       period,
     };
   } catch {
-    return { stamp: date.toISOString(), shortWeekday: "", period: "" };
+    return { stamp: beijingISO(date), shortWeekday: "", period: "" };
   }
 }
 
@@ -181,7 +182,7 @@ function buildHiddenWorldPrompt(opts = {}) {
     "",
     "当前时间：",
     JSON.stringify({
-      iso: now.toISOString(),
+      iso: beijingISO(now),
       beijing: { local: beijing.stamp, weekday: beijing.shortWeekday, period: beijing.period, timezone: "Asia/Shanghai" },
       tokyo: { local: tokyo.stamp, weekday: tokyo.shortWeekday, period: tokyo.period, timezone: "Asia/Tokyo" },
     }, null, 2),
@@ -708,7 +709,7 @@ async function runOneComparison(sample, msgIdx, userMsg) {
     sessionName,
     profile,
     userMessage: userMsg.text?.slice(0, 500) || "",
-    timestamp: now.toISOString(),
+    timestamp: beijingISO(now),
   };
 
   // ── Path A: Claude Code CLI ──
@@ -812,7 +813,7 @@ function generateComparisonReport(results, status) {
   comparisons.sort((a, b) => a.type.localeCompare(b.type) || a.key.localeCompare(b.key));
 
   let md = "# A/B Comparison Report — CC CLI vs Direct API\n\n";
-  md += `Generated: ${new Date().toISOString()}\n`;
+  md += `Generated: ${beijingISO()}\n`;
   md += `Total: ${comparisons.length} comparisons\n\n`;
   md += "---\n\n";
 

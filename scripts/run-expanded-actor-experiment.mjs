@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadAllEvents } from "../app/lib/chat-history.mjs";
+import { beijingISO } from "../app/lib/time-utils.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SCRIPT_DIR, "..");
@@ -355,7 +356,7 @@ fs.writeFileSync(path.join(OUTPUT_DIR, "single-system-prompt.txt"), singleSystem
 fs.writeFileSync(path.join(OUTPUT_DIR, "dual-actor-system-prompt.txt"), dualActorSystem, "utf8");
 fs.writeFileSync(path.join(OUTPUT_DIR, "dual-finalizer-system-prompt.txt"), finalizerSystem, "utf8");
 fs.writeFileSync(path.join(OUTPUT_DIR, "manifest.json"), JSON.stringify({
-  created_at: new Date().toISOString(), model: MODEL, repeats: REPEATS, concurrency: CONCURRENCY,
+  created_at: beijingISO(), model: MODEL, repeats: REPEATS, concurrency: CONCURRENCY,
   session_persistence: false, tools: [], model_self_evaluation: false, rag_before_actor: true,
   scene_state_generated: false, postprocessor_enabled: false,
   architectures: { H: "historical reference", D: "actor plus finalizer", S: "single actor" },

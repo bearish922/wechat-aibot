@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import initSqlJs from "sql.js";
 import { dataPath, ensureDir, DATA_DIR } from "./paths.mjs";
+import { beijingISO } from "./reply.mjs";
 
 // SQLite 数据库主文件路径
 const DB_FILE = dataPath("chat-history.db");
@@ -269,7 +270,7 @@ function migrateJsonToDb(db) {
 function rowFromEvent(ev) {
   return [
     ev.id || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-    ev.timestamp || new Date().toISOString(),
+    ev.timestamp || beijingISO(),
     String(ev.userId || ""),
     ev.ai || "cc",
     ev.sessionId || "",
@@ -391,7 +392,7 @@ export async function appendChatEvent(event) {
   // 构建事件对象，填充默认值
   const item = {
     id: event.id || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-    timestamp: event.timestamp || new Date().toISOString(),
+    timestamp: event.timestamp || beijingISO(),
     userId: String(event.userId || ""),
     ai: event.ai || "cc",
     sessionId: event.sessionId || "",

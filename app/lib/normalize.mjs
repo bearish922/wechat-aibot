@@ -1,6 +1,6 @@
 ﻿import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { loadPrompts } from "./reply.mjs";
+import { loadPrompts, beijingISO } from "./reply.mjs";
 
 import { dataPath } from "./paths.mjs";
 
@@ -21,6 +21,8 @@ function getSceneConfig() {
     visibleContextTurns: p.visibleContextTurns,
     // 回合计数器阈值，达到后触发场景重置 + 记忆批量更新
     turnResetThreshold: p.turnResetThreshold,
+    // 上下文窗口压力阈值，达到后触发场景重置 + 记忆批量更新
+    contextResetRatio: p.contextResetRatio,
     // 主动消息检查间隔（毫秒），定时扫描是否有待发送的主动消息
     proactiveCheckIntervalMs: p.proactiveCheckIntervalMs,
     // 主动消息冷却时间（毫秒），上次发送后多久内不再次发送
@@ -41,8 +43,6 @@ function getSceneConfig() {
     ragResultMaxChars: p.ragResultMaxChars,
     // RAG 检索调用超时（毫秒）
     ragTimeoutMs: p.ragTimeoutMs,
-    // 隐藏世界同时最多维护的 pending intent 数量
-    hiddenWorldMaxPendingIntents: p.hiddenWorldMaxPendingIntents,
     // 每日分享候选的默认调度偏移（毫秒），距 seed 生成后多久触发
     dailyShareDefaultScheduleOffsetMs: p.dailyShareDefaultScheduleOffsetMs,
     // 每日分享候选的默认过期偏移（毫秒），到期未发送则作废
@@ -131,7 +131,7 @@ function normalizeProactiveIntent(raw) {
     id: String(raw.id),
     // 状态只允许 pending/sent/cancelled，默认 pending
     status: ["pending", "sent", "cancelled"].includes(raw.status) ? raw.status : "pending",
-    createdAt: raw.createdAt ? String(raw.createdAt) : new Date().toISOString(),
+    createdAt: raw.createdAt ? String(raw.createdAt) : beijingISO(),
     scheduledAt: String(raw.scheduledAt),
     expiresAt: raw.expiresAt ? String(raw.expiresAt) : null,
     sourceTurnAt: raw.sourceTurnAt ? String(raw.sourceTurnAt) : null,
@@ -259,7 +259,7 @@ function applyWorldStatePatch(roleWorld, rawPatch = null) {
       return v !== null && v !== "";
     })),
     // 记录补丁应用时间
-    updatedAt: new Date().toISOString(),
+    updatedAt: beijingISO(),
   });
 }
 
@@ -278,6 +278,7 @@ function normalizeWorldSession(raw = null) {
     resetReason: raw.resetReason ? String(raw.resetReason).slice(0, 300) : "",
     lastUsage: raw.lastUsage && typeof raw.lastUsage === "object" ? raw.lastUsage : null,
     turnCount: Math.max(0, Number(raw.turnCount || 0) || 0),
+    generation: Math.max(0, Number(raw.generation || 0) || 0),
   };
 }
 
@@ -293,13 +294,13 @@ function normalizeLifeArc(raw) {
   const progressNote = raw.progressNote || raw.progress_note ? String(raw.progressNote || raw.progress_note).trim().slice(0, 500) : "";
   // 必须有 id、标题和摘要，进展备注允许为空
   if (!id || !title || !summary) return null;
-  const nowIso = new Date().toISOString();
+  const nowIso = beijingISO();
   // 状态只允许 active/closed
   const status = ["active", "closed"].includes(raw.status) ? raw.status : "active";
   const createdAt = raw.createdAt || raw.created_at ? String(raw.createdAt || raw.created_at) : nowIso;
   const updatedAt = raw.updatedAt || raw.updated_at ? String(raw.updatedAt || raw.updated_at) : createdAt;
   // 过期时间：优先用原始值，否则用配置的默认过期偏移(从当前时间算)
-  const defaultExpiresAt = new Date(Date.now() + getSceneConfig().scheduleDefaultExpiryFromNowMs).toISOString();
+  const defaultExpiresAt = beijingISO(new Date(Date.now() + getSceneConfig().scheduleDefaultExpiryFromNowMs));
   const rawExpiresAt = raw.expiresAt || raw.expires_at ? String(raw.expiresAt || raw.expires_at) : defaultExpiresAt;
   const expiresAt = Number.isFinite(Date.parse(rawExpiresAt)) ? rawExpiresAt : defaultExpiresAt;
   // 合法种类和主体枚举
@@ -309,6 +310,24 @@ function normalizeLifeArc(raw) {
   const subject = lifeArcSubjects.includes(raw.subject) ? raw.subject : null;
   const timeStart = raw.timeStart || raw.time_start ? String(raw.timeStart || raw.time_start) : null;
   const timeEnd = raw.timeEnd || raw.time_end ? String(raw.timeEnd || raw.time_end) : null;
+  // time_slots: 可选的结构化时间段数组，支持 dayOfWeek+start/end（周期性）或 date+start/end（一次性）
+  let timeSlots = null;
+  const rawSlots = raw.timeSlots || raw.time_slots;
+  if (Array.isArray(rawSlots) && rawSlots.length) {
+    timeSlots = rawSlots.map(s => {
+      if (!s || typeof s !== "object") return null;
+      const slot = {};
+      if (s.dayOfWeek || s.day_of_week) {
+        const dow = Number(s.dayOfWeek ?? s.day_of_week);
+        if (Number.isFinite(dow) && dow >= 1 && dow <= 7) slot.dayOfWeek = dow;
+      }
+      if (s.date) slot.date = String(s.date);
+      if (s.start) slot.start = String(s.start);
+      if (s.end) slot.end = String(s.end);
+      return (slot.dayOfWeek || slot.date) && slot.start && slot.end ? slot : null;
+    }).filter(Boolean);
+    if (!timeSlots.length) timeSlots = null;
+  }
   return {
     id,
     status,
@@ -321,6 +340,7 @@ function normalizeLifeArc(raw) {
     subject,
     timeStart,
     timeEnd,
+    timeSlots,
     createdAt,
     updatedAt,
     expiresAt,
@@ -355,27 +375,23 @@ function normalizeLifeArcs(raw, { includeClosed = false } = {}) {
 // 负责任的 LLM 调用器（claude-runner.mjs）将原始 JSON 传给此函数，统一清洗和规范化。
 //
 // visible_reply 提取逻辑：
-//   - 单 Actor 模式（actorMode="single"）：LLM 同时生成 inner_scenelet 与 visible_reply，
-//     visible_reply 即最终发送给用户的文本，需经过 sanitizeVisibleReplyText() 清洗
-//   - 双阶段模式（actorMode="two_stage"）：hidden-world 只输出 inner_scenelet，
-//     visible_reply 由后续主回复模型独立生成；此处 visibleReply 为空字符串
-//   - visible_reply 缺失或空字符串时：返回空字符串，由调用方判断是否跳过发送
+//   LLM 同时生成 inner_scenelet 与 visible_reply，
+//   visible_reply 即最终发送给用户的文本，需经过 sanitizeVisibleReplyText() 清洗
+//   visible_reply 缺失或空字符串时：返回空字符串，由调用方判断是否跳过发送
 //
 // 参数: raw - 原始 scenelet 结果对象（snake_case 字段名，来自 LLM JSON 输出）
 // 返回: 规范化后的结果对象，包含 innerScenelet、visibleReply、候选列表、世界状态补丁、工具统计等
 function normalizeSceneletResult(raw) {
   if (!raw || typeof raw !== "object") return null;
-  // 提取 visible_reply：单 Actor 模式下这是最终的对外回复文本，需立即清洗
-  // 双阶段模式下该字段通常不存在或为空，sanitizeVisibleReplyText("") 返回 ""
   const visibleReply = raw.visible_reply ? sanitizeVisibleReplyText(raw.visible_reply) : "";
   return {
-    // 角色第一人称内心独白（两种模式下均产生），用于后续上下文注入
+    // 角色第一人称内心独白，用于后续上下文注入
     innerScenelet: raw.inner_scenelet ? String(raw.inner_scenelet).trim() : "",
-    // 单 Actor 模式下的可见回复文本（已清洗）；双阶段模式下为空
+    // 可见回复文本（已清洗）
     visibleReply,
     // follow-up 候选消息列表
     followUpCandidates: Array.isArray(raw.follow_up_candidates) ? raw.follow_up_candidates : [],
-    // 世界状态补丁（双阶段模式下由 hidden-world 输出，单 Actor 由 continuity updater 输出）
+    // 世界状态补丁（由 continuity updater 输出）
     worldStatePatch: raw.world_state_patch && typeof raw.world_state_patch === "object" ? raw.world_state_patch : null,
     // 工具使用统计
     toolUsage: normalizeToolUsage(raw._toolUsage) || emptyToolUsage(),
@@ -388,7 +404,7 @@ function normalizeSceneletResult(raw) {
 // 参数: raw - 原始候选对象(含 scheduled_at 等 snake_case 字段)
 //       nowIso - 当前时间戳; sourceUserText - 触发源的用户文本; defaultKind - 默认种类
 // 返回: 规范化后的意图对象(调用 normalizeProactiveIntent)，调度时间无效时返回 null
-function normalizeRawProactiveCandidate(raw, { nowIso = new Date().toISOString(), sourceUserText = "", defaultKind = "follow_up" } = {}) {
+function normalizeRawProactiveCandidate(raw, { nowIso = beijingISO(), sourceUserText = "", defaultKind = "follow_up" } = {}) {
   // 解析调度时间
   const scheduled = raw?.scheduled_at ? new Date(raw.scheduled_at) : null;
   if (!scheduled || Number.isNaN(scheduled.getTime())) return null;
@@ -398,9 +414,9 @@ function normalizeRawProactiveCandidate(raw, { nowIso = new Date().toISOString()
     id: crypto.randomUUID(),
     status: "pending",
     createdAt: nowIso,
-    scheduledAt: scheduled.toISOString(),
+    scheduledAt: beijingISO(scheduled),
     // 过期时间无效时回退到默认值
-    expiresAt: Number.isNaN(expires.getTime()) ? new Date(scheduled.getTime() + getSceneConfig().proactiveDefaultExpiryOffsetMs).toISOString() : expires.toISOString(),
+    expiresAt: Number.isNaN(expires.getTime()) ? beijingISO(new Date(scheduled.getTime() + getSceneConfig().proactiveDefaultExpiryOffsetMs)) : beijingISO(expires),
     sourceTurnAt: nowIso,
     sourceUserText,
     basis: raw.basis || "",
@@ -470,7 +486,7 @@ function sanitizeVisibleReplyText(text) {
   // 连续 3 段以上的独立括号（如"（推门）（看窗外）（叹气）（低头）"）
   // 是典型的动作脚本/舞台调度模式，微信聊天中不自然。
   // 保留前 2 段能传达关键神态/动作，删除后续避免读起来像剧本。
-  const parenPattern = /[（(][^）)]*[）)]/g;
+  const parenPattern = /[（(][^（）()]*[）)]/g;
   const parenMatches = t.match(parenPattern);
   if (parenMatches && parenMatches.length > 2) {
     let count = 0;
@@ -486,7 +502,7 @@ function sanitizeVisibleReplyText(text) {
   // 单独出现地点（"在教室"）或单独环境（"风吹过"）不触发，避免误删正常描述。
   const scenePlaceWords = /窗外|玄关|门口|路边|站台|教室|练习室|片场|后台|舞台|公寓|客厅|房间|厨房|浴室|阳台|街道|路口/;
   const sceneEnvWords = /灯光|路灯|天色|阳光|风|雨|电车|车流|行人|人群|声音|广播|音乐/;
-  t = t.replace(/[（(][^）)]*[）)]/g, (match) => {
+  t = t.replace(/[（(][^（）()]*[）)]/g, (match) => {
     const inner = match.slice(1, -1);
     if (inner.length > 20 && scenePlaceWords.test(inner) && sceneEnvWords.test(inner)) {
       return "";

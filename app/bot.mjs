@@ -37,7 +37,7 @@ const LOG_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const INSTANCE_LOCK_FILE = dataPath("runtime", ".wechat-aibot.lock");
 
 // ─── 核心功能模块导入 ───────────────────────────────────────────
-import { hasInboundAttachment, loadPrompts, getChatStyle, formatLocalChatReality, expressionCapabilityPrompt } from "./lib/reply.mjs";
+import { hasInboundAttachment, loadPrompts, beijingISO } from "./lib/reply.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
 import { registerSessionRoutes } from "./lib/gui-sessions.mjs";
@@ -58,13 +58,17 @@ import { loadToken, saveToken, loginWithQr, sendMessage, apiPost } from "./lib/w
 import { loadMemoryDocument, loadWorldMemoryDocument } from "./lib/memory.mjs";
 import { loadAllEvents, loadRoleVisibleHistory } from "./lib/chat-history.mjs";
 import { getSceneConfig, emptyToolUsage, mergeToolUsage, sanitizeVisibleReplyText, normalizeLifeArcs, normalizeWorldState, applyWorldStatePatch } from "./lib/normalize.mjs";
+import { cleanupOldSessionFiles } from "./lib/claude-context.mjs";
 import { envWithProxy, commandExists, isApiConfigured, resolveApiConfig, CLAUDE, CODEX, LOGS_DIR } from "./lib/claude-runner.mjs";
 import { startBackendChat } from "./lib/backend-adapter.mjs";
-import { sessionProfile, saveRoleWorlds, loadRoleWorlds, setSceneMemory, getRoleWorld, ensureWorldSession, lifeArcPromptItems } from "./lib/world-state.mjs";
+import { sessionProfile, saveRoleWorlds, loadRoleWorlds, setSceneMemory, getRoleWorld, ensureWorldSession, resetWorldSession, activeWorldSessionIds, lifeArcPromptItems, applyLifeArcOps } from "./lib/world-state.mjs";
 import { loadProfiles, makeSession, saveSessions, loadSessions, ensureUser, activeSession, sessionById, nextSessionName } from "./lib/session-store.mjs";
 import { handleHelp, handleCC, handleCodex, handleAPI, handleNew, handleSwitch, handleRename, handleSessions, handleProfile, handleClose, handleStatus, handleCancel } from "./lib/commands.mjs";
 import { buildTurnBody, appendVisibleHistory, getSceneMemorySystemBlock, recentVisibleContext } from "./lib/prompts.mjs";
-import { generateSceneletForTurn, generateSingleActorReply, generateContinuityUpdateForTurn, buildSceneContextBlock, addFollowUpCandidates, recordChatHistory, sendFinalAssistantMessage, checkProactiveIntents, generateSceneMemory, batchUpdateMemory, runScheduleExtractor, replyPrefix } from "./lib/turn.mjs";
+import { generateSingleActorReply, generateContinuityUpdateForTurn, addFollowUpCandidates, recordChatHistory, sendFinalAssistantMessage, checkProactiveIntents, generateSceneMemory, batchUpdateMemory, runScheduleExtractor, replyPrefix } from "./lib/turn.mjs";
+import { runAll as runWorkEventGenerator } from "./lib/work-event-generator.mjs";
+import { shouldResetActorSession } from "./lib/context-pressure.mjs";
+import { repairCodexUsageFromSession } from "./lib/codex-session-usage.mjs";
 
 
 // 当前用户主目录
@@ -336,13 +340,96 @@ function makeStreamHandler(onProc, flushChars) {
     }
   };
 }
+
+async function resetActorSessionWithMemory({
+  ai,
+  userId,
+  sessionName,
+  styleState,
+  profile,
+  roleWorld,
+  actorSession,
+  decision,
+}) {
+  const sceneCfg = getSceneConfig();
+  const threshold = sceneCfg.turnResetThreshold || 30;
+  const actorTurnCount = actorSession?.turnCount || 0;
+  const startedAt = actorSession?.startedAt || "";
+  const startedMs = Date.parse(startedAt);
+  if (!Number.isFinite(startedMs)) {
+    throw new Error(`${ai} Actor reset blocked: session start time is missing`);
+  }
+
+  const summary = await generateSceneMemory({
+    ai,
+    userId,
+    sess: styleState,
+    profile,
+    roleWorld,
+    maxTurns: actorTurnCount || threshold,
+    since: startedAt,
+  });
+  if (!String(summary || "").trim()) {
+    throw new Error(`${ai} Actor reset blocked: scene memory generation returned empty`);
+  }
+
+  const allEvents = await loadAllEvents();
+  const userMessages = allEvents
+    .filter(event => {
+      if (event.userId !== userId || event.profile !== profile || event.role !== "user" || !event.text) return false;
+      const eventMs = Date.parse(event.timestamp || "");
+      return Number.isFinite(eventMs) && eventMs >= startedMs;
+    })
+    .map(event => event.text);
+  await batchUpdateMemory({ ai, userId, userMessages, profile });
+
+  const resetAt = beijingISO();
+  const resetReason = decision.reason === "context"
+    ? `auto-reset at ${Math.round(decision.ratio * 1000) / 10}% context (${decision.tokens}/${decision.max})`
+    : `auto-reset after ${actorTurnCount} Actor calls`;
+  const actorSnapshot = structuredClone(actorSession);
+  const previousSceneMemory = roleWorld._sceneMemory?.[ai] || "";
+  const previousSceneMemoryAt = roleWorld._sceneMemoryAt?.[ai] || null;
+  setSceneMemory(roleWorld, summary, ai);
+  resetWorldSession(roleWorld, ai, resetReason, resetAt);
+  if (!saveRoleWorlds()) {
+    roleWorld._worldSessions[ai] = actorSnapshot;
+    roleWorld._sceneMemory[ai] = previousSceneMemory;
+    roleWorld._sceneMemoryAt[ai] = previousSceneMemoryAt;
+    throw new Error(`${ai} Actor reset blocked: failed to persist the new session`);
+  }
+  styleState._userMessageLog = [];
+  log("↻", `[${sessionName}] Actor reset: ${resetReason}`);
+}
+
+async function resetActorBeforeTurnIfNeeded({ ai, userId, sessionName, styleState, profile, roleWorld }) {
+  const actorSession = roleWorld?._worldSessions?.[ai];
+  if (!actorSession) return;
+  const sceneCfg = getSceneConfig();
+  const usage = ai === "codex"
+    ? repairCodexUsageFromSession(actorSession.lastUsage, actorSession.lastUsage?.session_id || actorSession.sid)
+    : actorSession.lastUsage;
+  const decision = shouldResetActorSession({
+    usage,
+    backend: ai,
+    turnCount: actorSession.turnCount || 0,
+    turnThreshold: sceneCfg.turnResetThreshold || 30,
+    ratioThreshold: sceneCfg.contextResetRatio ?? 0.5,
+  });
+  if (decision.shouldReset) {
+    await resetActorSessionWithMemory({
+      ai, userId, sessionName, styleState, profile, roleWorld, actorSession, decision,
+    });
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // prepareTurnContext() —— 阶段 0+1：准备本轮对话上下文
 // ═══════════════════════════════════════════════════════════════════
 // 用途：
 //   1. 解析 profile/turnProfile/isProfileChat
 //   2. 加载 memoryPrompt / roleWorld
-//   3. 调用 generateSceneletForTurn 生成 scenelet
+//   3. 调用 generateSingleActorReply 生成 scenelet 与可见回复
 //   4. 构建本轮日志基础设施
 // 输入：ai/userId/sid/sessionName/body - 本轮基础信息
 //       styleState - 会话状态对象
@@ -382,27 +469,21 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
   let sceneletResult = null;
   let sceneletError = null;
   let ragUsage = null; // 本轮 RAG 检索统计（在 HW 调用中注入）
-  const runtimePolicy = isProfileChat ? loadPrompts(turnProfile).runtimePolicy : { actorMode: "two_stage" };
-  // 角色扮演模式下生成场景小剧场 / 单 Actor 回复
+  const runtimePolicy = isProfileChat ? loadPrompts(turnProfile).runtimePolicy : { actorMode: "single" };
+  // 角色扮演模式下生成单 Actor 回复（一次调用同时产出 inner_scenelet 与 visible_reply）
   if (isProfileChat) {
     try {
+      await resetActorBeforeTurnIfNeeded({
+        ai, userId, sessionName, styleState, profile: turnProfile, roleWorld,
+      });
       // RAG 知识库查询：在 Actor 调用之前执行，结果注入 prompt
       const ragEligible = Boolean(RAG_ENABLED && !hasInboundAttachment(body) && shouldUseRagForTurn(body, turnProfile));
       const ragContext = ragEligible ? queryRag(body, turnProfile) : "";
       ragUsage = { eligible: ragEligible, used: Boolean(ragContext), chars: ragContext.length };
-      // 按 runtimePolicy.actorMode 分发到单 Actor 或双阶段路径
-      if (runtimePolicy.actorMode === "single") {
-        sceneletResult = await generateSingleActorReply({
-          ai, userId, sess: styleState, profile: turnProfile,
-          userBody: body, memoryPrompt, ragContext, runtimePolicy,
-        });
-      } else {
-        sceneletResult = await generateSceneletForTurn({
-          ai, userId, sess: styleState, profile: turnProfile,
-          userBody: body, memoryPrompt, ragContext,
-          maxVisibleTurns: runtimePolicy.visibleContextTurns || 0,
-        });
-      }
+      sceneletResult = await generateSingleActorReply({
+        ai, userId, sess: styleState, profile: turnProfile,
+        userBody: body, memoryPrompt, ragContext, runtimePolicy,
+      });
     } catch (e) {
       sceneletError = e.message;
       log("⚠", `[${sessionName}] scenelet fail: ${e.message}`);
@@ -410,7 +491,7 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
   }
 
   // 构建日志条目基础信息
-  const logEntry = { ts: new Date().toISOString(), ai, userId, sessionName, sid, firstTurn: styleState._firstTurn, isProfileChat, profile: turnProfile || "默认", bodyChars: String(body || "").length, sceneletChars: sceneletResult?.innerScenelet?.length || 0, sceneletError: sceneletError || null };
+  const logEntry = { ts: beijingISO(), ai, userId, sessionName, sid, firstTurn: styleState._firstTurn, isProfileChat, profile: turnProfile || "默认", bodyChars: String(body || "").length, sceneletChars: sceneletResult?.innerScenelet?.length || 0, sceneletError: sceneletError || null };
   const safeName = sessionName.replace(/[<>:"/\\|?*]/g, "_");  // 文件系统安全的名称
   const logFile = path.join(LOGS_DIR, `${safeName}-${ai}.jsonl`);   // 结构化日志
   const txtLogFile = path.join(LOGS_DIR, `${safeName}-${ai}.txt`);  // 人类可读日志
@@ -421,7 +502,7 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
   }
   // 写入人类可读的文本日志
   function writeTxtLog(label, content) {
-    try { if (!content) return; if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true }); fs.appendFileSync(txtLogFile, `\n=== ${label} [${new Date().toISOString()}] ===\n` + String(content).trim() + "\n", "utf-8"); } catch {}
+    try { if (!content) return; if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true }); fs.appendFileSync(txtLogFile, `\n=== ${label} [${beijingISO()}] ===\n` + String(content).trim() + "\n", "utf-8"); } catch {}
   }
 
   // 记录用户原始消息和上下文到日志
@@ -442,7 +523,7 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
 // ═══════════════════════════════════════════════════════════════════
 // 用途：
 //   1. RAG 知识库查询
-//   2. 构建 stableStyle / sceneContext / sceneMemoryBlock / turnBody
+//   2. 构建非角色聊天的 turnBody
 //   3. 选择 AI 后端（api / cc / codex）执行流式推理，使用 makeStreamHandler 管理缓冲
 //   4. 发送最终回复给用户
 //   5. 错误捕获与用户通知
@@ -450,14 +531,14 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
 //       onProc - 输出回调；styleState - 会话状态；ctx - 上下文对象（来自 prepareTurnContext）
 // 输出：Object { turnSucceeded, assistantFullText, toolUsage, lastUsage }
 async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextToken, firstTurn, onProc, styleState, ctx) {
-  const { isProfileChat, turnProfile, memoryPrompt, roleWorld, sceneletResult, prefix, appendLog, writeTxtLog, ragUsage: ctxRagUsage } = ctx;
+  const { isProfileChat, turnProfile, memoryPrompt, roleWorld, sceneletResult, sceneletError, prefix, appendLog, writeTxtLog, ragUsage: ctxRagUsage } = ctx;
   let turnSucceeded = false;           // 本轮是否成功完成
   let assistantFullText = "";          // AI 生成的完整回复文本
   let toolUsage = emptyToolUsage();    // 本轮工具使用统计
   let ragUsage = ctxRagUsage;          // RAG 检索统计（来自 prepareTurnContext，已注入 HW）
   let lastUsage = null;                // 最后一次 API 用量数据
   let activeSid = sid;                 // CC 会话失效并恢复时更新为新 SID
-  const streamStartedAt = new Date().toISOString();  // 流式处理开始时间
+  const streamStartedAt = beijingISO();  // 流式处理开始时间
 
   try {
     const runtimePolicy = loadPrompts(turnProfile).runtimePolicy;
@@ -466,7 +547,7 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
       assistantFullText = sceneletResult?.innerScenelet?.trim() || "";
       if (!assistantFullText) throw new Error("scenelet-only role returned no valid inner_scenelet");
       toolUsage = mergeToolUsage(sceneletResult?.toolUsage);
-      const sent = await sendFinalAssistantMessage(userId, assistantFullText, contextToken, prefix);
+      const sent = await sendFinalAssistantMessage(userId, assistantFullText, contextToken, prefix, true);
       if (!sent) throw new Error("failed to send complete reply to WeChat");
       turnSucceeded = true;
       appendLog({
@@ -482,11 +563,6 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
     // ═══════════ 单 Actor 架构 ═══════════
     // visibleReply 已在 generateSingleActorReply 中与 inner_scenelet 同时生成，
     // 此处直接发送，不再调用第二个回复模型。
-    // 与下方双阶段路径的关键差异：
-    //   - 双阶段：scenelet → buildSceneContextBlock → 第二个模型 → assistantFullText
-    //   - 单 Actor：sceneletResult.visibleReply 直接作为 assistantFullText
-    // 这消除了第二个模型造成的"内心→文字"信息损失，
-    // 但要求 Actor 模型同时具备心理模拟和文字表达能力。
     if (isProfileChat && runtimePolicy.actorMode === "single" && sceneletResult?.visibleReply) {
       const t = sanitizeVisibleReplyText(sceneletResult.visibleReply).trim();
       if (!t) throw new Error("single actor returned empty visible_reply after sanitization");
@@ -504,35 +580,28 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
       });
       const replyBytes = Buffer.byteLength(t, "utf-8");
       log(">", `[${sessionName}] single-actor (${replyBytes}B) ${t.slice(0, 60).replace(/\n/g, " ")}`);
-      // 提前返回：绕过下方的双阶段路径（stableStyle / sceneContext / turnBody 构建 + 第二个模型调用）
+      // 提前返回：绕过下方的非角色聊天路径（turnBody 构建 + 流式发送）
       return { turnSucceeded, assistantFullText, toolUsage, ragUsage, lastUsage };
     }
 
-    // 双阶段架构的稳定风格提示（仅旧路径执行到这里）
-    const stableStyle = isProfileChat ? expressionCapabilityPrompt(turnProfile) : "";
-    // 构建场景上下文块
-    const ctxParts = [];
-    if (sceneletResult) ctxParts.push(buildSceneContextBlock(styleState, sceneletResult));
-    const sceneContext = ctxParts.join("\n\n---\n\n");
-    // 场景记忆块（仅角色扮演模式的首轮）
-    const sceneMemoryBlock = (isProfileChat && firstTurn) ? getSceneMemorySystemBlock(roleWorld, ai, turnProfile) : "";
-    // 组装发送给 AI 的完整消息体
-    const turnBody = await buildTurnBody(body, sceneContext, recentVisibleContext(styleState), sceneMemoryBlock, turnProfile);
+    // 单 Actor 角色必须由 Actor 产出最终回复。Actor 失败时保留原始错误，
+    // 不得悄悄落入非角色聊天路径再调用第二个模型。
+    if (isProfileChat && runtimePolicy.actorMode === "single") {
+      throw new Error(sceneletError || "single actor returned no valid inner_scenelet and visible_reply");
+    }
+
+    // 非角色聊天路径：组装消息体并发送
+    const turnBody = await buildTurnBody(body, "", recentVisibleContext(styleState), "", turnProfile);
 
     writeTxtLog("TURN BODY", turnBody);
-    if (stableStyle) writeTxtLog("STABLE STYLE", stableStyle);
 
-    const FLUSH_CHARS = isProfileChat ? 800 : 300;  // 角色扮演模式批处理更多字符以减少消息碎片
+    const FLUSH_CHARS = 300;
 
-    // 创建流式处理器（管理 textBuf + flush 节流，消除 CC/Codex 重复代码）
+    // 创建流式处理器（管理 textBuf + flush 节流）
     const streamHandler = makeStreamHandler(onProc, FLUSH_CHARS);
 
     const apiSystemParts = [];
-    if (turnProfile && profileTemplates[turnProfile]) apiSystemParts.push(profileTemplates[turnProfile]);
     if (memoryPrompt) apiSystemParts.push(memoryPrompt);
-    if (isProfileChat && getChatStyle(turnProfile)) apiSystemParts.push(getChatStyle(turnProfile));
-    if (isProfileChat && formatLocalChatReality(new Date(), turnProfile)) apiSystemParts.push(formatLocalChatReality(new Date(), turnProfile));
-    if (stableStyle) apiSystemParts.push(stableStyle);
     if (ai === "api" && !styleState._apiMessages) styleState._apiMessages = [];
     const apiMessages = ai === "api" ? [
       { role: "system", content: apiSystemParts.join("\n\n---\n\n") },
@@ -546,7 +615,7 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
       sessionName,
       body: turnBody,
       firstTurn: isFirstTurn,
-      stylePrompt: stableStyle,
+      stylePrompt: "",
       memoryPrompt,
       profile: turnProfile,
       apiMessages,
@@ -567,9 +636,12 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
       && !streamResult?.text
       && /No conversation found with session ID/i.test(streamResult?.stderr || "");
     if (missingCcSession) {
-      throw new Error("CC conversation is missing; reset the session before retrying");
+      throw new Error(`CC session ${activeSid} is missing; reset is required before opening a new session`);
     }
     if (!assistantFullText && streamResult?.text) assistantFullText = streamResult.text;
+    if (!firstTurn && streamResult?.threadId && streamResult.threadId !== activeSid) {
+      throw new Error(`backend changed SID unexpectedly (${activeSid} -> ${streamResult.threadId}); reset is required`);
+    }
     if (streamResult?.threadId && streamResult.threadId !== styleState.sid) styleState.sid = streamResult.threadId;
     if (streamResult?.usage) {
       lastUsage = {
@@ -610,12 +682,12 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
   } catch (e) {
     // 错误处理：记录失败、通知用户
     log("⚠", `[${sessionName}] turn failed: ${e.message}`);
-    styleState._lastFailedTurn = { body, timestamp: new Date().toISOString(), reason: e.message?.slice(0, 500), sid: activeSid };
-    await sendMessage(userId, `[系统提示] 回复失败：${e.message?.slice(0, 150)}`, contextToken).catch(() => {});
+    styleState._lastFailedTurn = { body, timestamp: beijingISO(), reason: e.message?.slice(0, 500), sid: activeSid };
+    await sendMessage(userId, `[SYSTEM] Reply failed: ${e.message?.slice(0, 150)}`, contextToken).catch(() => {});
     appendLog({ error: e.message?.slice(0, 500) });
 
     // 即使发送失败，也保留已生成的内容和 scenelet 写入历史
-    const failAt = new Date().toISOString();
+    const failAt = beijingISO();
     const failText = assistantFullText ? sanitizeVisibleReplyText(assistantFullText).trim() : "";
     if (isProfileChat && (failText || ctx.sceneletResult?.innerScenelet)) {
       appendVisibleHistory(styleState, "user", body, "chat", failAt);
@@ -655,11 +727,13 @@ async function finalizeTurnSuccess(params) {
     toolUsage, ragUsage, lastUsage, appendLog, writeTxtLog } = params;
 
   // 角色扮演模式下对回复文本做可见性清理（去除内部标记等）
+  // scenelet-only 角色跳过清洗：inner_scenelet 本身就是精心设计的可见输出，括号内的叙事细节是风格而非泄漏
+  const useSceneletAsReply = isProfileChat && loadPrompts(turnProfile).runtimePolicy.visibleReplySource === "scenelet";
   let cleanText = assistantFullText;
-  if (isProfileChat) cleanText = sanitizeVisibleReplyText(cleanText);
+  if (isProfileChat && !useSceneletAsReply) cleanText = sanitizeVisibleReplyText(cleanText);
 
   // 更新会话状态
-  styleState._lastAssistantAt = new Date().toISOString();
+  styleState._lastAssistantAt = beijingISO();
   styleState._lastContextToken = contextToken;
   styleState._lastFailedTurn = null;
   styleState._firstTurn = false;
@@ -671,8 +745,8 @@ async function finalizeTurnSuccess(params) {
   }
 
   // 记录对话历史（用户消息和 AI 回复）
-  const userAt = new Date().toISOString();
-  const assistantAt = new Date().toISOString();
+  const userAt = beijingISO();
+  const assistantAt = beijingISO();
   appendVisibleHistory(styleState, "user", body, "chat", userAt);
   appendVisibleHistory(styleState, "assistant", cleanText, "chat", assistantAt);
 
@@ -742,6 +816,15 @@ async function finalizeTurnSuccess(params) {
             await addFollowUpCandidates(styleState, { followUpCandidates: update.followUpCandidates }, body, roleWorld)
               .catch(e => { log("⚠", `[${sessionName}] continuity follow_up fail: ${e.message}`); });
           }
+          // ④ 应用 life_arc_updates：本轮对话推进了进展的 life_arc 的 progress_note 增量更新
+          if (update.lifeArcUpdates?.length) {
+            applyLifeArcOps(roleWorld, update.lifeArcUpdates.map(u => ({
+              op: u.op || "update",
+              id: u.id,
+              progress_note: u.progress_note || u.progressNote || "",
+            })));
+          }
+          // ⑤ 排空预生成器队列：将独立 setInterval 生成的日程统一 apply（避免并发写冲突）
           saveRoleWorlds();
         }
       } catch (e) { log("⚠", `[${sessionName}] continuity update fail: ${e.message}`); }
@@ -765,48 +848,33 @@ async function finalizeTurnSuccess(params) {
       }
     } catch (e) { log("⚠", `[${sessionName}] schedule extract fail: ${e.message}`); }
 
-    // 回合计数器：达到阈值时自动触发场景重置
+    // 可见会话轮次仅用于会话状态展示；Actor 自动 reset 跟随共享主 session 的调用次数。
     styleState._turnCount = (styleState._turnCount || 0) + 1;
-    const threshold = getSceneConfig().turnResetThreshold || 8;
-    if (styleState._turnCount >= threshold) {
-      try {
-        // 批量更新用户记忆
-        const userMsgLog = styleState._userMessageLog || [];
-        await batchUpdateMemory({ ai, userId, userMessages: userMsgLog, profile: turnProfile });
-        styleState._userMessageLog = [];
-        // 生成新场景记忆摘要
-        const summary = await generateSceneMemory({ ai, userId, sess: styleState, profile: turnProfile, roleWorld });
-        if (summary) {
-          setSceneMemory(roleWorld, summary, ai);
-          // 重置会话 SID、首轮标志、回合计数器
-          styleState.sid = uuid();
-          styleState._firstTurn = true;
-          styleState._turnCount = 0;
-          styleState._lastUsage = null;
-          // 更新世界会话信息
-          const resetAt = new Date().toISOString();
-          ensureWorldSession(roleWorld, ai);
-          const hw = roleWorld._worldSessions?.[ai];
-          if (hw) {
-            hw.sid = uuid();
-            hw.firstTurn = true;
-            hw.startedAt = resetAt;
-            hw.resetReason = `auto-reset after ${threshold} turns`;
-            hw.turnCount = 0;
-            hw.lastUsage = null;
-          }
-          // 保留最近的 8 条可见历史，避免上下文过长
-          styleState._visibleHistory = styleState._visibleHistory.slice(-8);
-          // 裁剪 API 上下文到最近 8 轮（每轮 user+assistant 共 2 条）
-          if (styleState._apiMessages?.length) {
-            styleState._apiMessages = styleState._apiMessages.slice(-16);
-          }
-          saveRoleWorlds();
-          log("↻", `[${sessionName}] reset after ${threshold} turns`);
-        }
-      } catch (e) {
-        log("⚠", `[${sessionName}] reset fail: ${e.message}`);
-      }
+    const sceneCfg = getSceneConfig();
+    const threshold = sceneCfg.turnResetThreshold || 30;
+    const actorSession = ensureWorldSession(roleWorld, ai);
+    const actorTurnCount = actorSession?.turnCount || 0;
+    const actorUsage = ai === "codex"
+      ? repairCodexUsageFromSession(actorSession?.lastUsage, actorSession?.lastUsage?.session_id || actorSession?.sid)
+      : actorSession?.lastUsage;
+    const resetDecision = shouldResetActorSession({
+      usage: actorUsage,
+      backend: ai,
+      turnCount: actorTurnCount,
+      turnThreshold: threshold,
+      ratioThreshold: sceneCfg.contextResetRatio ?? 0.5,
+    });
+    if (resetDecision.shouldReset) {
+      await resetActorSessionWithMemory({
+        ai,
+        userId,
+        sessionName,
+        styleState,
+        profile: turnProfile,
+        roleWorld,
+        actorSession,
+        decision: resetDecision,
+      });
     }
   }
 }
@@ -903,7 +971,7 @@ function queueTurn(messageAI, userId, body, ctx, sessionId = null) {
   const sess = sessionId ? sessionById(ai, userId, sessionId) : activeSession(userId, ai);
   if (!sess) return false;
   log("+", `[${sess.name}] queued: ${body.slice(0, 80)}`);
-  sess._lastUserAt = new Date().toISOString();
+  sess._lastUserAt = beijingISO();
   // 将消息包装后加入队列
   sess.queue.push({ body, contextToken: ctx.context_token || ctx.contextToken, onProc: ctx.onProc || (() => {}) });
   // 如果循环尚未运行，立即启动
@@ -1290,7 +1358,6 @@ async function main() {
   startupCheck();                           // 2. 依赖自检
   cleanupOldLogs();                         // 3. 立即执行一次日志清理
   setInterval(cleanupOldLogs, LOG_CLEANUP_INTERVAL_MS).unref(); // 4. 定时日志清理（.unref() 使定时器不阻止进程退出）
-
   // 从 token 文件中恢复上次使用的 AI 后端（CC/Codex/API）
   try {
     if (fs.existsSync(TOKEN_FILE)) {
@@ -1304,6 +1371,13 @@ async function main() {
   loadProfiles();      // 加载角色模板
   loadSessions();      // 加载会话数据（从持久化存储）
   loadRoleWorlds();    // 加载角色世界状态
+  const cleanupSessions = () => cleanupOldSessionFiles({ protectedSessionIds: activeWorldSessionIds() });
+  const result = cleanupSessions();
+  if (result.deleted > 0) log("🗑", `session cleanup: ${result.deleted} files, freed ${result.freedMB} MB`);
+  setInterval(() => {
+    const r = cleanupSessions();
+    if (r.deleted > 0) log("🗑", `session cleanup: ${r.deleted} files, freed ${r.freedMB} MB`);
+  }, 24 * 60 * 60 * 1000).unref();
 
   // 以 API 模式启动时，为所有活跃会话加载历史上下文
   if (activeAI === "api") {
@@ -1357,6 +1431,11 @@ async function main() {
   // 启动主动意图检查定时器（每 15 秒检测是否需要主动向用户发送消息）
   const PROACTIVE_TIMER_MS = 15_000;
   setInterval(() => { checkProactiveIntents().catch(e => log("⚠️", `proactive check: ${e.message}`)); }, PROACTIVE_TIMER_MS).unref();
+  // 启动日程预生成器定时器（每 60 秒检查各启用角色是否需要生成工作日程）
+  const WORK_EVENT_GEN_INTERVAL_MS = 60_000;
+  const runWorkEventTick = () => runWorkEventGenerator().catch(e => log("⚠️", `work event gen: ${e.message}`));
+  runWorkEventTick();
+  setInterval(runWorkEventTick, WORK_EVENT_GEN_INTERVAL_MS).unref();
   // 进入主消息循环（阻塞在此，永不返回）
   await mainLoop();
 }

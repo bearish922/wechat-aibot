@@ -1,8 +1,11 @@
 import crypto from "node:crypto";
 import { addRoute } from "./server.mjs";
 import { sessions, activeAI, profileTemplates } from "./state.mjs";
-import { generateSceneMemory } from "./turn.mjs";
-import { getRoleWorld, setSceneMemory } from "./world-state.mjs";
+import { generateSceneMemory, batchUpdateMemory } from "./turn.mjs";
+import { getRoleWorld, setSceneMemory, resetWorldSession } from "./world-state.mjs";
+import { loadAllEvents } from "./chat-history.mjs";
+import { getSceneConfig } from "./normalize.mjs";
+import { beijingISO } from "./reply.mjs";
 
 function worldsMap() {
   return globalThis.__wechatRoleWorlds;
@@ -10,8 +13,9 @@ function worldsMap() {
 
 function saveWorlds() {
   if (typeof globalThis.__wechatSaveRoleWorlds === "function") {
-    globalThis.__wechatSaveRoleWorlds();
+    return globalThis.__wechatSaveRoleWorlds() !== false;
   }
+  return false;
 }
 
 function roleKey(profile) {
@@ -118,47 +122,111 @@ export function registerWorldRoutes() {
 
   addRoute("POST", "/api/world/reset", async ({ body }) => {
     const profile = roleKey(body?.profile);
-    const now = new Date().toISOString();
+    const now = beijingISO();
     const roleWorld = getRoleWorld(profile);
-    const activeSessions = Object.entries(sessions).flatMap(([ai, map]) => activeSessionEntriesForProfile(map, profile, ai));
+    const activeSessions = activeSessionEntriesForProfile(sessions[activeAI], profile, activeAI);
+    if (!activeSessions.length) throw new Error(`No active session found for ${profile}`);
 
-    // Step 1: Generate scene memory from accumulated context (before resetting state)
-    let generated = false;
-    const preferred = activeSessions.filter(entry => entry.ai === activeAI);
-    for (const { ai, userId, session } of (preferred.length ? preferred : activeSessions)) {
-      try {
-        const summary = await generateSceneMemory({ ai, userId, sess: session, profile, roleWorld });
-        if (summary) {
-          setSceneMemory(roleWorld, summary, ai);
-          generated = true;
-          break;
-        }
-      } catch (e) {
-        console.error("[gui] scene memory generation failed:", e.message);
+    const resetEntries = [];
+    for (const entry of activeSessions) {
+      const worldSession = roleWorld?._worldSessions?.[activeAI];
+      if (!worldSession?.sid) continue;
+      if (!Number.isFinite(Date.parse(worldSession.startedAt || ""))) {
+        throw new Error(`${activeAI} Actor reset blocked: session start time is missing`);
+      }
+      resetEntries.push({ ...entry, worldSession });
+    }
+    if (!resetEntries.length) throw new Error(`No initialized Actor session found for ${profile}`);
+
+    // Generate scene memory first. A failed summary must leave the SID untouched.
+    const summaries = new Map();
+    for (const { ai, userId, session, worldSession } of resetEntries) {
+      const summary = await generateSceneMemory({
+        ai,
+        userId,
+        sess: session,
+        profile,
+        roleWorld,
+        maxTurns: worldSession.turnCount || getSceneConfig().turnResetThreshold,
+        since: worldSession.startedAt,
+      });
+      if (!String(summary || "").trim()) {
+        throw new Error(`${ai} Actor reset blocked: scene memory generation returned empty`);
+      }
+      summaries.set(ai, summary);
+    }
+
+    // Update long-term memory from the complete persisted interval, grouped by user.
+    const allEvents = await loadAllEvents();
+    const users = new Map();
+    for (const entry of resetEntries) {
+      const startedMs = Date.parse(entry.worldSession.startedAt);
+      const current = users.get(entry.userId);
+      if (!current || startedMs < current.startedMs) {
+        users.set(entry.userId, { ai: entry.ai, startedMs });
       }
     }
-
-    // Step 2: Reset session state
-    for (const { session } of activeSessions) {
-      session.sid = crypto.randomUUID();
-      session._firstTurn = true;
-      session._turnCount = 0;
-      session._lastUsage = null;
+    for (const [userId, scope] of users) {
+      const userMessages = allEvents
+        .filter(event => {
+          if (event.userId !== userId || event.profile !== profile || event.role !== "user" || !event.text) return false;
+          const eventMs = Date.parse(event.timestamp || "");
+          return Number.isFinite(eventMs) && eventMs >= scope.startedMs;
+        })
+        .map(event => event.text);
+      await batchUpdateMemory({ ai: scope.ai, userId, userMessages, profile });
     }
 
-    for (const [backend, worldSession] of Object.entries(roleWorld?._worldSessions || {})) {
-      if (!activeSessions.some(e => e.ai === backend)) continue;
-      worldSession.sid = crypto.randomUUID();
-      worldSession.firstTurn = true;
-      worldSession.startedAt = now;
-      worldSession.resetReason = "manual from GUI";
-      worldSession.turnCount = 0;
-      worldSession.lastUsage = null;
+    const worldSnapshots = new Map();
+    let worldSnapshotSaved = false;
+    if (resetEntries.length > 0) {
+      const { ai, worldSession } = resetEntries[0];
+      worldSnapshots.set(ai, structuredClone(worldSession));
+      worldSnapshotSaved = true;
+    }
+    const sceneMemorySnapshot = structuredClone(roleWorld._sceneMemory || {});
+    const sceneMemoryAtSnapshot = structuredClone(roleWorld._sceneMemoryAt || {});
+    const sessionSnapshots = activeSessions.map(({ session }) => ({
+      session,
+      sid: session.sid,
+      firstTurn: session._firstTurn,
+      turnCount: session._turnCount,
+      lastUsage: session._lastUsage,
+      userMessageLog: session._userMessageLog,
+    }));
+
+    try {
+      if (worldSnapshotSaved) {
+        const { ai } = resetEntries[0];
+        setSceneMemory(roleWorld, summaries.get(ai), ai);
+        resetWorldSession(roleWorld, ai, "manual from GUI", now);
+      }
+      for (const { session } of activeSessions) {
+        session.sid = crypto.randomUUID();
+        session._firstTurn = true;
+        session._turnCount = 0;
+        session._lastUsage = null;
+        session._userMessageLog = [];
+      }
+      if (!saveWorlds()) throw new Error("failed to persist Actor sessions");
+      saveSessions();
+    } catch (error) {
+      for (const [ai, snapshot] of worldSnapshots) roleWorld._worldSessions[ai] = snapshot;
+      roleWorld._sceneMemory = sceneMemorySnapshot;
+      roleWorld._sceneMemoryAt = sceneMemoryAtSnapshot;
+      for (const snapshot of sessionSnapshots) {
+        snapshot.session.sid = snapshot.sid;
+        snapshot.session._firstTurn = snapshot.firstTurn;
+        snapshot.session._turnCount = snapshot.turnCount;
+        snapshot.session._lastUsage = snapshot.lastUsage;
+        snapshot.session._userMessageLog = snapshot.userMessageLog;
+      }
+      saveWorlds();
+      saveSessions();
+      throw error;
     }
 
-    saveSessions();
-    saveWorlds();
-    return { ok: true, sceneMemoryGenerated: generated };
+    return { ok: true, sceneMemoryGenerated: true };
   });
 
 }

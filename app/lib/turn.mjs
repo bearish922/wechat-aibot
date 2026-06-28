@@ -1,11 +1,12 @@
-﻿import { uuid, log, sleep } from "./utils.mjs";
+﻿import fs from "node:fs";
+import { uuid, log, sleep } from "./utils.mjs";
 import { sessions, activeAI, profileTemplates, pendingInputs } from "./state.mjs";
-import { SCENELET_BARE } from "./claude-runner.mjs";
+import { SCENELET_BARE, findExactSessionFile } from "./claude-runner.mjs";
 import { backendModel, runBackendStructured } from "./backend-adapter.mjs";
-import { loadPrompts, MAX_REPLY_LEN, splitText, splitSocialReply } from "./reply.mjs";
+import { loadPrompts, MAX_REPLY_LEN, splitText, splitSocialReply, beijingISO } from "./reply.mjs";
 import { getSceneConfig, takeLastRounds, normalizeProactiveIntents, normalizeToolUsage, mergeToolUsage, normalizeWorldState, applyWorldStatePatch, normalizeLifeArcs, normalizeSceneletResult, normalizeRawProactiveCandidate, normalizeScheduleCandidates, normalizeProactiveDecision, sanitizeVisibleReplyText, proactiveSentToday, lastConversationActivityMs } from "./normalize.mjs";
-import { sessionProfile, roleWorldKey, ensureWorldSession, getRoleWorld, saveRoleWorlds, applyLifeArcOps, lifeArcPromptItems } from "./world-state.mjs";
-import { getSceneMemorySystemBlock, buildSceneMemorySummaryPrompt, buildHiddenWorldSystemPrompt, buildHiddenWorldPrompt, buildSingleActorSystemPrompt, buildSingleActorDynamicPrompt, projectActorScene, hasWeatherKeywords, buildProactivePrompt, buildScheduleFinalizationPrompt, recentVisibleContext, appendVisibleHistory, currentTimeContext } from "./prompts.mjs";
+import { sessionProfile, roleWorldKey, initializeWorldSession, ensureWorldSession, getRoleWorld, saveRoleWorlds, applyLifeArcOps, lifeArcPromptItems } from "./world-state.mjs";
+import { getSceneMemorySystemBlock, buildSceneMemorySummaryPrompt, buildSingleActorSystemPrompt, buildSingleActorDynamicPrompt, hasWeatherKeywords, buildProactivePrompt, buildScheduleFinalizationPrompt, recentVisibleContext, appendVisibleHistory, currentTimeContext } from "./prompts.mjs";
 import { isMemoryEnabled, shouldRunMemoryWriter, loadMemoryDocument, updateMemoryDocument } from "./memory.mjs";
 import { appendChatEvent, loadAllEvents } from "./chat-history.mjs";
 import { sendMessage } from "./wechat.mjs";
@@ -14,115 +15,30 @@ import { sendMessage } from "./wechat.mjs";
 // 上次主动意图检查的时间戳（毫秒），用于控制检查频率
 let lastProactiveCheckAt = 0;
 
-// ─── orchestration ───────────────────────────────────────────
-// 核心编排函数：为本轮对话生成隐藏世界层的中间叙事（inner_scenelet）。
-// 该 scenelet 是 AI 角色的"内心独白"，后续注入主回复驱动最终回复的生成。
-//
-// @param {object} params
-//   userId - 用户微信 ID
-//   sess - 当前会话对象
-//   profile - 当前角色的 profile 名称
-//   userBody - 用户发送的消息文本
-//   memoryPrompt - 记忆文档内容注入的提示词片段
-// @returns {object|null} 标准化后的 scenelet 结果对象，包含 innerScenelet、worldStatePatch 等字段；失败返回 null
-export async function generateSceneletForTurn({ ai, userId, sess, profile, userBody, memoryPrompt, ragContext = "", maxVisibleTurns = 0 }) {
-  // 如果 profile 无效或未注册，跳过
-  if (!profile || !profileTemplates[profile]) return null;
-  // 获取角色的世界状态对象
-  const roleWorld = getRoleWorld(profile);
-  // 确保当前 profile 有一个活跃的 world session，并返回其引用
-  const world = ensureWorldSession(roleWorld, ai);
-  // 构建发送给隐藏世界模型的提示词
-  const prompt = await buildHiddenWorldPrompt({
-    userId,
-    sessionName: sess.name,
-    profile,
-    userBody,
-    lifeArcs: lifeArcPromptItems(roleWorld),
-    visibleContext: recentVisibleContext(sess, maxVisibleTurns),
-    memoryPrompt,
-    worldState: normalizeWorldState(roleWorld._worldState),
-    // 带入待处理的主动意图，数量受配置上限约束
-    proactiveIntents: normalizeProactiveIntents(roleWorld._proactiveIntents).filter(i => i.status === "pending").slice(-getSceneConfig().hiddenWorldMaxPendingIntents),
-    worldSession: world,
-    ragContext,
-  });
-  // 仅在 world session 的首轮带入场景记忆系统块
-  const sceneMemoryBlock = world.firstTurn || ai === "api" ? getSceneMemorySystemBlock(roleWorld, ai, profile) : "";
-  // 调用隐藏世界模型（首次尝试）
-  let raw = await runBackendStructured(prompt, {
-    backend: ai,
-    label: "hidden_world",
-    bare: SCENELET_BARE,
-    persist: true,
-    sessionName: `hidden-world-${roleWorldKey(profile)}`,
-    sessionId: world.sid,
-    firstTurn: world.firstTurn,
-    model: world.model || backendModel(ai),
-    systemPrompt: buildHiddenWorldSystemPrompt(profile, sceneMemoryBlock, memoryPrompt),
-    profile,
-  });
-  let result = normalizeSceneletResult(raw);
-  const firstAttemptToolUsage = result?.toolUsage;
-  // 隐藏世界调用失败或只返回 thinking、没有有效 inner_scenelet：
-  // 在同一个 world session 内重试。retry 不能丢弃隐形上下文或伪装成 reset。
-  if (!result?.innerScenelet) {
-    raw = await runBackendStructured(prompt, {
-      backend: ai,
-      label: "hidden_world_retry",
-      bare: SCENELET_BARE,
-      persist: true,
-      sessionName: `hidden-world-${roleWorldKey(profile)}`,
-      sessionId: world.sid,
-      // 首次尝试已经占用了该 session；重试必须 resume 同一个 ID。
-      firstTurn: false,
-      model: world.model || backendModel(ai),
-      systemPrompt: buildHiddenWorldSystemPrompt(profile, sceneMemoryBlock, memoryPrompt),
-      profile,
-    });
-    result = normalizeSceneletResult(raw);
-    if (result) result.toolUsage = mergeToolUsage(firstAttemptToolUsage, result.toolUsage);
-  }
-  // 两次都没有有效的 innerScenelet，交给上层记录明确错误
-  if (!result?.innerScenelet) throw new Error("hidden world returned no valid inner_scenelet");
-  // 如果 API 路径返回了 session_id，更新 world session 标识
-  if (raw?._hiddenCall?.session_id) world.sid = raw._hiddenCall.session_id;
-  // 更新 world session 的使用状态
-  world.firstTurn = false;
-  world.lastUsedAt = new Date().toISOString();
-  world.lastUsage = result.hiddenCall || null;
-  world.turnCount = (world.turnCount || 0) + 1;
-  // 将模型输出的 worldStatePatch 应用到角色世界状态
-  applyWorldStatePatch(roleWorld, result.worldStatePatch);
-  roleWorld.updatedAt = world.lastUsedAt;
-  saveRoleWorlds();
-  if (ragContext) result.ragUsage = { eligible: true, used: true, chars: ragContext.length };
-  return result;
-}
-
 // ═══════════ 单 Actor 架构 ═══════════
 // generateSingleActorReply —— 单 Actor 模式下的回复生成
 // 一次 API 调用同时产出 inner_scenelet 和 visible_reply，消除第二个回复模型造成的信息损失。
 // Actor 只负责心理选择与文字表达，不承担状态记账、open thread 维护或主动消息创建。
-// 参数同 generateSceneletForTurn，但额外需要 runtimePolicy 中的 actorVisibleContextTurns
+// 参数中 runtimePolicy.actorVisibleContextTurns 控制每轮注入的可见对话轮数
 // 返回：{ innerScenelet, visibleReply, toolUsage, hiddenCall, ragUsage } 或 null
 export async function generateSingleActorReply({ ai, userId, sess, profile, userBody, memoryPrompt, ragContext = "", runtimePolicy = {} }) {
   if (!profile || !profileTemplates[profile]) return null;
   const roleWorld = getRoleWorld(profile);
-  const world = ensureWorldSession(roleWorld, ai);
+  const world = roleWorld._worldSessions?.[ai]
+    ? ensureWorldSession(roleWorld, ai)
+    : initializeWorldSession(roleWorld, ai, { reason: "initial Actor session" });
   const cfg = loadPrompts(profile);
   const visibleContextTurns = runtimePolicy.actorVisibleContextTurns || 1;
 
   // 构建单 Actor system prompt（不含 specialDates/seasonalNotes——这些是 hidden-world 叙事规划字段）
-  const sceneMemoryBlock = world.firstTurn || ai === "api"
+  const sceneMemoryBlock = world.firstTurn || ai === "api" || (world.turnCount || 0) < 15
     ? getSceneMemorySystemBlock(roleWorld, ai, profile)
     : "";
   const systemPrompt = buildSingleActorSystemPrompt(profile, sceneMemoryBlock, memoryPrompt);
 
-  // ① 场景投影：按用户消息关键词确定性地抽取相关 world state 字段
-  //    不是完整的 worldState 注入，而是窄规则匹配——只投喂用户正在询问的状态维度，
-  //    避免无关状态字段干扰 Actor 的回复判断
-  const actorScene = projectActorScene(userBody, roleWorld._worldState);
+  // ① 准备注入数据：完整 worldState + 活跃 life arcs
+  const worldState = normalizeWorldState(roleWorld._worldState);
+  const lifeArcs = lifeArcPromptItems(roleWorld);
 
   // ② 天气注入：仅当角色启用天气且用户消息命中天气关键词时才获取实时天气
   //    默认不获取天气——节约 API 调用和 prompt token，
@@ -136,66 +52,89 @@ export async function generateSingleActorReply({ ai, userId, sess, profile, user
     } catch {}
   }
 
-  // 构建单 Actor 动态 prompt（不含 active_life_arcs / pending_proactive_intents——
-  // 这些是后台异步调度对象，不应成为单轮回复的议程输入）
   const prompt = await buildSingleActorDynamicPrompt({
     userId,
     userBody,
     profile,
     visibleContext: recentVisibleContext(sess, visibleContextTurns),
     ragContext,
-    actorScene,
+    worldState,
+    lifeArcs,
     worldSession: world,
     weather,
   });
 
-  // ③ 首次调用持久 Actor
-  let raw = await runBackendStructured(prompt, {
+  // ③ 首次尝试：使用持久 session，保留完整 hidden world 上下文
+  const sessionName = `hidden-world-${roleWorldKey(profile)}`;
+  const firstAttemptWasFirstTurn = world.firstTurn;
+  const expectedSid = world.sid;
+  const sessionFile = findExactSessionFile(world.sid);
+  if (ai === "cc" && !firstAttemptWasFirstTurn && !sessionFile) {
+    throw new Error(`CC Actor session ${world.sid} is missing; reset is required before opening a new hidden-world session`);
+  }
+  let sessionBackup = null;
+  if (sessionFile) {
+    try { sessionBackup = fs.readFileSync(sessionFile); } catch {}
+  }
+
+  const sceneletOnly = cfg.runtimePolicy.visibleReplySource === "scenelet";
+  const structuredOptions = {
     backend: ai,
     label: "single_actor",
     bare: SCENELET_BARE,
     persist: true,
-    sessionName: `hidden-world-${roleWorldKey(profile)}`,
+    sessionName,
     sessionId: world.sid,
     firstTurn: world.firstTurn,
     model: world.model || backendModel(ai),
     systemPrompt,
     profile,
-  });
+  };
+  let raw = await runBackendStructured(prompt, structuredOptions);
   let result = normalizeSceneletResult(raw);
   const firstAttemptToolUsage = result?.toolUsage;
 
-  // 单 Actor 有效结果条件：
-  //   - 默认路径（visibleReplySource === "main"）：inner_scenelet 与 visible_reply 必须同时非空
-  //   - scenelet 直发路径（visibleReplySource === "scenelet"）：仅要求 inner_scenelet 非空
-  //     cst18 等纯叙事角色只输出 inner_scenelet 作为回复，visible_reply 可空
-  const sceneletOnly = cfg.runtimePolicy.visibleReplySource === "scenelet";
   const hasValidReply = sceneletOnly
     ? Boolean(result?.innerScenelet)
     : Boolean(result?.innerScenelet && result?.visibleReply);
   if (!hasValidReply) {
-    // ④ 重试机制（同一 session 内，最多 2 次尝试）
-    //    首次尝试失败后，在同一个 world session 内重试，保留隐式上下文连续性。
-    //    不是 reset 重试——session ID 不变，firstTurn=false，模型能看到首次尝试的上下文。
-    //    重试只检查 inner_scenelet (+ visible_reply) 是否有效，不关心其他辅助字段。
+    // ④ 重试：恢复 session 文件到调用前的干净状态，然后用同一个 session 重试。
+    //    非首轮失败时，--resume 已将空/畸形响应写入 session 文件，先恢复备份再重试。
+    //    首轮失败时，--session-id 已创建新文件；删除无效首轮后用同一 SID 重新创建，
+    //    避免加载污染历史，也避免相同 SID 再次创建时触发 already in use。
+    let retryFirstTurn = firstAttemptWasFirstTurn;
+    await sleep(750);
+    if (firstAttemptWasFirstTurn) {
+      // 只允许删除本次 SID 对应的精确文件，绝不能按同名 session 回退匹配。
+      const createdSessionFile = findExactSessionFile(world.sid);
+      if (createdSessionFile) {
+        try {
+          fs.rmSync(createdSessionFile, { force: true });
+        } catch { retryFirstTurn = false; }
+      }
+    } else if (sessionFile && sessionBackup) {
+      try { fs.writeFileSync(sessionFile, sessionBackup); } catch {}
+    }
+    await sleep(250);
     raw = await runBackendStructured(prompt, {
-      backend: ai,
+      ...structuredOptions,
       label: "single_actor_retry",
-      bare: SCENELET_BARE,
-      persist: true,
-      sessionName: `hidden-world-${roleWorldKey(profile)}`,
-      sessionId: world.sid,
-      firstTurn: false,    // 关键：重试复用同一 session，不伪装成首轮
-      model: world.model || backendModel(ai),
-      systemPrompt,
-      profile,
+      firstTurn: retryFirstTurn,
     });
     result = normalizeSceneletResult(raw);
-    // 合并两次尝试的工具使用统计（首次尝试的部分工具调用结果可能在 retry 中被消费）
     if (result) result.toolUsage = mergeToolUsage(firstAttemptToolUsage, result.toolUsage);
   }
-  // 两次调用都无效则失败
+  // 两次调用都无效：回滚到调用前状态，保留同一个 SID，
+  // 让失败回合既不污染上下文，也不暗中切换 session。
   if (!result?.innerScenelet || (!sceneletOnly && !result?.visibleReply)) {
+    if (firstAttemptWasFirstTurn) {
+      const createdSessionFile = findExactSessionFile(world.sid);
+      if (createdSessionFile) {
+        try { fs.rmSync(createdSessionFile, { force: true }); } catch {}
+      }
+    } else if (sessionFile && sessionBackup) {
+      try { fs.writeFileSync(sessionFile, sessionBackup); } catch {}
+    }
     throw new Error(sceneletOnly
       ? "single actor returned no valid inner_scenelet"
       : "single actor returned no valid inner_scenelet and visible_reply");
@@ -207,9 +146,22 @@ export async function generateSingleActorReply({ ai, userId, sess, profile, user
   //    这样 Actor 始终只面对"当下的世界"，不会因为自身的输出侧效应在下轮看到不一致的状态。
   //    这也意味着 Actor 产生的 inner_scenelet 中的状态暗示不会被持久化，
   //    除非 continuity updater 明确认为这些暗示应该写回 worldState。
-  if (raw?._hiddenCall?.session_id) world.sid = raw._hiddenCall.session_id;
+  const returnedSid = raw?._hiddenCall?.session_id ? String(raw._hiddenCall.session_id) : "";
+  const canAdoptInitialCodexSid = firstAttemptWasFirstTurn && ai === "codex";
+  if (returnedSid && returnedSid !== expectedSid && !canAdoptInitialCodexSid) {
+    if (firstAttemptWasFirstTurn) {
+      const createdSessionFile = findExactSessionFile(returnedSid);
+      if (createdSessionFile) {
+        try { fs.rmSync(createdSessionFile, { force: true }); } catch {}
+      }
+    } else if (sessionFile && sessionBackup) {
+      try { fs.writeFileSync(sessionFile, sessionBackup); } catch {}
+    }
+    throw new Error(`Actor backend changed SID unexpectedly (${expectedSid} -> ${returnedSid}); reset is required`);
+  }
+  if (canAdoptInitialCodexSid && returnedSid) world.sid = returnedSid;
   world.firstTurn = false;
-  world.lastUsedAt = new Date().toISOString();
+  world.lastUsedAt = beijingISO();
   world.lastUsage = result.hiddenCall || null;
   world.turnCount = (world.turnCount || 0) + 1;
   roleWorld.updatedAt = world.lastUsedAt;
@@ -281,10 +233,12 @@ export async function generateContinuityUpdateForTurn({ ai, worldState, lifeArcs
     //   world_state_patch —— 需要写入 worldState 的增量字段
     //   open_thread_ops    —— open thread 的增删操作列表
     //   follow_up_candidates —— 从本轮对话中识别到的潜在主动消息候选
+    //   life_arc_updates   —— 本轮对话推进了进展的 life_arc 的 progress_note 更新
     return {
       worldStatePatch: raw.world_state_patch || null,
       openThreadOps: Array.isArray(raw.open_thread_ops) ? raw.open_thread_ops : [],
       followUpCandidates: Array.isArray(raw.follow_up_candidates) ? raw.follow_up_candidates : [],
+      lifeArcUpdates: Array.isArray(raw.life_arc_updates) ? raw.life_arc_updates : [],
     };
   } catch (e) {
     // ═══ 失败策略：不回滚 ═══
@@ -298,49 +252,12 @@ export async function generateContinuityUpdateForTurn({ ai, worldState, lifeArcs
 }
 
 // 构建"场景上下文块"：将 lifeArc 摘要和 inner_scenelet 拼接为一段结构化的上下文文本，
-// 供后续回复生成的提示词使用。
-//
-// @param {object} sess - 当前会话对象
-// @param {object} sceneletResult - 标准化后的 scenelet 结果（包含 innerScenelet 等字段）
-// @returns {string} 拼接好的场景上下文文本块
-export function buildSceneContextBlock(sess, sceneletResult) {
-  const profile = sessionProfile(sess);
-  const cfg = loadPrompts(profile);
-  // 提取 lifeArc 的简化信息（仅保留标题、进度、类型、时间范围）
-  const lifeArcSummary = profile ? lifeArcPromptItems(getRoleWorld(profile)).map(arc => ({
-    title: arc.title,
-    progress_note: arc.progress_note,
-    kind: arc.kind,
-    time_start: arc.time_start,
-    time_end: arc.time_end,
-  })) : [];
-  const parts = [
-    // 如果有活跃的 lifeArc，拼入"正在发生的事"段落
-    lifeArcSummary.length ? [
-      "【正在发生的事】",
-      `${profile}生活中跨越多天的安排，只作为时间参考和自然接话线索，不要主动复述。`,
-      JSON.stringify(lifeArcSummary, null, 2),
-    ].join("\n") : "",
-    // 如果有 inner_scenelet，拼入内心独白及桥接说明
-    sceneletResult?.innerScenelet ? [
-      "【角色内心】",
-      cfg.innerSceneletIntro,
-      sceneletResult.innerScenelet,
-      cfg.sceneletReplyBridgeInstruction ? [
-        "【从内心到回复】",
-        cfg.sceneletReplyBridgeInstruction,
-      ].join("\n") : "",
-    ].filter(Boolean).join("\n") : "",
-  ].filter(Boolean);
-  return parts.join("\n\n");
-}
-
 // 将 scenelet 生成的 follow_up 候选追加到会话的主动意图列表中。
 // 每轮最多取 1 条，去重由 scenelet prompt 中 pending_proactive_intents 保证。
 export async function addFollowUpCandidates(sess, sceneletResult, userBody, roleWorld) {
   if (!sceneletResult?.followUpCandidates?.length) return;
   if (!roleWorld) return;
-  const nowIso = new Date().toISOString();
+  const nowIso = beijingISO();
   const existing = normalizeProactiveIntents(roleWorld._proactiveIntents);
   for (const raw of sceneletResult.followUpCandidates.slice(0, 1)) {
     const candidate = normalizeRawProactiveCandidate(raw, {
@@ -371,7 +288,7 @@ export async function addFollowUpCandidates(sess, sceneletResult, userBody, role
 //   toolUsage - 工具调用信息
 //   ragUsage - RAG 检索使用情况
 //   timestamp - 事件时间戳
-export async function recordChatHistory({ ai, userId, sess, role, kind = "chat", text, scenelet = "", sceneletStatus = "", sceneletError = "", proactiveIntentId = "", toolUsage = null, ragUsage = null, timestamp = new Date().toISOString() }) {
+export async function recordChatHistory({ ai, userId, sess, role, kind = "chat", text, scenelet = "", sceneletStatus = "", sceneletError = "", proactiveIntentId = "", toolUsage = null, ragUsage = null, timestamp = beijingISO() }) {
   // 文本和 scenelet 都为空时不记录
   if (!sess || (!text?.trim() && !scenelet?.trim())) return;
   // 将丰富字段封装后追加到聊天历史
@@ -406,8 +323,8 @@ export async function recordChatHistory({ ai, userId, sess, role, kind = "chat",
 // @param {string} contextToken - 微信上下文 token（用于引用回复）
 // @param {string} prefix - 消息前缀（如 "[CC] sessionName"）
 // @returns {boolean} 是否全部消息发送成功
-export async function sendFinalAssistantMessage(userId, text, contextToken, prefix) {
-  const trimmed = sanitizeVisibleReplyText(text).trim();
+export async function sendFinalAssistantMessage(userId, text, contextToken, prefix, skipSanitize = false) {
+  const trimmed = skipSanitize ? text.trim() : sanitizeVisibleReplyText(text).trim();
   if (!trimmed) return false;
   const socialParts = splitSocialReply(trimmed);
   const messages = [];
@@ -457,8 +374,8 @@ function activeProfileSessionEntries() {
 function markProactiveIntent(intent, status, reason = "") {
   intent.status = status;
   // 记录发送或取消的时间戳
-  if (status === "sent") intent.sentAt = new Date().toISOString();
-  if (status === "cancelled") intent.cancelledAt = new Date().toISOString();
+  if (status === "sent") intent.sentAt = beijingISO();
+  if (status === "cancelled") intent.cancelledAt = beijingISO();
   // 截断原因文本到配置允许的最大长度
   if (reason) intent.cancelReason = String(reason).slice(0, getSceneConfig().maxCancelReasonLength);
 }
@@ -503,7 +420,7 @@ async function advanceWorldState({ ai, roleWorld, profile, now }) {
   // 未配置时间推进提示词模板则跳过
   if (!prompt) return false;
 
-  const nowIso = now.toISOString();
+  const nowIso = beijingISO(now);
   // 筛选活跃的日程安排用于上下文
   const activeArcs = normalizeLifeArcs(roleWorld._lifeArcs).filter(a => a.status === "active");
   const state = roleWorld._worldState || {};
@@ -579,7 +496,7 @@ async function runDailyShareSeed({ ai, sess, profile }) {
   const cfg = getSceneConfig();
   const roleWorld = getRoleWorld(profile);
   const now = new Date();
-  const nowIso = now.toISOString();
+  const nowIso = beijingISO(now);
 
   // 获取实时天气（失败时静默降级）
   let weather = "";
@@ -636,8 +553,8 @@ async function runDailyShareSeed({ ai, sess, profile }) {
   if (!raw.has_share || !raw.message_intent) return null;
 
   // 使用模型给出的时间或回退到默认偏移
-  const scheduledAt = raw.scheduled_at || new Date(now.getTime() + cfg.dailyShareDefaultScheduleOffsetMs).toISOString();
-  const expiresAt = raw.expires_at || new Date(Date.parse(scheduledAt) + cfg.dailyShareDefaultExpiryOffsetMs).toISOString();
+  const scheduledAt = raw.scheduled_at || beijingISO(new Date(now.getTime() + cfg.dailyShareDefaultScheduleOffsetMs));
+  const expiresAt = raw.expires_at || beijingISO(new Date(Date.parse(scheduledAt) + cfg.dailyShareDefaultExpiryOffsetMs));
 
   // 标准化为统一候选项格式
   return normalizeRawProactiveCandidate({
@@ -678,7 +595,7 @@ async function maybeSeedDailyShareIntent({ ai, userId, sess, profile }) {
   if (!lastActivityMs || nowMs - lastActivityMs < cfg.dailyShareMinIdleMs) return { changed: false, intent: null };
 
   // 记录本次种子生成时间
-  const nowIso = new Date(nowMs).toISOString();
+  const nowIso = beijingISO(new Date(nowMs));
   roleWorld._lastDailyShareSeedAt = nowIso;
   sess._lastDailyShareSeedAt = nowIso;
 
@@ -770,7 +687,7 @@ export async function maybeCreateScheduleEntry({ ai, sess, profile }) {
   if (Number.isFinite(lastCheckMs) && nowMs - lastCheckMs < cfg.scheduleCheckIntervalMs) return false;
 
   // 记录本次检查时间
-  const nowIso = new Date(nowMs).toISOString();
+  const nowIso = beijingISO(new Date(nowMs));
   roleWorld._lastScheduleCheckAt = nowIso;
   saveRoleWorlds();
 
@@ -805,7 +722,7 @@ export async function maybeCreateScheduleEntry({ ai, sess, profile }) {
     const reason = result?.basis ? String(result.basis).slice(0, cfg.scheduleBasisMaxLength) : "model skipped";
     log("📅", `[${sess.name}] schedule skipped (${candidates.length} candidates dismissed): ${reason}`);
     roleWorld._pendingScheduleCandidates = [];
-    roleWorld.updatedAt = new Date().toISOString();
+    roleWorld.updatedAt = beijingISO();
     saveRoleWorlds();
     return true;
   }
@@ -832,8 +749,8 @@ export async function maybeCreateScheduleEntry({ ai, sess, profile }) {
     const timeEnd = arc.time_end || arc.timeEnd || null;
     const parsedEnd = Date.parse(timeEnd || "");
     const expiresAt = Number.isFinite(parsedEnd)
-      ? new Date(parsedEnd + cfg.scheduleExpiryAfterEndBufferMs).toISOString()
-      : new Date(nowMs + cfg.scheduleDefaultExpiryFromNowMs).toISOString();
+      ? beijingISO(new Date(parsedEnd + cfg.scheduleExpiryAfterEndBufferMs))
+      : beijingISO(new Date(nowMs + cfg.scheduleDefaultExpiryFromNowMs));
 
     applyLifeArcOps(roleWorld, [{
       op,
@@ -851,7 +768,7 @@ export async function maybeCreateScheduleEntry({ ai, sess, profile }) {
   }
 
   // 更新角色状态：移除已处理的候选项，同步并持久化
-  roleWorld.updatedAt = new Date().toISOString();
+  roleWorld.updatedAt = beijingISO();
   const selIdx = Number(result.selected_index ?? -1);
   roleWorld._pendingScheduleCandidates = (roleWorld._pendingScheduleCandidates || []).filter((_, i) => i !== selIdx);
   saveRoleWorlds();
@@ -933,11 +850,11 @@ export async function checkProactiveIntents() {
       // 检查冷却时间内是否有其他主动消息刚发送
       if (roleWorld._lastProactiveAt && nowMs - Date.parse(roleWorld._lastProactiveAt) < getSceneConfig().proactiveCooldownMs) continue;
 
-      intent.lastCheckedAt = new Date().toISOString();
+      intent.lastCheckedAt = beijingISO();
       // 防止并发：在开始异步门控评估前先设置 _lastProactiveAt，
       // 这样如果另一个并发检查同时运行，冷却守卫会看到此时间戳并跳过。
       const prevLastProactiveAt = roleWorld._lastProactiveAt;
-      roleWorld._lastProactiveAt = new Date().toISOString();
+      roleWorld._lastProactiveAt = beijingISO();
       // 步骤 4：二次门控——AI 判断该意图是否真的应该发送
       const decision = await evaluateProactiveIntent({ ai, userId, sess, profile, intent });
       if (!decision?.shouldSend || !decision.visibleReply) {
@@ -953,7 +870,7 @@ export async function checkProactiveIntents() {
       if (!sent) {
         // sendMessage 有 3 次重试，返回 false 时消息可能已送达微信
         // 仍写入 visibleHistory 和 DB，确保 bot 后续轮次能感知到
-        const failAt = new Date().toISOString();
+        const failAt = beijingISO();
         sess._lastAssistantAt = failAt;
         appendVisibleHistory(sess, "assistant", decision.visibleReply, "proactive", failAt);
         try {
@@ -974,7 +891,7 @@ export async function checkProactiveIntents() {
       }
 
       // 步骤 6：发送成功后的善后处理
-      const sentAt = new Date().toISOString();
+      const sentAt = beijingISO();
       markProactiveIntent(intent, "sent");
       roleWorld._lastProactiveAt = sentAt;
       // 立即持久化意图状态变更，防止并发调用将此意图再次视为 pending
@@ -1049,21 +966,29 @@ export async function checkProactiveIntents() {
 //   profile - 角色 profile 名称
 //   roleWorld - 角色世界状态对象
 // @returns {string} 生成的场景记忆摘要文本
-export async function generateSceneMemory({ ai, userId, sess, profile, roleWorld }) {
+export async function generateSceneMemory({ ai, userId, sess, profile, roleWorld, maxTurns, since = "" }) {
   const allEvents = await loadAllEvents();
   // 场景记忆按 user + profile 聚合，允许同一角色的多个会话共享连续性。
   const sessionEvents = allEvents.filter(e => e.userId === userId && e.profile === profile && e.role && e.text);
-  // 只保留最近 40 轮，避免长期历史无限增长。
-  const chatHistory = takeLastRounds(sessionEvents, 40).map(e => ({
+  const limit = maxTurns || 40;
+  const sinceMs = Date.parse(since || "");
+  const scopedEvents = Number.isFinite(sinceMs)
+    ? sessionEvents.filter(e => {
+        const eventMs = Date.parse(e.timestamp || "");
+        return Number.isFinite(eventMs) && eventMs >= sinceMs;
+      })
+    : [];
+  const memoryEvents = scopedEvents.length ? scopedEvents : takeLastRounds(sessionEvents, limit);
+  const chatHistory = memoryEvents.map(e => ({
     role: e.role === "assistant" ? "assistant" : "user",
     time: e.timestamp || "",
     kind: e.kind || "chat",
     text: e.text,
   }));
-  // 取最近 5 条 assistant 消息的 scenelet 供参考
-  const recentScenelets = allEvents
-    .filter(e => e.userId === userId && e.profile === profile && e.role === "assistant" && e.scenelet)
-    .slice(-5)
+  // scenelet 必须与可见历史使用同一 reset 区间，不能混入上个 session，
+  // 也不能只截最后几条而漏掉本区间早期的隐形状态。
+  const recentScenelets = memoryEvents
+    .filter(e => e.role === "assistant" && e.scenelet)
     .map(e => e.scenelet);
   const worldState = normalizeWorldState(roleWorld._worldState);
   const lifeArcs = lifeArcPromptItems(roleWorld);

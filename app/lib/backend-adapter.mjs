@@ -39,6 +39,7 @@ function startClaudeChat(options) {
   let text = "";
   let usage = null;
   const toolUsage = emptyToolUsage();
+  let modelContextWindow = 0;
   const task = runClaudeStream(
     "cc",
     options.sessionId,
@@ -68,12 +69,20 @@ function startClaudeChat(options) {
         usage = {
           type: "chat_usage",
           model: event.message.model || "unknown",
-          session_id: options.sessionId,
+          session_id: event.session_id || options.sessionId,
           input_tokens: Number(raw.input_tokens || 0) || 0,
           cache_read_input_tokens: Number(raw.cache_read_input_tokens || 0) || 0,
           cache_creation_input_tokens: Number(raw.cache_creation_input_tokens || 0) || 0,
           output_tokens: Number(raw.output_tokens || 0) || 0,
+          model_context_window: modelContextWindow,
         };
+      }
+      // 从任意事件中捕获 modelUsage（Claude Code stream-json 可能在 summary 事件中输出）
+      if (event.modelUsage && typeof event.modelUsage === "object") {
+        modelContextWindow = Object.values(event.modelUsage).reduce(
+          (max, item) => Math.max(max, Number(item?.contextWindow || 0) || 0), 0,
+        );
+        if (usage) usage.model_context_window = modelContextWindow;
       }
     },
     options.stylePrompt,
@@ -170,6 +179,7 @@ function startApiChat(options) {
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         output_tokens: Number(result.usage.outputTokens || 0) || 0,
+        model_context_window: Number(result.usage.modelContextWindow || 0) || 0,
       } : null,
       toolUsage: result.toolUsage || emptyToolUsage(),
       durationMs: result.durationMs || 0,

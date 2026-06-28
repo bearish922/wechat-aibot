@@ -3,21 +3,33 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import {
-  expressionCapabilityPrompt,
-  formatLocalChatReality,
-  getChatStyle,
-  loadPrompts,
-} from "../app/lib/reply.mjs";
+import { loadPrompts } from "../app/lib/reply.mjs";
+import { beijingISO, formatZonedTimeParts } from "../app/lib/time-utils.mjs";
 import { memoryItemsText } from "../app/lib/memory.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const OUT_DIR = path.join(ROOT, "data", "runtime", "history-search-architecture-eval", new Date().toISOString().replace(/[:.]/g, "-"));
+const OUT_DIR = path.join(ROOT, "data", "runtime", "history-search-architecture-eval", beijingISO().replace(/[:.]/g, "-"));
 const HISTORY_PATH = path.join(ROOT, "data", "chat-history.json");
 const PROFILE_PATH = path.join(ROOT, "wechat-profiles.json");
 const CONFIG_PATH = path.join(ROOT, "data", "config.json");
 const PROFILE = "白鹭千圣";
 const USER_ID = "o9cq804e1i6BqI31DcyKJi6xToQc@im.wechat";
+const PROMPTS_DOC = JSON.parse(fs.readFileSync(path.join(ROOT, "data", "prompts.json"), "utf-8"));
+
+// reply.mjs 已移除以下三个导出，在脚本中提供本地等价定义
+function getChatStyle() { return PROMPTS_DOC.chatStyle || ""; }
+function expressionCapabilityPrompt() { return PROMPTS_DOC.expressionCapability || ""; }
+function formatLocalChatReality(date = new Date()) {
+  const beijing = formatZonedTimeParts(date, "Asia/Shanghai");
+  const tokyo = formatZonedTimeParts(date, "Asia/Tokyo");
+  const instructions = PROMPTS_DOC.chatRealityInstructions || "";
+  return [
+    `当前用户侧时间：${beijing.stamp}，${beijing.weekday || beijing.shortWeekday}，${beijing.period}（北京时间，Asia/Shanghai）。`,
+    `当前角色侧时间：${tokyo.stamp}，${tokyo.weekday || tokyo.shortWeekday}，${tokyo.period}（东京时间，Asia/Tokyo；角色所处时间以此为准）。`,
+    "",
+    instructions,
+  ].join("\n");
+}
 
 const CURRENT_SITE_AND_SEARCH_GUARD = [
   "【当前现场与检索补充规则】",
@@ -224,7 +236,7 @@ function localNowFromEvent(event) {
 
 function localTimePayload(date) {
   return {
-    iso: date.toISOString(),
+    iso: beijingISO(date),
     local: date.toLocaleString("zh-CN", { hour12: false }),
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
   };
@@ -545,7 +557,7 @@ function renderReport({ items, allResults }) {
   const lines = [];
   lines.push("# 历史真实消息搜索架构专题实验");
   lines.push("");
-  lines.push(`生成时间：${new Date().toISOString()}`);
+  lines.push(`生成时间：${beijingISO()}`);
   lines.push(`样本：${items.length} 个历史真实 case，三种架构各跑一遍。`);
   lines.push("");
   lines.push("## 这次怎么跑");
@@ -704,7 +716,7 @@ function main() {
     fs.writeFileSync(path.join(OUT_DIR, "results.partial.json"), JSON.stringify({ items, allResults }, null, 2), "utf8");
   }
 
-  const payload = { generatedAt: new Date().toISOString(), outDir: OUT_DIR, items, allResults };
+  const payload = { generatedAt: beijingISO(), outDir: OUT_DIR, items, allResults };
   fs.writeFileSync(path.join(OUT_DIR, "results.json"), JSON.stringify(payload, null, 2), "utf8");
   fs.writeFileSync(path.join(OUT_DIR, "report.md"), renderReport({ items, allResults }), "utf8");
   console.log(`DONE ${OUT_DIR}`);

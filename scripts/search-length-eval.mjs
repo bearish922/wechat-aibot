@@ -2,12 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { beijingISO } from "../app/lib/time-utils.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG_PATH = path.join(ROOT, "data", "config.json");
 const PROMPTS_PATH = path.join(ROOT, "data", "prompts.json");
 const PROFILES_PATH = path.join(ROOT, "wechat-profiles.json");
-const OUT_DIR = path.join(ROOT, "data", "runtime", "search-length-eval", new Date().toISOString().replace(/[:.]/g, "-"));
+const OUT_DIR = path.join(ROOT, "data", "runtime", "search-length-eval", beijingISO().replace(/[:.]/g, "-"));
 const PROFILE = "白鹭千圣";
 
 const RELAXED_BRIDGE = [
@@ -484,7 +485,7 @@ function renderReport({ searchResults, lengthResults }) {
   const lines = [];
   lines.push("# Search Architecture and Reply Length Eval");
   lines.push("");
-  lines.push(`Generated: ${new Date().toISOString()}`);
+  lines.push(`Generated: ${beijingISO()}`);
   lines.push("");
   lines.push("## Executive Summary");
   lines.push("");

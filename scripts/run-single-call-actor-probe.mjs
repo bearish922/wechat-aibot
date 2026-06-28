@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { beijingISO } from "../app/lib/time-utils.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SCRIPT_DIR, "..");
@@ -232,7 +233,7 @@ if (!profile) throw new Error("Missing 白鹭千圣 profile");
 resolveClaudeExecutable();
 
 const manifest = {
-  created_at: new Date().toISOString(),
+  created_at: beijingISO(),
   model: MODEL,
   calls: 4,
   session_persistence: false,
@@ -259,7 +260,7 @@ for (const testCase of cases) {
       continue;
     }
     process.stdout.write(`Running ${testCase.id} sample ${run}...\n`);
-    const startedAt = new Date().toISOString();
+    const startedAt = beijingISO();
     const startedMs = Date.now();
     const raw = await runClaude({ systemPrompt, prompt: input.prompt });
     const outer = parseJsonText(raw.stdout);

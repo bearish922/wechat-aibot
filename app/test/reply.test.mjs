@@ -6,8 +6,6 @@ import {
   isStructuredReply,
   splitSocialReply,
   formatZonedTimeParts,
-  formatLocalChatReality,
-  expressionCapabilityPrompt,
 } from "../lib/reply.mjs";
 
 describe("splitText", () => {
@@ -31,15 +29,7 @@ describe("hasInboundAttachment", () => {
   });
 });
 
-describe("local chat reality", () => {
-  it("formats local time and action guidance", () => {
-    const text = formatLocalChatReality(new Date(2026, 4, 28, 2, 13), "白鹭千圣");
-    assert.match(text, /当前用户侧时间：2026-05-28 02:13，星期四，凌晨（北京时间，Asia\/Shanghai）。/u);
-    assert.match(text, /当前角色侧时间：2026-05-28 03:13，星期四，凌晨（东京时间，Asia\/Tokyo；角色所处时间以此为准）。/u);
-    assert.match(text, /微信私聊/u);
-    assert.match(text, /用户主动补充互动场景时，以其描述为准/u);
-  });
-
+describe("time parts", () => {
   it("formats explicit Beijing and Tokyo time parts", () => {
     const date = new Date(2026, 4, 28, 23, 13);
     assert.deepEqual(formatZonedTimeParts(date, "Asia/Shanghai"), {
@@ -56,14 +46,6 @@ describe("local chat reality", () => {
       period: "凌晨",
       timeZone: "Asia/Tokyo",
     });
-  });
-});
-
-describe("expression capability", () => {
-  it("describes allowed expression surface", () => {
-    const text = expressionCapabilityPrompt("白鹭千圣");
-    assert.match(text, /\[旺柴\]/u);
-    assert.match(text, /不能发送微信原生表情包/u);
   });
 });
 
