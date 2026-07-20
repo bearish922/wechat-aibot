@@ -1,6 +1,10 @@
 ﻿import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { loadPrompts, beijingISO } from "./reply.mjs";
+import {
+  normalizeTimeSlots,
+  timeSlotsFromRange as deriveTimeSlotsFromRange,
+} from "./time-slots.mjs";
 
 import { dataPath } from "./paths.mjs";
 
@@ -285,6 +289,61 @@ function normalizeWorldSession(raw = null) {
 // 规范化单条生活弧线(life arc)记录，校验数据类型、截断文本、填充默认值
 // 参数: raw - 原始弧线对象(必须有 id、title、summary，progressNote 可为空)
 // 返回: 规范化后的弧线对象，或 null
+function normalizeLifeArcTimeSlots(rawSlots) {
+  return normalizeTimeSlots(rawSlots);
+}
+
+function timeSlotsFromRange(timeStart, timeEnd, options = {}) {
+  return deriveTimeSlotsFromRange(timeStart, timeEnd, options);
+}
+
+function normalizeLifeTexture(raw = null) {
+  if (!raw) return null;
+  if (typeof raw === "string") {
+    const text = raw.trim().slice(0, 300);
+    return text ? {
+      currentLifeTexture: text,
+      concreteChatableDetails: [],
+      privatePressure: "",
+      moodResidue: "",
+      whatNotToSay: [],
+      proactiveSendability: null,
+    } : null;
+  }
+  if (typeof raw !== "object" || Array.isArray(raw)) return null;
+  const textField = (...keys) => {
+    for (const key of keys) {
+      if (raw[key] !== undefined && raw[key] !== null) return String(raw[key]).trim();
+    }
+    return "";
+  };
+  const listField = (...keys) => {
+    for (const key of keys) {
+      const value = raw[key];
+      if (Array.isArray(value)) return value.map(x => String(x || "").trim()).filter(Boolean);
+      if (typeof value === "string" && value.trim()) return [value.trim()];
+    }
+    return [];
+  };
+  const currentLifeTexture = textField("currentLifeTexture", "current_life_texture", "chatSummary", "chat_summary").slice(0, 300);
+  const concreteChatableDetails = listField(
+    "concreteChatableDetails",
+    "concrete_chatable_details",
+    "salientDetails",
+    "salient_details",
+  ).map(x => x.slice(0, 180)).slice(0, 6);
+  const privatePressure = textField("privatePressure", "private_pressure").slice(0, 220);
+  const moodResidue = textField("moodResidue", "mood_residue").slice(0, 180);
+  const whatNotToSay = listField("whatNotToSay", "what_not_to_say").map(x => x.slice(0, 180)).slice(0, 6);
+  const sendability = textField("proactiveSendability", "proactive_sendability").toLowerCase();
+  const proactiveSendability = ["none", "low", "medium", "high"].includes(sendability) ? sendability : null;
+  const texture = { currentLifeTexture, concreteChatableDetails, privatePressure, moodResidue, whatNotToSay, proactiveSendability };
+  return Object.values(texture).some(v => Array.isArray(v) ? v.length : Boolean(v)) ? texture : null;
+}
+
+// 规范化单条生活弧线(life arc)记录，校验数据类型、截断文本、填充默认值
+// 参数: raw - 原始弧线对象(必须有 id、title、summary，progressNote 可为空)
+// 返回: 规范化后的弧线对象，或 null
 function normalizeLifeArc(raw) {
   if (!raw || typeof raw !== "object") return null;
   const id = raw.id ? String(raw.id) : "";
@@ -310,30 +369,20 @@ function normalizeLifeArc(raw) {
   const subject = lifeArcSubjects.includes(raw.subject) ? raw.subject : null;
   const timeStart = raw.timeStart || raw.time_start ? String(raw.timeStart || raw.time_start) : null;
   const timeEnd = raw.timeEnd || raw.time_end ? String(raw.timeEnd || raw.time_end) : null;
-  // time_slots: 可选的结构化时间段数组，支持 dayOfWeek+start/end（周期性）或 date+start/end（一次性）
-  let timeSlots = null;
-  const rawSlots = raw.timeSlots || raw.time_slots;
-  if (Array.isArray(rawSlots) && rawSlots.length) {
-    timeSlots = rawSlots.map(s => {
-      if (!s || typeof s !== "object") return null;
-      const slot = {};
-      if (s.dayOfWeek || s.day_of_week) {
-        const dow = Number(s.dayOfWeek ?? s.day_of_week);
-        if (Number.isFinite(dow) && dow >= 1 && dow <= 7) slot.dayOfWeek = dow;
-      }
-      if (s.date) slot.date = String(s.date);
-      if (s.start) slot.start = String(s.start);
-      if (s.end) slot.end = String(s.end);
-      return (slot.dayOfWeek || slot.date) && slot.start && slot.end ? slot : null;
-    }).filter(Boolean);
-    if (!timeSlots.length) timeSlots = null;
-  }
+  const rawDuration = raw.durationHours ?? raw.duration_hours;
+  const durationHours = Number.isFinite(Number(rawDuration)) && Number(rawDuration) > 0 ? Number(rawDuration) : null;
+  // time_slots: 可选的结构化时间段数组，支持 dayOfWeek+start/end（周期性）或 date+start/end（一次性）。
+  // 若没有显式 time_slots，但有 timeStart/timeEnd，则自动派生一次性日期时间段，用于统一冲突判断。
+  const timeSlots = normalizeLifeArcTimeSlots(raw.timeSlots || raw.time_slots)
+    || timeSlotsFromRange(timeStart, timeEnd, { durationHours });
+  const lifeTexture = normalizeLifeTexture(raw.lifeTexture || raw.life_texture);
   return {
     id,
     status,
     title,
     summary,
     progressNote,
+    lifeTexture,
     // 来源依据上限 300 字符
     source: raw.source ? String(raw.source).trim().slice(0, 300) : "",
     kind,
@@ -341,6 +390,7 @@ function normalizeLifeArc(raw) {
     timeStart,
     timeEnd,
     timeSlots,
+    durationHours,
     createdAt,
     updatedAt,
     expiresAt,
@@ -440,14 +490,23 @@ function normalizeScheduleCandidates(raw = []) {
     const kind = kinds.includes(item.kind) ? item.kind : "";
     // title 和 kind 缺一不可
     if (!title || !kind) return null;
+    const durationHours = Number.isFinite(Number(item.duration_hours ?? item.durationHours))
+      && Number(item.duration_hours ?? item.durationHours) > 0
+      ? Number(item.duration_hours ?? item.durationHours)
+      : null;
+    const timeStart = item.time_start || item.timeStart || null;
+    const timeEnd = item.time_end || item.timeEnd || null;
     return {
       title,
       summary: String(item.summary || "").trim().slice(0, 500),
       kind,
       // subject 在校验合法时设置，否则为 null
       subject: subjects.includes(item.subject) ? item.subject : null,
-      timeStart: item.time_start || item.timeStart || null,
-      timeEnd: item.time_end || item.timeEnd || null,
+      timeStart,
+      timeEnd,
+      timeSlots: normalizeLifeArcTimeSlots(item.time_slots || item.timeSlots)
+        || timeSlotsFromRange(timeStart, timeEnd, { durationHours }),
+      durationHours,
       // 依据文本上限 300 字符
       basis: String(item.basis || "").trim().slice(0, 300),
     };
@@ -524,20 +583,16 @@ function sanitizeVisibleReplyText(text) {
 // 生成本地日期 key 字符串(YYYY-MM-DD 格式)
 // 参数: date - Date 对象(默认当前时间)
 // 返回: 如 "2026-06-10" 格式的日期字符串
-function localDayKey(date = new Date()) {
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0"),
-  ].join("-");
+function zonedDayKey(date = new Date(), timeZone = "Asia/Tokyo") {
+  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
 
-// 判断 ISO 时间字符串是否与给定日期处于同一天(本地时间比较)
+// 判断 ISO 时间字符串是否与给定日期处于同一天(角色侧东京时间比较)
 // 参数: iso - ISO 时间字符串; date - 参考日期(默认当前)
 // 返回: 布尔值
-function sameLocalDay(iso, date = new Date()) {
+function sameRoleDay(iso, date = new Date()) {
   const d = iso ? new Date(iso) : null;
-  return d && Number.isFinite(d.getTime()) && localDayKey(d) === localDayKey(date);
+  return d && Number.isFinite(d.getTime()) && zonedDayKey(d, "Asia/Tokyo") === zonedDayKey(date, "Asia/Tokyo");
 }
 
 // 统计指定 session 当天已发送的主动消息数量
@@ -546,7 +601,7 @@ function sameLocalDay(iso, date = new Date()) {
 function proactiveSentToday(roleWorld, date = new Date()) {
   return normalizeProactiveIntents(roleWorld?._proactiveIntents)
     // 筛选状态为 sent 且与给定日期同天的意图
-    .filter(i => i.status === "sent" && sameLocalDay(i.sentAt || i.scheduledAt, date))
+    .filter(i => i.status === "sent" && sameRoleDay(i.sentAt || i.scheduledAt, date))
     .length;
 }
 
@@ -593,6 +648,8 @@ export {
   applyWorldStatePatch,
   normalizeWorldSession,
   normalizeLifeArcs,
+  normalizeLifeTexture,
+  normalizeLifeArcTimeSlots,
   normalizeSceneletResult,
   normalizeRawProactiveCandidate,
   normalizeScheduleCandidates,

@@ -12,7 +12,7 @@ const gitignore = readFileSync(join(root, ".gitignore"), "utf-8");
 describe("installation and release layout", () => {
   it("installs chat history dependencies from the app package", () => {
     assert.ok(appPackage.dependencies?.["sql.js"]);
-    assert.match(setup, /npm --prefix app install/);
+    assert.match(setup, /npm --prefix app ci/);
     assert.equal(existsSync(join(root, "package.json")), false);
     assert.equal(existsSync(join(root, "package-lock.json")), false);
   });

@@ -7,6 +7,7 @@ import { beijingISO } from "./reply.mjs";
 
 // SQLite 数据库主文件路径
 const DB_FILE = dataPath("chat-history.db");
+const DB_BAK_FILE = dataPath("chat-history.db.bak");
 // 旧版 JSON 格式的聊天历史文件(迁移用)
 const JSON_LEGACY = dataPath("chat-history.json");
 const JSON_BAK = dataPath("chat-history.bak.json");
@@ -29,8 +30,14 @@ async function getDb() {
     ensureDir(DATA_DIR);
     // 已有数据库文件则加载，否则创建空库
     if (fs.existsSync(DB_FILE)) {
-      const buf = fs.readFileSync(DB_FILE);
-      _db = new SQL.Database(buf);
+      try {
+        _db = new SQL.Database(fs.readFileSync(DB_FILE));
+      } catch (mainError) {
+        if (!fs.existsSync(DB_BAK_FILE)) throw mainError;
+        _db = new SQL.Database(fs.readFileSync(DB_BAK_FILE));
+        fs.copyFileSync(DB_BAK_FILE, DB_FILE);
+        console.warn(`[chat-history] main database was unreadable; restored backup: ${mainError.message}`);
+      }
     } else {
       _db = new SQL.Database();
     }
@@ -223,15 +230,18 @@ function migrateAddSceneStateColumn(db) {
   }
 }
 
-// 写入 SQLite 数据库到磁盘: tmp -> bak -> copy
+// 写入 SQLite 数据库到磁盘: tmp -> bak -> atomic rename
 function saveDb() {
   if (!_db) throw new Error("[chat-history] saveDb: _db is null");
   const tmp = DB_FILE + ".tmp";
   const data = Buffer.from(_db.export());
-  fs.writeFileSync(tmp, data);
-  if (fs.existsSync(DB_FILE)) fs.copyFileSync(DB_FILE, DB_FILE + ".bak");
-  fs.copyFileSync(tmp, DB_FILE);
-  try { fs.unlinkSync(tmp); } catch { /* tmp 清理失败不影响主流程 */ }
+  try {
+    fs.writeFileSync(tmp, data);
+    if (fs.existsSync(DB_FILE)) fs.copyFileSync(DB_FILE, DB_BAK_FILE);
+    fs.renameSync(tmp, DB_FILE);
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* tmp 清理失败不影响主流程 */ }
+  }
 }
 
 // 从旧版 JSON 文件迁移聊天历史到 SQLite 数据库
@@ -590,4 +600,28 @@ export async function listConversations(options = {}) {
     sceneletCount: row[8] || 0,
     lastText: row[9] || "",
   }));
+}
+
+export async function loadEventsForProfiles(profiles = []) {
+  const db = await getDb();
+  const names = [...new Set((profiles || []).map(p => String(p || "").trim()).filter(Boolean))];
+  if (!names.length) return [];
+  const ph = names.map(() => "?").join(",");
+  const res = db.exec(
+    `SELECT * FROM events WHERE profile IN (${ph}) ORDER BY timestamp ASC, CASE WHEN role='user' THEN 0 ELSE 1 END`,
+    names,
+  );
+  if (!res.length) return [];
+  return res[0].values.map(eventFromRow);
+}
+
+export async function deleteEventsForProfiles(profiles = []) {
+  const db = await getDb();
+  const names = [...new Set((profiles || []).map(p => String(p || "").trim()).filter(Boolean))];
+  if (!names.length) return 0;
+  const ph = names.map(() => "?").join(",");
+  db.run(`DELETE FROM events WHERE profile IN (${ph})`, names);
+  const changes = db.getRowsModified();
+  if (changes > 0) saveDb();
+  return changes;
 }

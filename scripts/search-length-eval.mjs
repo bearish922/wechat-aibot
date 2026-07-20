@@ -7,7 +7,7 @@ import { beijingISO } from "../app/lib/time-utils.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIG_PATH = path.join(ROOT, "data", "config.json");
 const PROMPTS_PATH = path.join(ROOT, "data", "prompts.json");
-const PROFILES_PATH = path.join(ROOT, "wechat-profiles.json");
+const PROFILES_PATH = path.join(ROOT, "data", "wechat-profiles.json");
 const OUT_DIR = path.join(ROOT, "data", "runtime", "search-length-eval", beijingISO().replace(/[:.]/g, "-"));
 const PROFILE = "白鹭千圣";
 

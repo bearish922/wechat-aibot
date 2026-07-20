@@ -37,6 +37,7 @@ function addTool(usage, name) {
 
 function startClaudeChat(options) {
   let text = "";
+  let sawTextDelta = false;
   let usage = null;
   const toolUsage = emptyToolUsage();
   let modelContextWindow = 0;
@@ -49,11 +50,13 @@ function startClaudeChat(options) {
     event => {
       if (event.type === "stream_event" && event.event?.type === "content_block_delta" && event.event.delta?.type === "text_delta") {
         const delta = event.event.delta.text || "";
+        sawTextDelta = true;
         text += delta;
         options.onText?.(delta);
       } else if (event.type === "assistant" && event.message?.content) {
         for (const block of event.message.content) {
           if (block.type === "text") {
+            if (sawTextDelta) continue;
             text += block.text || "";
             options.onText?.(block.text || "");
           } else if (block.type === "tool_use") {

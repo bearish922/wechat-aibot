@@ -20,6 +20,7 @@ function sseResponse(res, events) {
 let server;
 let baseUrl;
 const API_KEY = "test-key-abc123";
+const requestCounts = new Map();
 
 // Import after env vars are set — avoids concurrent env manipulation
 let resolveApiConfig, isApiConfigured, apiChatStream, apiChatJson, apiChatWithTools;
@@ -41,11 +42,33 @@ before(async () => {
           let data;
           try { data = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: "bad json" }); }
           const content = data.messages?.at(-1)?.content || "";
+          requestCounts.set(content, (requestCounts.get(content) || 0) + 1);
 
           if (content.includes("ERROR_500")) return jsonResponse(res, 500, { error: "server error" });
           if (content.includes("ERROR_429")) return jsonResponse(res, 429, { error: "rate limited" });
+          if (content === "TOOLS_AFTER_RETRY" && requestCounts.get(content) === 1) {
+            return jsonResponse(res, 429, { error: "rate limited once" });
+          }
+          if (content === "TOOLS_AFTER_RETRY") {
+            return jsonResponse(res, 200, {
+              choices: [{
+                message: {
+                  role: "assistant",
+                  content: null,
+                  tool_calls: [{ id: "tool-1", type: "function", function: { name: "unknown_tool", arguments: "{}" } }],
+                },
+              }],
+            });
+          }
 
           if (data.stream) {
+            if (content === "USAGE_ONLY_CHUNK") {
+              return sseResponse(res, [
+                { choices: [{ delta: { content: "ok" }, finish_reason: null }] },
+                { choices: [], usage: { prompt_tokens: 77, completion_tokens: 11 } },
+                "[DONE]",
+              ]);
+            }
             return sseResponse(res, [
               { choices: [{ delta: { content: "Hello" }, finish_reason: null }] },
               { choices: [{ delta: { content: " world" }, finish_reason: null }] },
@@ -121,16 +144,27 @@ describe("apiChatStream", () => {
     assert.equal(result.usage.outputTokens, 30);
   });
 
+  it("reads usage from providers that send it in a choices-free final chunk", async () => {
+    const result = await apiChatStream({ body: "USAGE_ONLY_CHUNK", model: "test-model", timeoutMs: 5000 });
+    assert.equal(result.success, true);
+    assert.equal(result.text, "ok");
+    assert.deepEqual(result.usage, { inputTokens: 77, outputTokens: 11 });
+  });
+
   it("retries on 429 up to 3 times then returns error", async () => {
+    const before = requestCounts.get("ERROR_429") || 0;
     const result = await apiChatStream({ body: "ERROR_429", model: "test", timeoutMs: 5000 });
     assert.equal(result.success, false);
     assert.ok(result.error);
+    assert.equal((requestCounts.get("ERROR_429") || 0) - before, 3);
   });
 
-  it("returns error on server 500 (non-retriable after first attempt)", async () => {
+  it("retries transient server 500 responses before returning an error", async () => {
+    const before = requestCounts.get("ERROR_500") || 0;
     const result = await apiChatStream({ body: "ERROR_500", model: "test", timeoutMs: 5000 });
     assert.equal(result.success, false);
     assert.match(result.error || "", /500|internal|server error/i);
+    assert.equal((requestCounts.get("ERROR_500") || 0) - before, 3);
   });
 });
 
@@ -157,6 +191,13 @@ describe("apiChatWithTools", () => {
     const result = await apiChatWithTools({ body: "plain chat", model: "test", timeoutMs: 5000 });
     assert.equal(result.success, true);
     assert.equal(result.text, "plain response");
+  });
+
+  it("continues tool rounds after a transient retry", async () => {
+    const result = await apiChatWithTools({ body: "TOOLS_AFTER_RETRY", model: "test", timeoutMs: 5000 });
+    assert.equal(result.success, true);
+    assert.equal(result.text, "plain response");
+    assert.deepEqual(result.toolUsage.tools, ["unknown_tool"]);
   });
 });
 

@@ -4,6 +4,7 @@ import { sessions, activeAI, profileTemplates } from "./state.mjs";
 import { generateSceneMemory, batchUpdateMemory } from "./turn.mjs";
 import { getRoleWorld, setSceneMemory, resetWorldSession } from "./world-state.mjs";
 import { loadAllEvents } from "./chat-history.mjs";
+import { archiveAndHardResetWorldlines, createWorldlineArchive, listWorldlineArchives } from "./worldline-archive.mjs";
 import { getSceneConfig } from "./normalize.mjs";
 import { beijingISO } from "./reply.mjs";
 
@@ -110,13 +111,38 @@ export function registerWorldRoutes() {
     role: safeWorld(params.profile),
   }));
 
+  addRoute("GET", "/api/worldline/archives", () => ({
+    ok: true,
+    archives: listWorldlineArchives(),
+  }));
+
+  addRoute("POST", "/api/worldline/archive", async ({ body }) => {
+    const profiles = Array.isArray(body?.profiles) ? body.profiles.map(roleKey) : [];
+    const reason = String(body?.reason || "").trim();
+    const archive = await createWorldlineArchive({ profiles, reason, hardReset: false });
+    return { ok: true, archiveId: archive.archiveId, archiveDir: archive.archiveDir, manifest: archive.manifest };
+  });
+
+  addRoute("POST", "/api/worldline/archive-reset", async ({ body }) => {
+    const profiles = Array.isArray(body?.profiles) ? body.profiles.map(roleKey) : [];
+    const reason = String(body?.reason || "hard reset from GUI").trim();
+    const result = await archiveAndHardResetWorldlines({ profiles, reason });
+    return {
+      ok: true,
+      archiveId: result.archiveId,
+      archiveDir: result.archiveDir,
+      deletedEvents: result.deletedEvents,
+      resetSessions: result.resetSessions,
+    };
+  });
+
   addRoute("PUT", "/api/world/scene-memory", ({ body }) => {
     const profile = roleKey(body?.profile);
     const backend = body?.backend || activeAI;
     const content = String(body?.content ?? "").slice(0, 8000);
     const roleWorld = getRoleWorld(profile);
     setSceneMemory(roleWorld, content, backend);
-    saveWorlds();
+    if (!saveWorlds()) throw new Error("failed to persist scene memory");
     return { ok: true, length: content.length };
   });
 
@@ -192,7 +218,6 @@ export function registerWorldRoutes() {
       firstTurn: session._firstTurn,
       turnCount: session._turnCount,
       lastUsage: session._lastUsage,
-      userMessageLog: session._userMessageLog,
     }));
 
     try {
@@ -206,7 +231,6 @@ export function registerWorldRoutes() {
         session._firstTurn = true;
         session._turnCount = 0;
         session._lastUsage = null;
-        session._userMessageLog = [];
       }
       if (!saveWorlds()) throw new Error("failed to persist Actor sessions");
       saveSessions();
@@ -219,7 +243,6 @@ export function registerWorldRoutes() {
         snapshot.session._firstTurn = snapshot.firstTurn;
         snapshot.session._turnCount = snapshot.turnCount;
         snapshot.session._lastUsage = snapshot.lastUsage;
-        snapshot.session._userMessageLog = snapshot.userMessageLog;
       }
       saveWorlds();
       saveSessions();

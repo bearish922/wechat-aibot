@@ -6,15 +6,12 @@ import { decode as decodeSilk, getDuration as getSilkDuration, isSilk as isSilkA
 import { configValue, envOrConfig, configBool, configNumber } from "./config.mjs";
 import { dataPath, RUNTIME_DIR, appPath, ensureDir } from "./paths.mjs";
 import { log } from "./utils.mjs";
-import { usableConfigString, spawnCli, commandExists, LOGS_DIR } from "./claude-runner.mjs";
+import { usableConfigString, spawnCli, commandExists, killProc, LOGS_DIR } from "./claude-runner.mjs";
 import { loadPrompts, beijingISO } from "./reply.mjs";
-import { recentInputs } from "./state.mjs";
+import { activeAI, recentInputs } from "./state.mjs";
 import { CDN_BASE_URL } from "./wechat.mjs";
-import { resolveProjectPath } from "./paths.mjs";
 
 // ─── CONFIG ───────────────────────────────────────────────────
-const RAG_KNOWLEDGE_DIR = resolveProjectPath(configValue("rag.knowledgeDir", "data/knowledge"));
-const RAG_SCRIPT = resolveProjectPath(configValue("paths.ragScript", "app/rag.py"));
 const DUPLICATE_INPUT_MS = 5000;
 const INBOUND_MEDIA_DIR = dataPath("inbound_media");
 const WECHAT_MEDIA_MAX_BYTES = 100 * 1024 * 1024;
@@ -46,11 +43,14 @@ export function logInboundMedia(msg) {
   if (!msg.item_list?.some(i => i.type !== 1)) return;
   try {
     if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
+    const redactedItems = JSON.parse(JSON.stringify(msg.item_list, (key, value) =>
+      ["aes_key", "aeskey", "encrypt_query_param", "full_url"].includes(key) && value ? "[redacted]" : value
+    ));
     fs.appendFileSync(mediaLogPath(), JSON.stringify({
       timestamp: beijingISO(),
       from_user_id: msg.from_user_id,
-      context_token: msg.context_token,
-      item_list: msg.item_list,
+      context_token: msg.context_token ? "[redacted]" : "",
+      item_list: redactedItems,
     }) + "\n");
   } catch {}
 }
@@ -181,6 +181,10 @@ async function fetchBuffer(url, label, timeoutMs = 60_000) {
   try {
     const res = await fetch(url, { signal: ctrl.signal });
     if (!res.ok) throw new Error(`${label}: CDN ${res.status} ${res.statusText}`);
+    const declaredLength = Number(res.headers.get("content-length") || 0);
+    if (declaredLength > WECHAT_MEDIA_MAX_BYTES) {
+      throw new Error(`${label}: media too large (${declaredLength} bytes)`);
+    }
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length > WECHAT_MEDIA_MAX_BYTES) throw new Error(`${label}: media too large (${buf.length} bytes)`);
     return buf;
@@ -243,9 +247,11 @@ function runProcessText(command, args, { cwd = process.cwd(), timeoutMs = 60_000
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let timedOut = false;
     const timer = setTimeout(() => {
       if (!settled) {
-        proc.kill();
+        timedOut = true;
+        killProc(proc);
       }
     }, timeoutMs);
     proc.stdout.on("data", d => { stdout += d; if (stdout.length > 8000) stdout = stdout.slice(-8000); });
@@ -253,7 +259,7 @@ function runProcessText(command, args, { cwd = process.cwd(), timeoutMs = 60_000
     proc.on("close", (code) => {
       clearTimeout(timer);
       settled = true;
-      resolve({ code, stdout, stderr, timedOut: proc.killed });
+      resolve({ code, stdout, stderr, timedOut });
     });
     proc.on("error", (e) => {
       clearTimeout(timer);
@@ -282,7 +288,14 @@ async function transcribeVoiceWithWhisperX(filePath) {
     const decoded = await decodeSilk(input, VOICE_SAMPLE_RATE);
     fs.writeFileSync(wavPath, wavFromPcm16le(decoded.data, VOICE_SAMPLE_RATE));
   } else {
-    fs.copyFileSync(filePath, wavPath);
+    const converted = spawnSync("ffmpeg", ["-y", "-i", filePath, "-ar", String(VOICE_SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le", wavPath], {
+      encoding: "utf8",
+      timeout: 30_000,
+      windowsHide: true,
+    });
+    if (converted.status !== 0 || !fs.existsSync(wavPath)) {
+      return { error: "voice is not Silk and ffmpeg could not convert it" };
+    }
   }
 
   const args = [
@@ -310,9 +323,13 @@ async function transcribeVoiceWithWhisperX(filePath) {
     const detail = (result.stderr || result.stdout || "").trim().split(/\r?\n/).slice(-3).join(" | ");
     return { error: `WhisperX exited ${result.code}${result.timedOut ? " (timeout)" : ""}${detail ? `: ${detail}` : ""}`, wavPath, durationMs };
   }
+  if (transcript) {
+    try { fs.rmSync(wavPath, { force: true }); } catch {}
+    try { fs.rmSync(outDir, { recursive: true, force: true }); } catch {}
+  }
   return {
     transcript,
-    wavPath,
+    wavPath: transcript ? "" : wavPath,
     durationMs,
     language: VOICE_LANGUAGE || "auto",
     model: VOICE_MODEL,
@@ -455,15 +472,16 @@ export function hasExternalVisionConfig() {
   return Boolean(VISION_BASE_URL && VISION_API_KEY && VISION_MODEL);
 }
 
-export function shouldUseExternalVision() {
+export function shouldUseExternalVision(backend = activeAI) {
   if (VISION_MODE === "off" || VISION_MODE === "none" || VISION_MODE === "native") return false;
   if (VISION_MODE === "external" || VISION_MODE === "cloud") return true;
+  if (String(backend || "").toLowerCase() === "codex") return false;
   return hasExternalVisionConfig();
 }
 
-export async function captionImageCloud(filePath, hint = "") {
+export async function captionImageCloud(filePath, hint = "", backend = activeAI) {
   if (!filePath || !fs.existsSync(filePath)) return null;
-  if (!shouldUseExternalVision()) {
+  if (!shouldUseExternalVision(backend)) {
     return null;
   }
   if (!hasExternalVisionConfig()) {
@@ -518,7 +536,7 @@ function mediaKindLabel(type) {
   return type === 2 ? "图片" : type === 3 ? "语音" : type === 4 ? "文件" : type === 5 ? "视频" : "媒体";
 }
 
-async function downloadInboundMedia(item, label) {
+async function downloadInboundMedia(item, label, backend = activeAI) {
   if (item.type === 2) {
     const img = item.image_item || {};
     const media = img.media || img.thumb_media;
@@ -527,7 +545,7 @@ async function downloadInboundMedia(item, label) {
     const buf = await downloadCdnMedia(media, aesKey, label);
     const mime = detectMimeFromBuffer(buf, "image/jpeg");
     const filePath = saveInboundBuffer(buf, { kind: "image", mime, originalFilename: `image${extensionFromMime(mime, ".jpg")}` });
-    const caption = await captionImageCloud(filePath);
+    const caption = await captionImageCloud(filePath, "", backend);
     return { kind: "image", path: filePath, mime, dimensions: imageDimensions(buf), caption };
   }
   if (item.type === 3) {
@@ -568,7 +586,7 @@ async function downloadInboundMedia(item, label) {
         const thumb = await downloadCdnMedia(video.thumb_media, video.thumb_media?.aes_key, `${label} video-thumb`);
         const mime = detectMimeFromBuffer(thumb, "image/jpeg");
         const thumbPath = saveInboundBuffer(thumb, { kind: "video-thumb", mime, originalFilename: `video-thumb${extensionFromMime(mime, ".jpg")}` });
-        const caption = await captionImageCloud(thumbPath, "这是视频缩略图或首帧。");
+        const caption = await captionImageCloud(thumbPath, "这是视频缩略图或首帧。", backend);
         return { kind: "video", error: "missing video media; saved thumbnail only", framePath: thumbPath, frameCaption: caption };
       }
       return { kind: "video", error: "missing video media" };
@@ -578,7 +596,7 @@ async function downloadInboundMedia(item, label) {
     const mime = detectMimeFromBuffer(buf, "video/mp4");
     const filePath = saveInboundBuffer(buf, { kind: "video", mime, originalFilename: `video${extensionFromMime(mime, ".mp4")}` });
     const framePath = extractVideoFrame(filePath);
-    const frameCaption = framePath ? await captionImageCloud(framePath, "这是视频首帧截图。") : null;
+    const frameCaption = framePath ? await captionImageCloud(framePath, "这是视频首帧截图。", backend) : null;
     return { kind: "video", path: filePath, mime, size: buf.length, framePath, frameCaption, playLength: video.play_length };
   }
   return { kind: "unknown", error: `unsupported media type ${item.type}` };
@@ -619,13 +637,13 @@ function mediaInfoToPrompt(info) {
   return `[媒体]\n${JSON.stringify(info)}`;
 }
 
-async function inboundItemToText(item, index, msg) {
+async function inboundItemToText(item, index, msg, backend = activeAI) {
   const ref = refMessageText(item.ref_msg);
   if (item.type === 1) return `${ref}${item.text_item?.text || ""}`;
   if (item.type === 3 && item.voice_item?.text && !item.voice_item?.media) return `${ref}[语音转文字]\n${item.voice_item.text}`;
   if ([2, 3, 4, 5].includes(item.type)) {
     try {
-      const media = await downloadInboundMedia(item, `msg${msg.message_id || "unknown"} item${index}`);
+      const media = await downloadInboundMedia(item, `msg${msg.message_id || "unknown"} item${index}`, backend);
       return `${ref}${mediaInfoToPrompt(media)}`;
     } catch (e) {
       log("⚠️", `media item ${item.type} failed: ${e.message}`);
@@ -637,7 +655,7 @@ async function inboundItemToText(item, index, msg) {
   return `${ref}[未知消息类型 ${item.type ?? "unknown"}]`;
 }
 
-export async function extractInboundPayload(msg) {
+export async function extractInboundPayload(msg, { backend = activeAI } = {}) {
   logInboundMedia(msg);
   const parts = [];
   let shouldBatch = false;
@@ -648,7 +666,7 @@ export async function extractInboundPayload(msg) {
     if ([2, 3, 4, 5].includes(item?.type)) shouldBatch = true;
     if (item?.type === 1) hasText = true;
     else canAppendToBatch = false;
-    const part = await inboundItemToText(item, i, msg);
+    const part = await inboundItemToText(item, i, msg, backend);
     if (part?.trim()) parts.push(part.trim());
   }
   return { body: parts.join("\n"), shouldBatch, canAppendToBatch: !shouldBatch && hasText && canAppendToBatch };

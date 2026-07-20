@@ -1,20 +1,31 @@
-import { writeFileSync, readFileSync, existsSync as fsExistsSync } from "node:fs";
+import { copyFileSync, writeFileSync, readFileSync, renameSync, rmSync, existsSync as fsExistsSync } from "node:fs";
 import { addRoute } from "./server.mjs";
 import { rootPath, ensureDir } from "./paths.mjs";
-import { loadPromptDocument, loadPrompts } from "./reply.mjs";
+import { loadPrompts } from "./reply.mjs";
 import { ROLE_PROMPT_FIELDS } from "./role-prompts.mjs";
 
 const PROMPTS_FILE = rootPath("data/prompts.json");
 const PROMPTS_LOCAL_FILE = rootPath("data/prompts.local.json");
 
-function savePrompts(obj) {
+function writeJsonAtomic(filePath, obj) {
   ensureDir(rootPath("data"));
-  writeFileSync(PROMPTS_FILE, JSON.stringify(obj, null, 2) + "\n", "utf-8");
+  const tmp = `${filePath}.tmp`;
+  if (fsExistsSync(filePath)) copyFileSync(filePath, `${filePath}.backup`);
+  try {
+    writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n", "utf-8");
+    renameSync(tmp, filePath);
+  } catch (error) {
+    try { rmSync(tmp, { force: true }); } catch {}
+    throw error;
+  }
+}
+
+function savePrompts(obj) {
+  writeJsonAtomic(PROMPTS_FILE, obj);
 }
 
 function saveLocalPrompts(obj) {
-  ensureDir(rootPath("data"));
-  writeFileSync(PROMPTS_LOCAL_FILE, JSON.stringify(obj, null, 2) + "\n", "utf-8");
+  writeJsonAtomic(PROMPTS_LOCAL_FILE, obj);
 }
 
 function profileInLocal(profile) {
@@ -34,6 +45,14 @@ function loadLocalDocument() {
   } catch { return {}; }
 }
 
+function loadMainDocument() {
+  try {
+    if (!fsExistsSync(PROMPTS_FILE)) return {};
+    const document = JSON.parse(readFileSync(PROMPTS_FILE, "utf-8"));
+    return document && typeof document === "object" && !Array.isArray(document) ? document : {};
+  } catch { return {}; }
+}
+
 export function registerPromptsRoutes() {
   addRoute("GET", "/api/prompts", () => {
     const prompts = loadPrompts();
@@ -47,15 +66,18 @@ export function registerPromptsRoutes() {
 
   addRoute("PUT", "/api/prompts", ({ body }) => {
     const profile = String(body.profile || "").trim();
-    const document = loadPromptDocument();
+    const document = loadMainDocument();
     const current = loadPrompts(profile);
     const updates = {};
-    const numFields = ["contextResetRatio", "turnResetThreshold", "proactiveCheckIntervalMs", "proactiveCooldownMs", "proactiveDailyMax", "dailyShareSeedIntervalMs", "dailyShareMinIdleMs", "scheduleCheckIntervalMs", "ragTopK", "ragMinScore", "ragResultMaxChars", "ragTimeoutMs", "dailyShareDefaultScheduleOffsetMs", "dailyShareDefaultExpiryOffsetMs", "proactiveDefaultExpiryOffsetMs", "scheduleFinalizationTimeoutMs", "scheduleRecentKindsLimit", "scheduleBasisMaxLength", "scheduleArcTitleMaxLength", "scheduleExpiryAfterEndBufferMs", "scheduleDefaultExpiryFromNowMs"];
+    const numFields = ["contextResetRatio", "turnResetThreshold", "proactiveCheckIntervalMs", "proactiveCooldownMs", "proactiveDailyMax", "dailyShareSeedIntervalMs", "dailyShareMinIdleMs", "scheduleCheckIntervalMs", "dailyShareDefaultScheduleOffsetMs", "dailyShareDefaultExpiryOffsetMs", "proactiveDefaultExpiryOffsetMs", "scheduleFinalizationTimeoutMs", "scheduleRecentKindsLimit", "scheduleBasisMaxLength", "scheduleArcTitleMaxLength", "scheduleExpiryAfterEndBufferMs", "scheduleDefaultExpiryFromNowMs"];
     for (const key of ROLE_PROMPT_FIELDS) {
       if (body[key] !== undefined) updates[key] = String(body[key]);
     }
     for (const key of numFields) {
-      if (body[key] !== undefined) updates[key] = Number(body[key]);
+      if (body[key] !== undefined) {
+        const value = Number(body[key]);
+        if (Number.isFinite(value)) updates[key] = value;
+      }
     }
     if (body.ragKeywords !== undefined) {
       const kw = body.ragKeywords;
@@ -84,9 +106,9 @@ export function registerPromptsRoutes() {
     if (body.runtimePolicy !== undefined && body.runtimePolicy !== null && typeof body.runtimePolicy === "object") {
       const rp = body.runtimePolicy;
       const rpUpdate = {};
-      if (rp.lifeArcEnabled !== undefined) rpUpdate.lifeArcEnabled = Boolean(rp.lifeArcEnabled);
-      if (rp.proactiveEnabled !== undefined) rpUpdate.proactiveEnabled = Boolean(rp.proactiveEnabled);
-      if (rp.weatherEnabled !== undefined) rpUpdate.weatherEnabled = Boolean(rp.weatherEnabled);
+      if (rp.lifeArcEnabled !== undefined) rpUpdate.lifeArcEnabled = rp.lifeArcEnabled === true || rp.lifeArcEnabled === "true";
+      if (rp.proactiveEnabled !== undefined) rpUpdate.proactiveEnabled = rp.proactiveEnabled === true || rp.proactiveEnabled === "true";
+      if (rp.weatherEnabled !== undefined) rpUpdate.weatherEnabled = rp.weatherEnabled === true || rp.weatherEnabled === "true";
       if (rp.visibleReplySource !== undefined) rpUpdate.visibleReplySource = String(rp.visibleReplySource).trim() || "main";
       if (rp.actorVisibleContextTurns !== undefined) rpUpdate.actorVisibleContextTurns = Math.max(1, Math.min(12, Number(rp.actorVisibleContextTurns) || 8));
       if (rp.visibleContextTurns !== undefined) rpUpdate.visibleContextTurns = Math.max(0, Number(rp.visibleContextTurns) || 0);
@@ -101,7 +123,7 @@ export function registerPromptsRoutes() {
     if (profile && body.workEventConfig !== undefined && body.workEventConfig !== null && typeof body.workEventConfig === "object") {
       const wec = body.workEventConfig;
       const wecUpdate = {};
-      if (wec.enabled !== undefined) wecUpdate.enabled = Boolean(wec.enabled);
+      if (wec.enabled !== undefined) wecUpdate.enabled = wec.enabled === true || wec.enabled === "true";
       if (wec.workHoursPerDay !== undefined) wecUpdate.workHoursPerDay = Math.max(1, Math.min(24, Number(wec.workHoursPerDay) || 8));
       if (wec.generationIntervalMs !== undefined) wecUpdate.generationIntervalMs = Math.max(3600000, Math.min(86400000, Number(wec.generationIntervalMs) || 43200000));
       if (wec.maxEventsPerGeneration !== undefined) wecUpdate.maxEventsPerGeneration = Math.max(1, Math.min(5, Number(wec.maxEventsPerGeneration) || 1));
@@ -110,10 +132,10 @@ export function registerPromptsRoutes() {
         if (wec.minLeadHours.light !== undefined) mlh.light = Math.max(1, Math.min(168, Number(wec.minLeadHours.light) || 24));
         if (wec.minLeadHours.medium !== undefined) mlh.medium = Math.max(1, Math.min(168, Number(wec.minLeadHours.medium) || 48));
         if (wec.minLeadHours.heavy !== undefined) mlh.heavy = Math.max(1, Math.min(168, Number(wec.minLeadHours.heavy) || 72));
-        if (Object.keys(mlh).length) wecUpdate.minLeadHours = { ...(roleUpdates.workEventConfig?.minLeadHours || { light: 24, medium: 48, heavy: 72 }), ...mlh };
+        if (Object.keys(mlh).length) wecUpdate.minLeadHours = { ...(current.workEventConfig?.minLeadHours || { light: 24, medium: 48, heavy: 72 }), ...mlh };
       }
       if (wec.conflictPolicy) {
-        const cp = { ...(roleUpdates.workEventConfig?.conflictPolicy || { light: { allow: false }, medium: { allow: false }, heavy: { allow: "school_only" }, minGapBetweenEventsMinutes: 60 }) };
+        const cp = structuredClone(current.workEventConfig?.conflictPolicy || { light: { allow: false }, medium: { allow: false }, heavy: { allow: "school_only" }, minGapBetweenEventsMinutes: 60 });
         if (wec.conflictPolicy.minGapBetweenEventsMinutes !== undefined) cp.minGapBetweenEventsMinutes = Math.max(0, Math.min(240, Number(wec.conflictPolicy.minGapBetweenEventsMinutes) || 60));
         if (wec.conflictPolicy.light?.allow !== undefined) cp.light = { ...cp.light, allow: wec.conflictPolicy.light.allow === true || wec.conflictPolicy.light.allow === "true" ? true : wec.conflictPolicy.light.allow === "school_only" ? "school_only" : false };
         if (wec.conflictPolicy.medium?.allow !== undefined) cp.medium = { ...cp.medium, allow: wec.conflictPolicy.medium.allow === true || wec.conflictPolicy.medium.allow === "true" ? true : wec.conflictPolicy.medium.allow === "school_only" ? "school_only" : false };
@@ -173,9 +195,16 @@ export function registerPromptsRoutes() {
 
 export function deleteRolePromptSuite(profile) {
   if (!profile) return;
-  const document = loadPromptDocument();
-  if (!document.roles?.[profile]) return;
-  const roles = { ...document.roles };
-  delete roles[profile];
-  savePrompts({ ...document, roles });
+  const document = loadMainDocument();
+  if (document.roles?.[profile]) {
+    const roles = { ...document.roles };
+    delete roles[profile];
+    savePrompts({ ...document, roles });
+  }
+  const local = loadLocalDocument();
+  if (local.roles?.[profile]) {
+    const roles = { ...local.roles };
+    delete roles[profile];
+    saveLocalPrompts({ ...local, roles });
+  }
 }

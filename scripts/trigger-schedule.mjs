@@ -3,7 +3,7 @@ import { sessions } from "../app/lib/state.mjs";
 import { getRoleWorld, loadRoleWorlds, saveRoleWorlds } from "../app/lib/world-state.mjs";
 import { maybeCreateScheduleEntry } from "../app/lib/turn.mjs";
 
-const profile = "白鹭千圣";
+const profile = process.argv[2] || "白鹭千圣";
 
 // 初始化全局状态
 globalThis.__wechatRoleWorlds = new Map();

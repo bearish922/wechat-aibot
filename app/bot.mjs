@@ -37,7 +37,7 @@ const LOG_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const INSTANCE_LOCK_FILE = dataPath("runtime", ".wechat-aibot.lock");
 
 // ─── 核心功能模块导入 ───────────────────────────────────────────
-import { hasInboundAttachment, loadPrompts, beijingISO } from "./lib/reply.mjs";
+import { hasInboundAttachment, loadPrompts, formatParentheticalLineBreaks, beijingISO } from "./lib/reply.mjs";
 import { startServer, stopServer } from "./lib/server.mjs";
 import { registerStatusRoutes } from "./lib/gui-status.mjs";
 import { registerSessionRoutes } from "./lib/gui-sessions.mjs";
@@ -53,7 +53,7 @@ import { InputBatcher, messageHasBatchableMedia } from "./lib/input-batcher.mjs"
 
 // ─── STATE（全局状态管理）──────────────────────────────────────
 import { getUpdatesBuf, sessions, activeAI, profileTemplates, modelNames, pendingInputs, setToken, setSyncBuf, setActiveAI } from "./lib/state.mjs";
-import { uuid, sleep, log, isPidRunning } from "./lib/utils.mjs";
+import { sleep, log, isPidRunning } from "./lib/utils.mjs";
 import { loadToken, saveToken, loginWithQr, sendMessage, apiPost } from "./lib/wechat.mjs";
 import { loadMemoryDocument, loadWorldMemoryDocument } from "./lib/memory.mjs";
 import { loadAllEvents, loadRoleVisibleHistory } from "./lib/chat-history.mjs";
@@ -64,7 +64,7 @@ import { startBackendChat } from "./lib/backend-adapter.mjs";
 import { sessionProfile, saveRoleWorlds, loadRoleWorlds, setSceneMemory, getRoleWorld, ensureWorldSession, resetWorldSession, activeWorldSessionIds, lifeArcPromptItems, applyLifeArcOps } from "./lib/world-state.mjs";
 import { loadProfiles, makeSession, saveSessions, loadSessions, ensureUser, activeSession, sessionById, nextSessionName } from "./lib/session-store.mjs";
 import { handleHelp, handleCC, handleCodex, handleAPI, handleNew, handleSwitch, handleRename, handleSessions, handleProfile, handleClose, handleStatus, handleCancel } from "./lib/commands.mjs";
-import { buildTurnBody, appendVisibleHistory, getSceneMemorySystemBlock, recentVisibleContext } from "./lib/prompts.mjs";
+import { buildTurnBody, appendVisibleHistory, recentVisibleContext } from "./lib/prompts.mjs";
 import { generateSingleActorReply, generateContinuityUpdateForTurn, addFollowUpCandidates, recordChatHistory, sendFinalAssistantMessage, checkProactiveIntents, generateSceneMemory, batchUpdateMemory, runScheduleExtractor, replyPrefix } from "./lib/turn.mjs";
 import { runAll as runWorkEventGenerator } from "./lib/work-event-generator.mjs";
 import { shouldResetActorSession } from "./lib/context-pressure.mjs";
@@ -247,14 +247,16 @@ function shouldUseRagForTurn(userMessage, profile) {
 // 用途：调用 Python RAG 脚本（rag.py），在向量知识库中搜索与用户消息相关的内容，
 //       返回检索到的上下文文本片段
 // 输入：userMessage - 用户查询文本；profile - 角色名称（可选，用于限定知识范围）
-// 输出：String - 检索结果文本；空字符串表示无结果或查询失败；null 表示 RAG 强制关闭
+// 输出：String - 检索结果文本；空字符串表示功能关闭、无结果或查询失败
 function queryRag(userMessage, profile = null) {
   if (!RAG_ENABLED) return "";                 // RAG 功能关闭
-  if (!fs.existsSync(RAG_SCRIPT)) return null;  // RAG 脚本不存在
+  if (!fs.existsSync(RAG_SCRIPT)) return "";   // RAG 脚本不存在
+  let queryFile = "";
   try {
     const t0 = Date.now();
     // 将查询内容写入临时文件，通过 --file 参数传递给 Python 脚本
-    const queryFile = path.join(RUNTIME_DIR, ".rag_query.txt");
+    // 文件名必须按调用隔离：不同用户/会话可以并发触发 RAG，固定文件名会互相覆盖。
+    queryFile = path.join(RUNTIME_DIR, `.rag_query_${process.pid}_${crypto.randomUUID()}.txt`);
     ensureDir(RUNTIME_DIR);
     fs.writeFileSync(queryFile, userMessage, "utf-8");
     const args = ["-X", "utf8", RAG_SCRIPT, "query", "--file", queryFile];
@@ -265,14 +267,18 @@ function queryRag(userMessage, profile = null) {
       cwd: path.dirname(RAG_SCRIPT),
       env: envWithProxy(RAG_HTTPS_PROXY, { HF_HUB_DISABLE_SYMLINKS_WARNING: "1" }),
     });
-    // 清理临时查询文件
-    try { if (fs.existsSync(queryFile)) fs.rmSync(queryFile, { force: true }); } catch {}
     const ms = Date.now() - t0;
     if (result.status !== 0) return "";       // Python 脚本执行失败
     const raw = (result.stdout || "").trim();
     if (raw) log("\u{1F4DA}", `RAG hit in ${ms}ms (${raw.length} chars)`);
     return raw;
-  } catch (e) { return ""; }
+  } catch {
+    return "";
+  } finally {
+    if (queryFile) {
+      try { fs.rmSync(queryFile, { force: true }); } catch {}
+    }
+  }
 }
 
 
@@ -398,7 +404,6 @@ async function resetActorSessionWithMemory({
     roleWorld._sceneMemoryAt[ai] = previousSceneMemoryAt;
     throw new Error(`${ai} Actor reset blocked: failed to persist the new session`);
   }
-  styleState._userMessageLog = [];
   log("↻", `[${sessionName}] Actor reset: ${resetReason}`);
 }
 
@@ -479,7 +484,7 @@ async function prepareTurnContext(ai, userId, sid, sessionName, body, styleState
       // RAG 知识库查询：在 Actor 调用之前执行，结果注入 prompt
       const ragEligible = Boolean(RAG_ENABLED && !hasInboundAttachment(body) && shouldUseRagForTurn(body, turnProfile));
       const ragContext = ragEligible ? queryRag(body, turnProfile) : "";
-      ragUsage = { eligible: ragEligible, used: Boolean(ragContext), chars: ragContext.length };
+      ragUsage = { eligible: ragEligible, used: Boolean(ragContext), chars: String(ragContext || "").length };
       sceneletResult = await generateSingleActorReply({
         ai, userId, sess: styleState, profile: turnProfile,
         userBody: body, memoryPrompt, ragContext, runtimePolicy,
@@ -683,7 +688,7 @@ async function executeAICallAndSend(ai, userId, sid, sessionName, body, contextT
     // 错误处理：记录失败、通知用户
     log("⚠", `[${sessionName}] turn failed: ${e.message}`);
     styleState._lastFailedTurn = { body, timestamp: beijingISO(), reason: e.message?.slice(0, 500), sid: activeSid };
-    await sendMessage(userId, `[SYSTEM] Reply failed: ${e.message?.slice(0, 150)}`, contextToken).catch(() => {});
+    await sendMessage(userId, `[SYSTEM] 回复失败：${e.message?.slice(0, 150)}`, contextToken).catch(() => {});
     appendLog({ error: e.message?.slice(0, 500) });
 
     // 即使发送失败，也保留已生成的内容和 scenelet 写入历史
@@ -731,6 +736,7 @@ async function finalizeTurnSuccess(params) {
   const useSceneletAsReply = isProfileChat && loadPrompts(turnProfile).runtimePolicy.visibleReplySource === "scenelet";
   let cleanText = assistantFullText;
   if (isProfileChat && !useSceneletAsReply) cleanText = sanitizeVisibleReplyText(cleanText);
+  cleanText = formatParentheticalLineBreaks(cleanText);
 
   // 更新会话状态
   styleState._lastAssistantAt = beijingISO();
@@ -1060,7 +1066,7 @@ async function handleMessage(msg) {
   // 提取消息有效载荷（文本、附件、媒体等）
   let payload;
   try {
-    payload = await extractInboundPayload(msg);
+    payload = await extractInboundPayload(msg, { backend: arrivalAI });
   } catch (error) {
     if (mediaRef) {
       inputBatcher.completeMedia(mediaRef, {
@@ -1100,7 +1106,7 @@ async function handleMessage(msg) {
   if (/^\/codex$/.test(body)) { await handleCodex(userId, ctx); return; }
 
   // /api —— 将当前会话切换到 Direct API AI 后端
-  if (/^\/api$/.test(body)) { await handleAPI(userId, ctx, messageAI); return; }
+  if (/^\/api$/.test(body)) { await handleAPI(userId, ctx); return; }
 
   // /new —— 创建新的命名会话
   if (/^\/new(\s|$)/.test(body)) { await handleNew(userId, body, ctx, messageAI); return; }
@@ -1115,7 +1121,7 @@ async function handleMessage(msg) {
   if (/^\/sessions$/.test(body)) { await handleSessions(userId, ctx); return; }
 
   // /profile —— 管理角色模板配置
-  if (/^\/profile(\s|$)/.test(body)) { await handleProfile(userId, body, ctx, activeSess); return; }
+  if (/^\/profile(\s|$)/.test(body)) { await handleProfile(userId, body, ctx); return; }
 
   // /close —— 关闭当前会话
   if (/^\/close(\s|$)/.test(body)) { await handleClose(userId, body, ctx); return; }
@@ -1124,7 +1130,7 @@ async function handleMessage(msg) {
   if (/^\/status$/.test(body)) { await handleStatus(userId, ctx); return; }
 
   // /cancel —— 取消待处理的批量输入
-  if (/^\/cancel$/.test(body)) { await handleCancel(userId, body, ctx, activeSess); return; }
+  if (/^\/cancel$/.test(body)) { await handleCancel(userId, ctx, activeSess); return; }
 
   // ── route to active session（普通消息路由至活跃会话）───────
   const messageAIFinal = activeAI;
@@ -1234,7 +1240,7 @@ function startupCheck() {
   }
 
   // 检查视觉模式配置
-  if (shouldUseExternalVision()) {
+  if (shouldUseExternalVision(activeAI)) {
     if (hasExternalVisionConfig()) {
       pass("视觉模式", `${VISION_MODE} -> external: ${VISION_MODEL} @ ${VISION_BASE_URL}`);
     } else {
@@ -1383,10 +1389,10 @@ async function main() {
   if (activeAI === "api") {
     try {
       const store = sessions.api;
+      const events = await loadAllEvents();
       for (const [, u] of store) {
         const activeSess = u.list.find(s => s.id === u.activeId);
         if (activeSess && (!activeSess._apiMessages || activeSess._apiMessages.length === 0)) {
-          const events = await loadAllEvents();
           const sessionEvents = events.filter(e => e.sessionId === activeSess.id && e.text?.trim()).sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)));
           activeSess._apiMessages = sessionEvents.map(e => ({ role: e.role === "assistant" ? "assistant" : "user", content: e.text, _eventId: e.id }));
         }

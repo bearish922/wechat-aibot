@@ -6,7 +6,6 @@ import { configValue, envOrConfig, configBool, configNumber } from "./config.mjs
 import { RUNTIME_DIR, dataPath, ensureDir } from "./paths.mjs";
 import { log } from "./utils.mjs";
 import { loadPrompts, beijingISO } from "./reply.mjs";
-import { buildRagContextBlock } from "./prompts.mjs";
 import { profileTemplates } from "./state.mjs";
 import { apiChatStream, apiChatJson, apiChatWithTools, isApiConfigured, resolveApiConfig } from "./api-client.mjs";
 
@@ -369,6 +368,121 @@ function writeHiddenUsageEvent(event) {
   } catch {}
 }
 
+// Preserve failed output outside the active transcript/session. Rollback can
+// stay clean while the exact response remains available for diagnosis.
+function writeFailedStructuredOutput({
+  failureKind,
+  error,
+  baseUsageEvent,
+  stdout = "",
+  stderr = "",
+  content = null,
+  exitCode = null,
+  sessionId = null,
+  usage = null,
+}) {
+  try {
+    ensureDir(LOGS_DIR);
+    const rawOutput = String(stdout || "");
+    const record = {
+      type: "failed_structured_output",
+      schema_version: 1,
+      archived_at: beijingISO(),
+      failure_kind: failureKind,
+      error: String(error || ""),
+      ...baseUsageEvent,
+      session_id: sessionId || baseUsageEvent?.session_id || null,
+      exit_code: exitCode,
+      output_sha256: crypto.createHash("sha256").update(rawOutput, "utf8").digest("hex"),
+      stdout: rawOutput,
+      stderr: String(stderr || ""),
+      content,
+      usage,
+    };
+    fs.appendFileSync(
+      path.join(LOGS_DIR, "failed-structured-output.jsonl"),
+      JSON.stringify(record) + "\n",
+      "utf-8",
+    );
+  } catch (archiveError) {
+    log("warn", `failed output archive error: ${archiveError.message}`);
+  }
+}
+
+function archiveRejectedStructuredResult(raw, {
+  label = "structured",
+  error = "schema validation failed",
+  sessionId = null,
+} = {}) {
+  if (raw === null || raw === undefined) return;
+  let serialized = "";
+  try {
+    serialized = typeof raw === "string" ? raw : JSON.stringify(raw);
+  } catch {
+    serialized = String(raw);
+  }
+  const hiddenCall = raw?._hiddenCall && typeof raw._hiddenCall === "object"
+    ? raw._hiddenCall
+    : {};
+  writeFailedStructuredOutput({
+    failureKind: "schema_validation",
+    error,
+    baseUsageEvent: {
+      type: "hidden_call_usage",
+      label,
+      model: hiddenCall.model || null,
+      session_id: sessionId || hiddenCall.session_id || null,
+      started_at: hiddenCall.started_at || null,
+      duration_ms: hiddenCall.duration_ms || 0,
+    },
+    stdout: serialized,
+    content: raw,
+    sessionId: sessionId || hiddenCall.session_id || null,
+    usage: raw?._hiddenUsage || null,
+  });
+}
+
+function providerErrorInfo(status, rawMessage = "") {
+  const code = Number(status) || null;
+  const raw = String(rawMessage || "").replace(/\s+/g, " ").trim();
+  const lower = raw.toLowerCase();
+  if (code === 402 || lower.includes("insufficient balance") || lower.includes("insufficient credit")) {
+    return {
+      kind: "api_error",
+      status: code || 402,
+      retryable: false,
+      userMessage: "模型服务余额不足，请充值或切换可用模型后重试",
+    };
+  }
+  if (code === 401 || code === 403) {
+    return {
+      kind: "api_error",
+      status: code,
+      retryable: false,
+      userMessage: "模型服务鉴权失败，请检查 API Key、账户权限或模型路由配置",
+    };
+  }
+  if (code === 429) {
+    return {
+      kind: "api_error",
+      status: code,
+      retryable: true,
+      userMessage: "模型服务请求过于频繁，请稍后重试",
+    };
+  }
+  const safeMessage = raw
+    .replace(/(?:sk-|key-)[A-Za-z0-9_-]{8,}/g, "[REDACTED]")
+    .slice(0, 160);
+  return {
+    kind: "api_error",
+    status: code,
+    retryable: code === null || code >= 500,
+    userMessage: code
+      ? `上游模型请求失败（HTTP ${code}）${safeMessage ? `：${safeMessage}` : ""}`
+      : `上游模型请求失败${safeMessage ? `：${safeMessage}` : ""}`,
+  };
+}
+
 // runHiddenJson - 在后台以 JSON 输出模式调用 Claude Code，获取结构化数据
 // 用于非对话场景的后台 AI 调用（如记忆提取、内容分类等），不保持会话上下文
 // 参数:
@@ -383,7 +497,7 @@ function writeHiddenUsageEvent(event) {
 //   options.persist - 是否保持会话上下文（默认 false，即无状态调用）
 //   options.systemPrompt - 系统提示词（会写入临时文件）
 // 返回: 解析后的 JSON 对象（含 _toolUsage、_hiddenUsage、_hiddenCall 元数据），失败返回 null
-async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, bare = true, model = null, sessionName = "", sessionId = "", firstTurn = false, persist = false, systemPrompt = "", profile = "" } = {}) {
+async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, bare = true, model = null, sessionName = "", sessionId = "", firstTurn = false, persist = false, systemPrompt = "", profile = "", preserveStructuredErrors = false } = {}) {
   // Claude 命令不可用时直接返回 null
   if (!commandExists(CLAUDE)) return null;
   // 记录调用开始时间和模型
@@ -448,10 +562,12 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
   let stdout = "";
   let stderr = "";
   let timer;
+  let timedOut = false;
   // 等待子进程结束，设置超时定时器
   const code = await new Promise(resolve => {
     // 超时后强制杀掉子进程
     timer = setTimeout(() => {
+      timedOut = true;
       killProc(proc);
       resolve(null);
     }, timeoutMs);
@@ -479,6 +595,26 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
     context_chars: String(prompt || "").length,
     system_chars: String(systemPrompt || "").length,
   };
+  if (timedOut) {
+    const error = `timeout after ${timeoutMs}ms`;
+    log("warn", label + " failed: " + error);
+    writeHiddenUsageEvent({
+      ...baseUsageEvent,
+      duration_ms: Date.now() - startedMs,
+      success: false,
+      timed_out: true,
+      error,
+    });
+    writeFailedStructuredOutput({
+      failureKind: "timeout",
+      error,
+      baseUsageEvent,
+      stdout,
+      stderr,
+      exitCode: code,
+    });
+    return null;
+  }
   // 非零退出码且无标准输出时视为完全失败
   if (code !== 0 && !stdout.trim()) {
     log("warn", label + " failed: exit " + code + (stderr ? "; " + stderr.slice(-200) : ""));
@@ -487,6 +623,14 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
       duration_ms: Date.now() - startedMs,
       success: false,
       error: "exit " + code + (stderr ? "; " + stderr.slice(-300) : ""),
+    });
+    writeFailedStructuredOutput({
+      failureKind: "process_exit",
+      error: "exit " + code,
+      baseUsageEvent,
+      stdout,
+      stderr,
+      exitCode: code,
     });
     return null;
   }
@@ -504,6 +648,22 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
         success: false,
         error: "api_error " + (outer.api_error_status || "?") + ": " + errText.slice(0, 300),
       });
+      writeFailedStructuredOutput({
+        failureKind: "api_error",
+        error: "api_error " + (outer.api_error_status || "?") + ": " + errText,
+        baseUsageEvent,
+        stdout,
+        stderr,
+        content: outer,
+        exitCode: code,
+        sessionId: outer.session_id || sessionId || null,
+        usage: usageSummary(outer, outer.modelUsage),
+      });
+      if (preserveStructuredErrors) {
+        return {
+          _structuredError: providerErrorInfo(outer.api_error_status, errText),
+        };
+      }
       return null;
     }
     // 提取实际内容（优先取 result 字段，其次 message、text，最后使用原始 stdout）
@@ -532,6 +692,7 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
       // 将成功的调用写入用量日志
       writeHiddenUsageEvent(parsed._hiddenCall);
     } else {
+      const failureUsage = usageSummary(outer, outer.modelUsage);
       writeHiddenUsageEvent({
         ...baseUsageEvent,
         session_id: outer.session_id || sessionId || null,
@@ -539,7 +700,18 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
         success: false,
         error: "structured output was not an object",
         output_chars: String(content || "").length,
-        ...usageSummary(outer, outer.modelUsage),
+        ...failureUsage,
+      });
+      writeFailedStructuredOutput({
+        failureKind: "non_object",
+        error: "structured output was not an object",
+        baseUsageEvent,
+        stdout,
+        stderr,
+        content,
+        exitCode: code,
+        sessionId: outer.session_id || sessionId || null,
+        usage: failureUsage,
       });
     }
     return parsed;
@@ -553,47 +725,36 @@ async function runHiddenJson(prompt, { label = "hidden", timeoutMs = 300_000, ba
       error: e.message,
       output_chars: stdout.length,
     });
+    writeFailedStructuredOutput({
+      failureKind: "parse_error",
+      error: e.message,
+      baseUsageEvent,
+      stdout,
+      stderr,
+      exitCode: code,
+    });
     return null;
   }
 }
 
 // 计算 Claude Code 项目 session 目录
 // AI_WORK_DIR 对应的项目 slug 由绝对路径变换而来
-function sessionProjectDir() {
+function sessionProjectDir(configDir = "") {
   const slug = AI_WORK_DIR.replace(/^([A-Za-z]):/, '$1-').replace(/[/\\]/g, '-');
-  return path.join(USER_HOME, '.claude', 'projects', slug);
+  const root = configDir || path.join(USER_HOME, '.claude');
+  return path.join(root, 'projects', slug);
+}
+
+function sessionProjectDirsForProfile(profile = "") {
+  const dirs = [];
+  const profileDir = claudeConfigDirFor(profile);
+  if (profileDir) dirs.push(sessionProjectDir(profileDir));
+  dirs.push(sessionProjectDir());
+  return [...new Set(dirs)];
 }
 
 // 查找 session 对应的持久化文件路径
 // 优先按 sessionId 精确匹配；若未找到，扫描目录按 sessionName（customTitle/agentName）匹配
-export function findSessionFile(sessionId, sessionName) {
-  const dir = sessionProjectDir();
-  if (!fs.existsSync(dir)) return null;
-  const exact = path.join(dir, `${sessionId}.jsonl`);
-  if (fs.existsSync(exact)) return exact;
-  if (!sessionName) return null;
-  // 按 sessionName 搜索（可能有多份同名 session，取最新修改的）
-  let best = null;
-  let bestMtime = 0;
-  try {
-    for (const f of fs.readdirSync(dir)) {
-      if (!f.endsWith('.jsonl')) continue;
-      const fp = path.join(dir, f);
-      try {
-        const head = fs.readFileSync(fp, 'utf-8').slice(0, 400);
-        const firstLine = head.split('\n')[0];
-        const parsed = JSON.parse(firstLine);
-        if (parsed.sessionId === sessionId) return fp;
-        if (parsed.customTitle === sessionName || parsed.agentName === sessionName) {
-          const st = fs.statSync(fp);
-          if (st.mtimeMs > bestMtime) { best = fp; bestMtime = st.mtimeMs; }
-        }
-      } catch {}
-    }
-  } catch {}
-  return best;
-}
-
 // runClaudeStream - 以 stream-json 模式启动 Claude Code 进行流式对话
 // 将 AI 输出逐行解析为 JSON 事件，通过 onEvent 回调实时推送
 // 参数:
@@ -610,6 +771,7 @@ export function findSessionFile(sessionId, sessionName) {
 // 返回: Promise，resolve 时返回 { code, stderr, killed }；promise 上挂载 .proc 引用
 function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePrompt, memoryPrompt = "", profileOverride = null, options = {}) {
   const profile = profileOverride;
+  const cliSessionName = String(sessionName || "session").replace(/[&|<>()^%!"]/g, "_");
   // 按优先级拼接系统提示词的各个组成部分
   const systemPromptParts = [];
   // 1) 角色模板（最高优先级）
@@ -626,7 +788,7 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
   // 构建 Claude Code CLI 参数列表
   const args = [
     "-p",
-    "--name", sessionName,
+    "--name", cliSessionName,
     "--output-format", "stream-json",
     "--verbose",
     "--permission-mode", "bypassPermissions",
@@ -738,12 +900,21 @@ function runClaudeStream(ai, sid, sessionName, body, firstTurn, onEvent, stylePr
 //   stylePrompt - 风格提示词
 //   profileOverride - 角色配置文件覆盖
 // 返回: 拼接完成的完整提示文本
+function codexRagContextBlock(ragContext, profile = "") {
+  if (!ragContext) return "";
+  return [
+    "【本轮知识库检索结果】",
+    loadPrompts(profile).ragContextInstruction,
+    ragContext,
+  ].filter(Boolean).join("\n");
+}
+
 function buildCodexPrompt(ai, userBody, ragContext, profile = "") {
   let prompt = userBody;
   // 如果有 RAG 检索结果，将其作为最高优先级的上下文块前置
   if (ragContext) {
     prompt = [
-      buildRagContextBlock(ragContext, profile, "【本轮知识库检索结果】"),
+      codexRagContextBlock(ragContext, profile),
       "",
       "---",
       "",
@@ -781,10 +952,13 @@ function codexUsageSummary(usage = null, { total = null, modelContextWindow = 0 
 
 // Continuity-sensitive callers must use exact SID matching. Name lookup is
 // diagnostic-only because multiple generations intentionally share one title.
-export function findExactSessionFile(sessionId) {
+export function findExactSessionFile(sessionId, profile = "") {
   if (!sessionId) return null;
-  const exact = path.join(sessionProjectDir(), `${sessionId}.jsonl`);
-  return fs.existsSync(exact) ? exact : null;
+  for (const dir of sessionProjectDirsForProfile(profile)) {
+    const exact = path.join(dir, `${sessionId}.jsonl`);
+    if (fs.existsSync(exact)) return exact;
+  }
+  return null;
 }
 
 function codexToolName(item = null) {
@@ -1180,7 +1354,13 @@ async function runCodexJson(prompt, { label = "hidden", timeoutMs = 300_000, mod
     system_chars: String(systemPrompt || "").length,
   };
   if (result.code !== 0 || !result.text.trim()) {
-    writeHiddenUsageEvent({ ...baseEvent, success: false, error: result.stderr || `exit ${result.code}` });
+    const timedOut = Boolean(result.timedOut);
+    writeHiddenUsageEvent({
+      ...baseEvent,
+      success: false,
+      timed_out: timedOut,
+      error: timedOut ? `timeout after ${timeoutMs}ms` : (result.stderr || `exit ${result.code}`),
+    });
     return null;
   }
   try {
@@ -1350,6 +1530,8 @@ export {
   toolUsageFromUsage,
   usageSummary,
   writeHiddenUsageEvent,
+  archiveRejectedStructuredResult,
+  providerErrorInfo,
   killProc,
   isApiConfigured,
   resolveApiConfig,

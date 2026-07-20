@@ -10,6 +10,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawn, execSync } from "node:child_process";
 import { beijingISO } from "../app/lib/time-utils.mjs";
+import { loadAllEvents } from "../app/lib/chat-history.mjs";
 
 // ─── Path setup — ensure imports from app/lib resolve correctly ───
 const SCRIPT_DIR = import.meta.dirname;
@@ -65,25 +66,6 @@ let promptConfig = {};
 try {
   promptConfig = JSON.parse(fs.readFileSync(path.join(DATA_DIR, "prompts.json"), "utf-8"));
 } catch { /* use defaults */ }
-
-// ─── Load chat-history.json ────────────────────────────────────
-function loadAllEvents() {
-  const file = path.join(DATA_DIR, "chat-history.json");
-  const bak = path.join(DATA_DIR, "chat-history.bak.json");
-  try {
-    if (fs.existsSync(file)) {
-      const data = JSON.parse(fs.readFileSync(file, "utf-8"));
-      return Array.isArray(data?.events) ? data.events : [];
-    }
-  } catch {}
-  try {
-    if (fs.existsSync(bak)) {
-      const data = JSON.parse(fs.readFileSync(bak, "utf-8"));
-      return Array.isArray(data?.events) ? data.events : [];
-    }
-  } catch {}
-  return [];
-}
 
 // ─── Time formatting helpers ───────────────────────────────────
 function formatZonedTimeParts(date, tz) {
@@ -935,7 +917,7 @@ async function main() {
   console.log("");
 
   // Load chat history
-  const allEvents = loadAllEvents();
+  const allEvents = await loadAllEvents();
   console.log(`Loaded ${allEvents.length} chat history events`);
 
   const groups = buildConversationGroups(allEvents);

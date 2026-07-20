@@ -25,7 +25,7 @@ export async function handleHelp(userId, ctx) {
     `【AI 切换】`,
     `/cc                 切换到 Claude Code`,
     `/codex              切换到 Codex`,
-    `/api                切换到 Direct API（仅 RP 模式可用）`,
+    `/api                切换到 Direct API`,
     ``,
     `【线程管理】`,
     `/new [名称]         创建新会话线程`,
@@ -82,7 +82,7 @@ export async function handleCodex(userId, ctx) {
 //   ctx       - 微信上下文 token
 //   messageAI - 当前活跃的 AI 后端标识（用于获取活跃会话）
 // 输出：无（副作用：切换 AI 后端、加载历史上下文、发送确认消息）
-export async function handleAPI(userId, ctx, messageAI) {
+export async function handleAPI(userId, ctx) {
   if (!isApiConfigured()) { await sendMessage(userId, "⚠️ API 未配置，请在 config.json 设置 api.baseUrl 和 api.apiKey", ctx); return; }
   if (activeAI === "api") { await sendMessage(userId, "⚠️ 当前已是 Direct API", ctx); return; }
   setActiveAI("api");
@@ -163,7 +163,7 @@ export async function handleRename(userId, body, ctx, messageAI) {
   if (!rest) { await sendMessage(userId, "用法: /rename <新名称>  重命名当前线程\n/rename [序号|名称] <新名称>  重命名指定线程", ctx); return; }
   const tokens = rest.split(/\s+/);
   const first = tokens[0];
-  const numIdx = parseInt(first);
+  const numIdx = /^\d+$/.test(first) ? Number(first) : 0;
   const u = ensureUser(userId, messageAI);
   // 判断第一个 token 是数字序号还是名称
   const isNumRef = Number.isInteger(numIdx) && numIdx >= 1 && numIdx <= u.list.length;
@@ -216,7 +216,7 @@ export async function handleSessions(userId, ctx) {
 //   ctx       - 微信上下文 token
 //   activeSess - 当前活跃的 session 对象（可选）
 // 输出：无（副作用：切换角色、发送确认消息）
-export async function handleProfile(userId, body, ctx, activeSess) {
+export async function handleProfile(userId, body, ctx) {
   const rest = body.slice(9).trim();
 
   if (!rest) {
@@ -354,7 +354,7 @@ export async function handleStatus(userId, ctx) {
 //   ctx       - 微信上下文 token
 //   activeSess - 当前活跃的 session 对象
 // 输出：无（副作用：终止 AI 子进程、清空消息队列、发送确认消息）
-export async function handleCancel(userId, body, ctx, activeSess) {
+export async function handleCancel(userId, ctx, activeSess) {
   const sess = activeSess;
   const clearedPending = clearPendingInput(userId);          // 清除待处理消息
   if (!sess?.busy) {

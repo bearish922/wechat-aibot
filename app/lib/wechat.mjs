@@ -45,7 +45,9 @@ export async function apiPost(endpoint, bodyObj = {}, timeoutMs = 15_000) {
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(`${BASE_URL}/${endpoint}`, { method: "POST", headers: apiHeaders(), body: JSON.stringify(bodyObj), signal: ctrl.signal });
-    return await res.json();
+    const text = await res.text();
+    if (!res.ok) throw new Error(`WeChat HTTP ${res.status}: ${text.slice(0, 200)}`);
+    return text ? JSON.parse(text) : {};
   } catch (e) {
     // AbortError 时返回超时错误码而非抛出
     if (e.name === "AbortError") return { ret: -1, errmsg: "timeout" };
@@ -61,6 +63,7 @@ export async function apiGet(endpoint, timeoutMs = 15_000, baseUrl = BASE_URL) {
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(`${baseUrl}/${endpoint}`, { method: "GET", headers: commonHeaders(), signal: ctrl.signal });
+    if (!res.ok) return { status: "wait" };
     return await res.json();
   } catch (e) {
     // GET 请求失败(含超时)统一返回 wait 状态使轮询继续
@@ -93,7 +96,13 @@ export function loadToken() {
 // 参数: syncBuf - 同步缓冲区(默认取全局 getUpdatesBuf 函数返回的值)
 export function saveToken(syncBuf = getUpdatesBuf) {
   ensureDir(DATA_DIR);
-  fs.writeFileSync(TOKEN_FILE, JSON.stringify({ token, syncBuf, lastActiveAI: activeAI }, null, 2));
+  const tmp = `${TOKEN_FILE}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ token, syncBuf, lastActiveAI: activeAI }, null, 2), "utf-8");
+    fs.renameSync(tmp, TOKEN_FILE);
+  } finally {
+    try { fs.rmSync(tmp, { force: true }); } catch {}
+  }
 }
 
 // ─── QR login ───────────────────────────────────────────────
@@ -160,11 +169,13 @@ export async function loginWithQr() {
 export async function sendMessage(toUserId, text, contextToken) {
   // 空文本直接返回成功(不发送空消息)
   if (!text?.trim()) return true;
+  // 同一条逻辑消息的重试必须复用 client_id，避免“服务端已收到但响应丢失”时重复发送。
+  const clientId = shortId();
   // 最多 3 次尝试
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const resp = await apiPost("ilink/bot/sendmessage", {
-        msg: { to_user_id: toUserId, client_id: shortId(), message_type: 2, message_state: 2,
+        msg: { to_user_id: toUserId, client_id: clientId, message_type: 2, message_state: 2,
           // 消息类型 type=1 表示文本消息
           item_list: [{ type: 1, text_item: { text } }], context_token: contextToken || undefined },
       });

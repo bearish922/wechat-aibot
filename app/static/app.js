@@ -35,6 +35,10 @@ function roleSelectOptions(profiles = []) {
 
 tabs.forEach(btn => {
   btn.addEventListener("click", () => {
+    if (activeTab === "memory") {
+      captureMemoryEditors();
+      if ((worldMemoryDirty || memoryDirty) && !window.confirm("当前有尚未保存的记忆修改，确定要离开吗？")) return;
+    }
     tabs.forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     activeTab = btn.dataset.tab;
@@ -48,15 +52,6 @@ function toast(msg, ok = true) {
   el.textContent = msg;
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 3000);
-}
-
-function showModal(title, body) {
-  const overlay = document.createElement("div");
-  overlay.className = "modal-overlay";
-  overlay.innerHTML = `<div class="modal-box"><div class="modal-head"><h3>${escHtml(title)}</h3><button class="btn modal-close">&times;</button></div><div class="modal-body"><pre style="white-space:pre-wrap;max-height:60vh;overflow:auto;font-size:13px;line-height:1.5">${escHtml(body)}</pre></div></div>`;
-  overlay.querySelector(".modal-close").addEventListener("click", () => overlay.remove());
-  overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
-  document.body.appendChild(overlay);
 }
 
 function showSceneMemoryEditor(profile, text) {
@@ -133,7 +128,7 @@ async function renderStatus() {
   const d = await get("/api/sessions");
   const rows = d.sessions.map(s => `
     <tr>
-      <td><span class="badge badge-${s.ai === 'cc' ? 'cc' : 'codex'}">${s.ai === 'cc' ? 'CC' : s.ai === 'api' ? 'API' : 'Codex'}</span></td>
+      <td><span class="badge badge-${s.ai === 'cc' ? 'cc' : s.ai === 'codex' ? 'codex' : 'default'}">${s.ai === 'cc' ? 'CC' : s.ai === 'api' ? 'API' : 'Codex'}</span></td>
       <td>${s.active ? '<span class="badge badge-cc" style="margin-right:6px">Active</span>' : ''}${escHtml(s.name)}</td>
       <td><span class="badge badge-default">${escHtml(s.profile)}</span></td>
       <td>${s.busy ? 'Busy' : s.queue ? 'Queue(' + Number(s.queue) + ')' : 'Idle'}</td>
@@ -155,11 +150,12 @@ async function renderStatus() {
         <div class="stat-tile"><span>Model</span><strong data-stat="model">${escHtml(s.currentModel)}</strong></div>
         <div class="stat-tile"><span>CC Sessions</span><strong data-stat="ccCount">${Number(s.sessions?.cc || 0)}</strong></div>
         <div class="stat-tile"><span>Codex Sessions</span><strong data-stat="codexCount">${Number(s.sessions?.codex || 0)}</strong></div>
+        <div class="stat-tile"><span>API Sessions</span><strong data-stat="apiCount">${Number(s.sessions?.api || 0)}</strong></div>
       </div>
     </div>
     ${renderCCContext(s)}
     <div class="panel">
-      <div class="panel-head"><h2>Sessions (${d.currentAI === 'cc' ? 'Claude Code' : 'Codex'})</h2></div>
+      <div class="panel-head"><h2>Sessions (${d.currentAI === 'cc' ? 'Claude Code' : d.currentAI === 'api' ? 'Direct API' : 'Codex'})</h2></div>
       <div class="table-wrap"><table>
         <thead><tr><th>AI</th><th>Name</th><th>Profile</th><th>Status</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="4">No sessions</td></tr>'}</tbody>
@@ -181,8 +177,19 @@ async function pollStatusUpdate() {
   try {
     const s = await get("/api/status");
     if (activeTab !== "status") return;
+    if (window._activeBackend !== s.currentAI) {
+      window._activeBackend = s.currentAI;
+      await renderStatus();
+      return;
+    }
     const grid = document.getElementById("statGrid");
     if (!grid) return;
+    const online = document.querySelector(".status-pill");
+    if (online) {
+      online.textContent = s.online ? "Online" : "Offline";
+      online.classList.toggle("online", Boolean(s.online));
+      online.classList.toggle("offline", !s.online);
+    }
 
     const setStat = (name, val) => { const el = grid.querySelector(`[data-stat="${name}"]`); if (el) el.textContent = val; };
 
@@ -190,6 +197,7 @@ async function pollStatusUpdate() {
     setStat("model", s.currentModel);
     setStat("ccCount", String(s.sessions?.cc || 0));
     setStat("codexCount", String(s.sessions?.codex || 0));
+    setStat("apiCount", String(s.sessions?.api || 0));
 
     const apiTile = grid.querySelector('[data-stat="apiCtx"]');
     if (s.apiContext) {
@@ -339,7 +347,7 @@ function renderResumeCommands(commands) {
           </div>
           <div class="resume-command-stack">
             <code class="resume-command">${escHtml(item.command)}</code>
-            ${item.hiddenWorldSid ? `<code class="resume-command">hidden-world: claude --resume ${escHtml(item.hiddenWorldSid)}${item.hiddenWorldFirstTurn ? " (first turn)" : ""}</code>` : '<code class="resume-command">hidden-world: not started</code>'}
+            ${item.hiddenWorldSid ? `<code class="resume-command">hidden-world: ${item.ai === "codex" ? "codex resume" : "claude --resume"} ${escHtml(item.hiddenWorldSid)}${item.hiddenWorldFirstTurn ? " (first turn)" : ""}</code>` : '<code class="resume-command">hidden-world: not started</code>'}
           </div>
           <button class="btn resume-copy" data-action="copy-resume" data-command="${escAttr(item.command)}">Copy</button>
         </div>
@@ -392,9 +400,9 @@ function debounce(fn, ms) {
   return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
 }
 
-async function savePromptField(key, value, silent = false) {
+async function savePromptField(key, value, silent = false, profile = selectedRoleProfile) {
   try {
-    const body = { profile: selectedRoleProfile };
+    const body = { profile };
     // runtimePolicy.* 字段发送为嵌套对象
     if (key.startsWith("runtimePolicy.")) {
       const subKey = key.slice("runtimePolicy.".length);
@@ -428,6 +436,7 @@ async function renderPrompts() {
   const [pf, wd] = await Promise.all([get("/api/profiles"), get("/api/world/roles")]);
   const profiles = pf.profiles || [];
   await resolveSelectedRole(profiles);
+  const renderedProfile = selectedRoleProfile;
   const pd = await get(`/api/prompts/${encodeURIComponent(selectedRoleProfile)}`);
   const p = pd.prompts || {};
   const selectedProfile = profiles.find(pr => pr.name === selectedRoleProfile) || {};
@@ -455,7 +464,7 @@ async function renderPrompts() {
     if (el.dataset.ms === 'h') val = fromH(val);
     else if (el.dataset.ms === 'd') val = fromD(val);
     else if (el.dataset.ms === '1') val = fromS(val);
-    await savePromptField(key, val);
+    await savePromptField(key, val, false, renderedProfile);
   }, 300);
 
   content.querySelectorAll('.prompts-editable').forEach(el => {
@@ -481,7 +490,7 @@ async function renderPrompts() {
         const key = ta.dataset.key;
         if (!key) return;
         const lines = ta.value.split('\n').map(s => s.trim()).filter(Boolean);
-        await savePromptField(key, lines);
+        await savePromptField(key, lines, false, renderedProfile);
       }, 300);
       el.addEventListener('input', () => debouncedSaveArr(el));
       el.addEventListener('change', () => debouncedSaveArr(el));
@@ -581,14 +590,6 @@ async function renderPrompts() {
 }
 
 
-function switchTab(name) {
-  tabs.forEach(b => b.classList.remove("active"));
-  const target = document.querySelector(`nav button[data-tab="${name}"]`);
-  if (target) target.classList.add("active");
-  activeTab = name;
-  render();
-}
-
 // 追踪哪些文本预览字段处于编辑状态，key 为字段名，值为 true/false
 // 切换角色时（promptsEditing = {}）清空所有编辑状态
 let promptsEditing = {};
@@ -680,12 +681,9 @@ function renderMainReplyPipeline(p, profile, profiles) {
             ${renderRagKeywordChips(p)}
             <label class="pipeline-sub-label" style="margin-top:8px">RAG 上下文说明（仅 RAG 命中时注入）</label>
             ${renderTextPreview("ragContextInstruction", p.ragContextInstruction)}
-            ${renderControlGrid([
-              renderNumberControl("ragTopK", "Top-K", p.ragTopK || 6, 1, 20, "docs"),
-              renderNumberControl("ragMinScore", "最低分数", p.ragMinScore || 0.48, 0, 1, "score", { step: "0.01" }),
-              renderNumberControl("ragResultMaxChars", "最大字符数", p.ragResultMaxChars || 3600, 500, 10000, "chars"),
-              renderNumberControl("ragTimeoutMs", "超时", p.ragTimeoutMs, 5, 120, "s", { ms: true }),
-            ])}
+            <p style="color:var(--muted);font-size:13px;margin:8px 0 0">
+              Top-K、最低分数、超时等检索参数是全局 RAG 设置，请在 Config 页的 RAG 区域编辑；这里仅编辑角色如何理解检索结果。
+            </p>
           `,
         })}
       </div>
@@ -703,15 +701,12 @@ function renderPipelineStep({ n, title, desc, body = "", wide = false }) {
           <div class="pipeline-field-head">
             <span class="pipeline-field-label">${String(n).padStart(2, "0")} ${escHtml(title)}</span>
           </div>
+          ${desc ? `<p class="pipeline-step-desc">${escHtml(desc)}</p>` : ""}
           ${body}
         </div>
       </div>
     </div>
   `;
-}
-
-function renderPipelineMeta(items = []) {
-  return "";
 }
 
 function renderControlGrid(items = []) {
@@ -839,10 +834,6 @@ function renderRagKeywordChips(p) {
     <div class="rag-kw-chips">${chips || '<span class="rag-kw-empty">（暂无关键词）</span>'}</div>
     ${addRow}
   </div>`;
-}
-
-function renderPipelineArrow(text) {
-  return "";
 }
 
 async function openRoleManager(initialName = selectedRoleProfile) {
@@ -1350,7 +1341,7 @@ function scRefreshCalendar() {
 
 function scRefreshDays() {
   const monthLabel = document.getElementById('scMonthLabel');
-  if (monthLabel) monthLabel.textContent = `${scState.viewMonth}月`;
+  if (monthLabel) monthLabel.textContent = `${scState.viewYear}年 ${scState.viewMonth}月`;
 
   const weekdays = document.getElementById('scWeekdays');
   if (weekdays) {
@@ -1439,15 +1430,7 @@ function scRefreshEditPanel() {
     input.addEventListener('input', () => {
       clearTimeout(scInputTimer);
       scInputTimer = setTimeout(() => {
-        const val = input.value.trim();
-        const [m, d] = selected.split('-').map(Number);
-        const idx = scState.fixed.findIndex(e => e.month === m && e.day === d);
-        if (val) {
-          if (idx >= 0) scState.fixed[idx].desc = val;
-          else scState.fixed.push({ month: m, day: d, desc: val });
-        } else {
-          if (idx >= 0) scState.fixed.splice(idx, 1);
-        }
+        const val = scCommitSelectedDescription();
         scRefreshDays();
         scRefreshFloating();
         scUpdateButtonCount();
@@ -1509,10 +1492,7 @@ function buildFloatFormHtml(defaultMonth) {
   const weeks = WEEK_NUM_LABELS.map((w, i) =>
     `<option value="${i + 1}">${w}</option>`
   ).join('');
-  const days = WEEKDAY_NAMES.map(d =>
-    d === "星期日" ? `<option value="${d}">${d}</option>` :
-    `<option value="${d}">${d}</option>`
-  ).join('');
+  const days = WEEKDAY_NAMES.map(d => `<option value="${d}">${d}</option>`).join('');
   return `<span class="sc-float-group"><select id="scFloatMonth">${months}</select><span class="sc-float-label">月</span></span><span class="sc-float-group"><span class="sc-float-label">第</span><select id="scFloatWeek">${weeks}</select><span class="sc-float-label">个</span></span><span class="sc-float-group"><select id="scFloatDay">${days}</select></span><input id="scFloatDesc" class="sc-float-desc" placeholder="描述">`;
 }
 
@@ -1593,6 +1573,21 @@ function scSyncToTextarea() {
   }
 }
 
+function scCommitSelectedDescription() {
+  const input = document.getElementById("scDescInput");
+  if (!input || !scState.selected) return "";
+  const val = input.value.trim();
+  const [month, day] = scState.selected.split("-").map(Number);
+  const index = scState.fixed.findIndex(entry => entry.month === month && entry.day === day);
+  if (val) {
+    if (index >= 0) scState.fixed[index].desc = val;
+    else scState.fixed.push({ month, day, desc: val });
+  } else if (index >= 0) {
+    scState.fixed.splice(index, 1);
+  }
+  return val;
+}
+
 function scOpenCalendar() {
   const ta = document.getElementById('snap_scheduleSpecialDates');
   const val = (ta && ta.value !== undefined) ? ta.value : '';
@@ -1611,6 +1606,9 @@ function scOpenCalendar() {
 }
 
 async function scSaveCalendar() {
+  clearTimeout(scInputTimer);
+  scInputTimer = null;
+  scCommitSelectedDescription();
   scSyncToTextarea();
   const ta = document.getElementById('snap_scheduleSpecialDates');
   if (ta) {
@@ -1632,48 +1630,6 @@ function scUpdateButtonCount() {
 function scCloseCalendar() {
   const overlay = document.getElementById('scheduleCalendarOverlay');
   if (overlay) overlay.style.display = 'none';
-}
-
-function renderWorldSessionSnapshot(role, usage) {
-  const world = role.worldSession || {};
-  const sessions = role.sessions || [];
-  return `
-    <div class="world-session-grid">
-      ${renderWorldBox("Hidden World", [
-        ["sid", world.sid || "(not started)"],
-        ["resume", world.sid ? `claude --resume ${world.sid}` : "(not started)"],
-        ["model", world.model || "(default scenelet model)"],
-        ["firstTurn", String(Boolean(world.firstTurn))],
-        ["lastUsedAt", formatTime(world.lastUsedAt)],
-      ])}
-      ${renderWorldBox("Last Usage", [
-        ["duration", usage?.duration_ms ? `${usage.duration_ms}ms` : ""],
-        ["input", usage?.input_tokens ?? ""],
-        ["cacheRead", usage?.cache_read_input_tokens ?? ""],
-        ["cacheCreate", usage?.cache_creation_input_tokens ?? ""],
-        ["output", usage?.output_tokens ?? ""],
-      ])}
-      ${renderWorldBox("Wechat Threads", [
-        ["count", sessions.length],
-        ["active", sessions.filter(s => s.active).length],
-        ["pending", sessions.reduce((sum, s) => sum + Number(s.pendingIntents || 0), 0)],
-      ])}
-    </div>
-    ${sessions.length ? `<div class="table-wrap"><table><thead><tr><th>AI</th><th>Thread</th><th>Main sid</th><th>Visible turns</th><th>Pending</th></tr></thead><tbody>${sessions.map(s => `
-      <tr><td>${escHtml(s.ai)}</td><td>${escHtml(s.sessionName)}${s.active ? " · active" : ""}</td><td>${escHtml(s.sid || "")}</td><td>${Number(s.visibleTurns || 0)}</td><td>${Number(s.pendingIntents || 0)}</td></tr>
-    `).join("")}</tbody></table></div>` : '<p class="empty-text">No bound WeChat threads for this profile</p>'}
-  `;
-}
-
-function renderWorldBox(title, rows) {
-  return `
-    <div class="world-box">
-      <h3>${escHtml(title)}</h3>
-      ${rows.map(([k, v]) => `
-        <div class="world-kv"><span>${escHtml(k)}</span><strong>${escHtml(String(v ?? ""))}</strong></div>
-      `).join("")}
-    </div>
-  `;
 }
 
 function bindWorldEvents() {
@@ -1725,7 +1681,7 @@ function bindWorldEvents() {
 }
 
 // History
-let historyState = { q: "", sessionKey: "", page: 1, dateFrom: "", dateTo: "" };
+let historyState = { q: "", source: "active", sessionKey: "", archiveId: "", archiveProfile: "", page: 1, dateFrom: "", dateTo: "" };
 const HISTORY_PAGE_SIZE = 20;
 
 async function renderHistory() {
@@ -1738,16 +1694,31 @@ async function renderHistory() {
   const dtParam = dateTo ? `&dateTo=${encodeURIComponent(dateTo)}` : "";
   const conv = await get(`/api/history/conversations?q=${encodeURIComponent(q)}${dfParam}${dtParam}`);
   const conversations = conv.conversations || [];
-  if (!historyState.sessionKey && conversations.length) historyState.sessionKey = conversations[0].key;
-  if (historyState.sessionKey && !conversations.some(x => x.key === historyState.sessionKey) && conversations.length) {
-    historyState.sessionKey = conversations[0].key;
+  const archivedConversations = conv.archivedConversations || [];
+  const hasActiveSelection = historyState.source === "active" && conversations.some(x => x.key === historyState.sessionKey);
+  const hasArchiveSelection = historyState.source === "archive" && archivedConversations.some(x => x.archiveId === historyState.archiveId && x.profile === historyState.archiveProfile);
+  if (!hasActiveSelection && !hasArchiveSelection) {
+    if (conversations.length) {
+      Object.assign(historyState, { source: "active", sessionKey: conversations[0].key, archiveId: "", archiveProfile: "" });
+    } else if (archivedConversations.length) {
+      Object.assign(historyState, { source: "archive", sessionKey: archivedConversations[0].key, archiveId: archivedConversations[0].archiveId, archiveProfile: archivedConversations[0].profile });
+    } else {
+      Object.assign(historyState, { source: "active", sessionKey: "", archiveId: "", archiveProfile: "" });
+    }
   }
 
   const page = historyState.page || 1;
-  const skParam = historyState.sessionKey ? `&sessionKey=${encodeURIComponent(historyState.sessionKey)}` : "";
   const qParam = q ? `&q=${encodeURIComponent(q)}` : "";
-  const msgPath = `/api/history/messages?page=${page}&pageSize=${HISTORY_PAGE_SIZE}${skParam}${qParam}${dfParam}${dtParam}`;
-  const msg = historyState.sessionKey ? await get(msgPath) : { messages: [], total: 0, page: 1, totalPages: 1 };
+  const sourceParam = `&source=${encodeURIComponent(historyState.source || "active")}`;
+  const skParam = historyState.source === "active" && historyState.sessionKey ? `&sessionKey=${encodeURIComponent(historyState.sessionKey)}` : "";
+  const archiveParam = historyState.source === "archive"
+    ? `&archiveId=${encodeURIComponent(historyState.archiveId)}&profile=${encodeURIComponent(historyState.archiveProfile)}`
+    : "";
+  const msgPath = `/api/history/messages?page=${page}&pageSize=${HISTORY_PAGE_SIZE}${sourceParam}${skParam}${archiveParam}${qParam}${dfParam}${dtParam}`;
+  const hasSelection = historyState.source === "archive" ? historyState.archiveId : historyState.sessionKey;
+  const msg = hasSelection ? await get(msgPath) : { messages: [], total: 0, page: 1, totalPages: 1 };
+  const selectedActive = historyState.source === "active" ? conversations.find(x => x.key === historyState.sessionKey) : null;
+  const selectedProfile = selectedActive?.profile || "";
 
   content.innerHTML = `
     <div class="panel history-panel">
@@ -1763,15 +1734,17 @@ async function renderHistory() {
             <span class="history-date-sep">-</span>
             <input id="historyDateTo" class="history-date" type="date" value="${escAttr(dateTo)}" title="To date">
           </span>
+          <button id="historyArchiveBtn" class="btn btn-sm" ${selectedProfile ? "" : "disabled"} data-profile="${escAttr(selectedProfile)}">Archive</button>
+          <button id="historyHardResetBtn" class="btn btn-sm btn-danger" ${selectedProfile ? "" : "disabled"} data-profile="${escAttr(selectedProfile)}">Archive + Hard Reset</button>
         </div>
       </div>
       <div class="history-layout">
         <aside class="history-conversations">
-          ${renderHistoryConversations(conversations)}
+          ${renderHistoryConversations(conversations, archivedConversations)}
         </aside>
         <section class="history-messages">
           ${renderPagination(msg.total || 0, msg.page || 1, msg.totalPages || 1)}
-          ${renderHistoryMessages(msg.messages || [])}
+          ${renderHistoryMessages(msg.messages || [], historyState.source)}
           ${renderPagination(msg.total || 0, msg.page || 1, msg.totalPages || 1)}
         </section>
       </div>
@@ -1782,26 +1755,12 @@ async function renderHistory() {
 }
 
 function bindHistoryEvents() {
-  // Add edit buttons to messages if API mode
-  if (backendCanEdit()) {
-    document.querySelectorAll(".history-message").forEach(article => {
-      const header = article.querySelector("header");
-      if (!header || header.querySelector(".btn-edit")) return;
-      const btn = document.createElement("button");
-      btn.className = "btn-edit";
-      btn.textContent = "edit";
-      btn.dataset.eid = article.dataset.eid;
-      btn.addEventListener("click", () => editHistoryMsg(btn));
-      const span = document.createElement("span");
-      span.className = "header-edit";
-      span.appendChild(btn);
-      header.appendChild(span);
-    });
-  }
   const doSearch = () => {
     const input = content.querySelector("#historySearch");
     historyState.q = (input?.value || "").trim();
     historyState.sessionKey = "";
+    historyState.archiveId = "";
+    historyState.archiveProfile = "";
     historyState.page = 1;
     renderHistory();
   };
@@ -1819,9 +1778,38 @@ function bindHistoryEvents() {
     historyState.page = 1;
     renderHistory();
   });
+  content.querySelector("#historyArchiveBtn")?.addEventListener("click", async e => {
+    const profile = e.currentTarget.dataset.profile;
+    if (!profile) return;
+    e.currentTarget.disabled = true;
+    const r = await post("/api/worldline/archive", { profiles: [profile], reason: "manual archive from History GUI" });
+    toast(r.ok ? `Archived ${profile}` : (r.error || "Archive failed"), r.ok);
+    await renderHistory();
+  });
+  content.querySelector("#historyHardResetBtn")?.addEventListener("click", async e => {
+    const profile = e.currentTarget.dataset.profile;
+    if (!profile) return;
+    const text = `Archive and hard reset ${profile}?\n\nThis clears active visible history, runtime world state, life arcs, proactive intents, memories, and backend session state for this profile. The old worldline will remain in Archived Worldlines.`;
+    if (!confirm(text)) return;
+    e.currentTarget.disabled = true;
+    const closeModal = showBlockingModal("Archiving Worldline", `Archiving and hard resetting ${profile}...`);
+    try {
+      const r = await post("/api/worldline/archive-reset", { profiles: [profile], reason: "hard reset from History GUI" });
+      closeModal();
+      toast(r.ok ? `Hard reset complete: ${profile}` : (r.error || "Hard reset failed"), r.ok);
+      Object.assign(historyState, { source: "active", sessionKey: "", archiveId: "", archiveProfile: "", page: 1 });
+      await renderHistory();
+    } catch (err) {
+      closeModal();
+      toast("Hard reset failed: " + err.message, false);
+    }
+  });
   content.querySelectorAll("[data-history-session]").forEach(btn => {
     btn.addEventListener("click", () => {
-      historyState.sessionKey = btn.dataset.historySession;
+      historyState.source = btn.dataset.historySource || "active";
+      historyState.sessionKey = btn.dataset.historySession || "";
+      historyState.archiveId = btn.dataset.historyArchiveId || "";
+      historyState.archiveProfile = btn.dataset.historyArchiveProfile || "";
       historyState.q = "";
       historyState.page = 1;
       renderHistory();
@@ -1878,10 +1866,9 @@ function renderPagination(total, page, totalPages, prefix = "history", label = "
   return `<div class="pagination"><span class="page-info">${total} ${label}</span><div class="page-btns">${pages.join("")}</div></div>`;
 }
 
-function renderHistoryConversations(conversations) {
-  if (!conversations.length) return '<p class="empty-text">No conversations yet</p>';
-  return conversations.map(item => `
-    <button class="history-conv ${item.key === historyState.sessionKey ? "active" : ""}" data-history-session="${escAttr(item.key)}">
+function renderHistoryConversations(conversations, archivedConversations = []) {
+  const activeHtml = conversations.length ? conversations.map(item => `
+    <button class="history-conv ${historyState.source === "active" && item.key === historyState.sessionKey ? "active" : ""}" data-history-source="active" data-history-session="${escAttr(item.key)}">
       <span class="history-conv-top">
         <strong>${escHtml(item.profile || item.sessionName || "Session")}</strong>
       </span>
@@ -1889,20 +1876,46 @@ function renderHistoryConversations(conversations) {
       <span class="history-conv-last">${escHtml(item.lastText || "")}</span>
       <time>${formatTime(item.lastTimestamp)}</time>
     </button>
-  `).join("");
+  `).join("") : '<p class="empty-text">No active conversations</p>';
+  const archivedHtml = archivedConversations.length ? archivedConversations.map(item => `
+    <button class="history-conv history-conv-archived ${historyState.source === "archive" && item.archiveId === historyState.archiveId && item.profile === historyState.archiveProfile ? "active" : ""}"
+      data-history-source="archive"
+      data-history-session="${escAttr(item.key)}"
+      data-history-archive-id="${escAttr(item.archiveId)}"
+      data-history-archive-profile="${escAttr(item.profile)}">
+      <span class="history-conv-top">
+        <strong>${escHtml(item.profile || "Archived")}</strong>
+        <span class="history-source-badge">Archived</span>
+      </span>
+      <span class="history-conv-meta">${Number(item.count || 0)} msgs · ${Number(item.sceneletCount || 0)} scenelets</span>
+      <span class="history-conv-last">${escHtml(item.lastText || "")}</span>
+      <time>${formatTime(item.archiveCreatedAt || item.lastTimestamp)}</time>
+    </button>
+  `).join("") : '<p class="empty-text">No archived worldlines</p>';
+  return `
+    <div class="history-source-section">
+      <div class="history-source-title">Active</div>
+      ${activeHtml}
+    </div>
+    <details class="history-source-section history-archive-section"${!conversations.length && archivedConversations.length ? " open" : ""}>
+      <summary class="history-source-title">Archived Worldlines <span>${archivedConversations.length}</span></summary>
+      <div class="history-archive-list">${archivedHtml}</div>
+    </details>
+  `;
 }
 
-const backendCanEdit = () => window._activeBackend === "api";
+const backendCanEdit = () => true;
 
-function renderHistoryMessages(messages) {
+function renderHistoryMessages(messages, source = "active") {
   if (!messages.length) return '<p class="empty-text">No messages in this conversation</p>';
+  const archived = source === "archive";
   return messages.map(item => `
     <article class="history-message ${item.role === "assistant" ? "assistant" : "user"}">
       <header>
         <span>${item.role === "assistant" ? escHtml(item.profile || "Assistant") : "User"}</span>
         <time>${formatTime(item.timestamp)}</time>
         ${item.kind && item.kind !== "chat" ? `<span class="history-kind">${escHtml(item.kind)}</span>` : ""}
-        <span class="header-edit">${backendCanEdit() ? `<button class="btn-edit" data-eid="${escAttr(item.id)}" onclick="editHistoryMsg(this)">edit</button>` : ''}</span>
+        ${archived ? '<span class="history-kind">archived</span>' : `<span class="header-edit"><button class="btn-edit" data-eid="${escAttr(item.id)}" onclick="editHistoryMsg(this)">edit</button></span>`}
       </header>
       <div class="history-text" data-eid="${escAttr(item.id)}">${escHtml(item.text || "")}</div>
       ${renderHistorySceneletNote(item)}
@@ -2330,6 +2343,8 @@ let memoryProfile = "";
 let memoryPreview = true;
 let worldMemoryDoc = "";
 let worldMemoryPreview = true;
+let memoryDirty = false;
+let worldMemoryDirty = false;
 
 function renderMd(src) {
   const esc = String(src)
@@ -2353,20 +2368,41 @@ function renderMd(src) {
   }).join("\n");
 }
 
-async function renderMemory() {
+function captureMemoryEditors() {
+  if (!worldMemoryPreview) {
+    const editor = document.getElementById("worldMemoryToggleBtn-editor");
+    if (editor && editor.value !== worldMemoryDoc) {
+      worldMemoryDoc = editor.value;
+      worldMemoryDirty = true;
+    }
+  }
+  if (!memoryPreview) {
+    const editor = document.getElementById("memoryToggleBtn-editor");
+    if (editor && editor.value !== memoryDoc) {
+      memoryDoc = editor.value;
+      memoryDirty = true;
+    }
+  }
+}
+
+async function renderMemory({ reload = true } = {}) {
   const resp = await get("/api/profiles");
   const profiles = (resp.profiles || []).map(p => p.name).filter(Boolean);
   if (!profiles.length) profiles.push("默认");
   if (!memoryProfile) memoryProfile = profiles.includes("白鹭千圣") ? "白鹭千圣" : profiles[0];
 
-  const [wd, ud] = await Promise.all([
-    get("/api/world-memory?profile=" + encodeURIComponent(memoryProfile)),
-    get("/api/memory?profile=" + encodeURIComponent(memoryProfile)),
-  ]);
-  worldMemoryDoc = wd.content || "";
-  memoryDoc = ud.content || "";
+  if (reload) {
+    const [wd, ud] = await Promise.all([
+      get("/api/world-memory?profile=" + encodeURIComponent(memoryProfile)),
+      get("/api/memory?profile=" + encodeURIComponent(memoryProfile)),
+    ]);
+    worldMemoryDoc = wd.content || "";
+    memoryDoc = ud.content || "";
+    worldMemoryDirty = false;
+    memoryDirty = false;
+  }
 
-  function memoryPanel(label, doc, preview, toggleId, saveId, extraHead = "") {
+  function memoryPanel(label, doc, preview, dirty, toggleId, saveId, extraHead = "") {
     return `
       <div class="panel">
         <div class="panel-head">
@@ -2375,7 +2411,7 @@ async function renderMemory() {
           <div style="display:flex;gap:8px">
             <span style="color:var(--muted);font-size:13px;align-self:center">${doc.length} chars</span>
             <button class="btn" id="${toggleId}">${preview ? "Edit" : "Preview"}</button>
-            <button class="btn btn-primary" id="${saveId}">Save</button>
+            <button class="btn btn-primary" id="${saveId}"${preview ? ' disabled title="请先进入编辑模式"' : ""}>${dirty ? "Save *" : "Save"}</button>
           </div>
         </div>
         ${preview
@@ -2392,29 +2428,45 @@ async function renderMemory() {
     </div>`;
 
   content.innerHTML = `
-    ${memoryPanel("World Memory", worldMemoryDoc, worldMemoryPreview, "worldMemoryToggleBtn", "worldMemorySaveBtn", profileSelectHtml)}
-    ${memoryPanel("User Memory", memoryDoc, memoryPreview, "memoryToggleBtn", "memorySaveBtn")}
+    ${memoryPanel("World Memory", worldMemoryDoc, worldMemoryPreview, worldMemoryDirty, "worldMemoryToggleBtn", "worldMemorySaveBtn", profileSelectHtml)}
+    ${memoryPanel("User Memory", memoryDoc, memoryPreview, memoryDirty, "memoryToggleBtn", "memorySaveBtn")}
   `;
 
   document.getElementById("memoryProfileSelect")?.addEventListener("change", e => {
+    captureMemoryEditors();
+    if ((worldMemoryDirty || memoryDirty) && !window.confirm("当前角色有尚未保存的记忆修改，确定要放弃并切换角色吗？")) {
+      e.target.value = memoryProfile;
+      return;
+    }
     memoryProfile = e.target.value;
-    renderMemory();
+    worldMemoryPreview = true;
+    memoryPreview = true;
+    renderMemory({ reload: true });
   });
 
   function bindPanel(toggleId, saveId, previewKey, apiPath, label) {
     document.getElementById(toggleId).addEventListener("click", () => {
+      captureMemoryEditors();
       if (previewKey === "w") worldMemoryPreview = !worldMemoryPreview;
       else memoryPreview = !memoryPreview;
-      renderMemory();
+      renderMemory({ reload: false });
     });
     document.getElementById(saveId).addEventListener("click", async () => {
+      captureMemoryEditors();
       const previewing = previewKey === "w" ? worldMemoryPreview : memoryPreview;
       const currentDoc = previewKey === "w" ? worldMemoryDoc : memoryDoc;
       const text = previewing ? currentDoc : document.getElementById(toggleId + "-editor").value;
-      await put(apiPath, { content: text, profile: memoryProfile });
+      const result = await put(apiPath, { content: text, profile: memoryProfile });
+      if (!result.ok) {
+        toast(result.error || `${label} 保存失败`, false);
+        return;
+      }
       if (previewKey === "w") worldMemoryDoc = text;
       else memoryDoc = text;
+      if (previewKey === "w") worldMemoryDirty = false;
+      else memoryDirty = false;
       toast(label + " saved");
+      renderMemory({ reload: false });
     });
   }
 
@@ -2446,13 +2498,19 @@ function setRagKw(groupKey, arr) {
 }
 
 // Config
+function configControlId(key) {
+  return `config_${String(key).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
 function F(key, label, value, type, placeholder = "") {
-  return `<div class="form-group"><label>${label}</label><input name="${key}" value="${escHtml(String(value ?? ''))}" type="${type || 'text'}" placeholder="${escAttr(placeholder)}"></div>`;
+  const id = configControlId(key);
+  return `<div class="form-group"><label for="${id}">${label}</label><input id="${id}" name="${key}" value="${escHtml(String(value ?? ''))}" type="${type || 'text'}" placeholder="${escAttr(placeholder)}"></div>`;
 }
 function Select(key, label, value, options) {
+  const id = configControlId(key);
   const selected = String(value ?? "");
   const opts = options.map(([val, text]) => `<option value="${escAttr(val)}"${selected === val ? " selected" : ""}>${escHtml(text)}</option>`).join("");
-  return `<div class="form-group"><label>${label}</label><select name="${key}">${opts}</select></div>`;
+  return `<div class="form-group"><label for="${id}">${label}</label><select id="${id}" name="${key}">${opts}</select></div>`;
 }
 function S(title, body) { return `<h3>${title}</h3>${body}`; }
 
@@ -2461,13 +2519,15 @@ async function renderConfig() {
   const c = d.config || {};
 
   const formHtml = [
-    S("Paths", F("paths.npmGlobal", "NPM Global Directory", c.paths?.npmGlobal, "text", "Auto") + F("paths.claude", "Claude Code Path", c.paths?.claude, "text", "Auto") + F("paths.codex", "Codex Path", c.paths?.codex, "text", "Auto") + F("paths.ragScript", "RAG Script Path", c.paths?.ragScript, "text", "Auto") + F("paths.workDir", "AI Working Directory", c.paths?.workDir, "text", "Auto")),
+    S("Paths", F("paths.npmGlobal", "NPM Global Directory", c.paths?.npmGlobal, "text", "Auto") + F("paths.claude", "Claude Code Path", c.paths?.claude, "text", "Auto") + F("paths.codex", "Codex Path", c.paths?.codex, "text", "Auto") + F("paths.ragScript", "RAG Script Path", c.paths?.ragScript, "text", "Auto") + F("paths.workDir", "AI Working Directory", c.paths?.workDir, "text", "Auto") + F("paths.profileClaudeConfigDirs", "Profile Claude Config Map (JSON)", JSON.stringify(c.paths?.profileClaudeConfigDirs || {}), "text", "{\"角色\":\"C:\\\\path\"}")),
     S("API", F("api.baseUrl", "API Base URL", c.api?.baseUrl, "text", "https://api.deepseek.com") + F("api.apiKey", "API Key", c.api?.apiKey, "password") + F("api.model", "API Model", c.api?.model, "text", "deepseek-v4-pro")),
     S("Proxy", F("proxy.https", "Shared HTTPS Proxy", c.proxy?.https, "text", "Fallback") + F("proxy.claudeHttps", "Claude HTTPS Proxy", c.proxy?.claudeHttps, "text") + F("proxy.codexHttps", "Codex HTTPS Proxy", c.proxy?.codexHttps, "text") + F("proxy.ragHttps", "RAG HTTPS Proxy", c.proxy?.ragHttps, "text", "Fallback")),
-    S("Models", F("models.claudeFast", "Claude Fast Model", c.models?.claudeFast) + F("models.claudeFallback", "Claude Fallback Model", c.models?.claudeFallback)),
+    S("Models", F("models.claudeMain", "Claude Main Model", c.models?.claudeMain) + F("models.claudeFast", "Claude Fast Model", c.models?.claudeFast) + F("models.claudeFallback", "Claude Fallback Model", c.models?.claudeFallback) + F("models.codexMain", "Codex Main Model", c.models?.codexMain) + F("models.codexReasoningEffort", "Codex Reasoning Effort", c.models?.codexReasoningEffort) + F("models.claudeContextMax", "Claude Context Max", c.models?.claudeContextMax, "number") + F("models.codexContextMax", "Codex Context Max", c.models?.codexContextMax, "number")),
     S("Timeouts", F("timeouts.aiMs", "AI Timeout (ms)", c.timeouts?.aiMs, "number")),
+    S("Scene", Select("scene.sceneletBare", "Scenelet Bare Mode", String(c.scene?.sceneletBare ?? false), [["true", "Yes"], ["false", "No"]])),
     S("Vision", Select("vision.mode", "Mode", c.vision?.mode || "auto", [["auto", "Auto"], ["external", "External API"], ["native", "Native backend"], ["off", "Off"]]) + F("vision.baseUrl", "API Base URL", c.vision?.baseUrl, "text") + F("vision.apiKey", "API Key", c.vision?.apiKey, "password") + F("vision.model", "Model Name", c.vision?.model) + F("vision.detail", "Detail Level", c.vision?.detail) + F("vision.timeoutMs", "Timeout (ms)", c.vision?.timeoutMs, "number")),
-    S("RAG", F("rag.knowledgeDir", "Knowledge Directory", c.rag?.knowledgeDir) + F("rag.collectionName", "Collection Name", c.rag?.collectionName) + F("rag.embedModel", "Embedding Model", c.rag?.embedModel) + F("rag.storeDir", "Vector Store Dir", c.rag?.storeDir) + F("rag.scoreMargin", "Score Margin", c.rag?.scoreMargin, "number") + F("rag.chunkMaxChars", "Chunk Max Chars", c.rag?.chunkMaxChars, "number") + F("rag.batchSize", "Batch Size", c.rag?.batchSize, "number") + F("rag.enabled", "Enabled (true/false)", c.rag?.enabled)),
+    S("Voice", Select("voice.enabled", "Enabled", String(c.voice?.enabled ?? true), [["true", "Yes"], ["false", "No"]]) + F("voice.whisperxPython", "WhisperX Python", c.voice?.whisperxPython, "text", "python") + F("voice.model", "Model", c.voice?.model, "text", "large-v3") + F("voice.language", "Language", c.voice?.language, "text", "auto") + F("voice.computeType", "Compute Type", c.voice?.computeType, "text", "default") + F("voice.batchSize", "Batch Size", c.voice?.batchSize, "number") + F("voice.sampleRate", "Sample Rate", c.voice?.sampleRate, "number") + Select("voice.noAlign", "Disable Alignment", String(c.voice?.noAlign ?? true), [["true", "Yes"], ["false", "No"]]) + F("voice.timeoutMs", "Timeout (ms)", c.voice?.timeoutMs, "number")),
+    S("RAG", F("rag.knowledgeDir", "Knowledge Directory", c.rag?.knowledgeDir) + F("rag.collectionName", "Collection Name", c.rag?.collectionName) + F("rag.embedModel", "Embedding Model", c.rag?.embedModel) + F("rag.modelCacheDir", "Model Cache Dir", c.rag?.modelCacheDir) + F("rag.storeDir", "Vector Store Dir", c.rag?.storeDir) + F("rag.topK", "Top K", c.rag?.topK, "number") + F("rag.minScore", "Minimum Score", c.rag?.minScore, "number") + F("rag.scoreMargin", "Score Margin", c.rag?.scoreMargin, "number") + F("rag.chunkMaxChars", "Chunk Max Chars", c.rag?.chunkMaxChars, "number") + F("rag.resultMaxChars", "Result Max Chars", c.rag?.resultMaxChars, "number") + F("rag.batchSize", "Batch Size", c.rag?.batchSize, "number") + F("rag.rerankLimit", "Rerank Limit", c.rag?.rerankLimit, "number") + F("rag.includeDirs", "Include Directories", c.rag?.includeDirs) + F("rag.excludeDirs", "Exclude Directories", c.rag?.excludeDirs) + F("rag.excludeFiles", "Exclude File Patterns", c.rag?.excludeFiles) + Select("rag.enabled", "Enabled", String(c.rag?.enabled ?? true), [["true", "Yes"], ["false", "No"]])),
     S("Send", F("send.chunkSendDelayMs", "Chunk Send Delay (ms)", c.send?.chunkSendDelayMs, "number") + F("send.maxCancelReasonLength", "Max Cancel Reason Length", c.send?.maxCancelReasonLength, "number")),
     S("Logs", F("logs.retentionDays", "Retention (days, 0=never)", c.logs?.retentionDays, "number")),
   ].join("");
@@ -2500,7 +2560,10 @@ function buildNested(fd) {
     const last = parts[parts.length - 1];
     if (val === "true") cur[last] = true;
     else if (val === "false") cur[last] = false;
-    else if (["aiMs", "timeoutMs", "topK", "minScore", "scoreMargin", "chunkMaxChars", "resultMaxChars", "batchSize", "retentionDays", "chunkSendDelayMs", "maxCancelReasonLength"].includes(last)) cur[last] = Number(val);
+    else if (["aiMs", "timeoutMs", "topK", "minScore", "scoreMargin", "chunkMaxChars", "resultMaxChars", "batchSize", "rerankLimit", "sampleRate", "claudeContextMax", "codexContextMax", "retentionDays", "chunkSendDelayMs", "maxCancelReasonLength"].includes(last)) cur[last] = Number(val);
+    else if (last === "profileClaudeConfigDirs") {
+      try { cur[last] = JSON.parse(val); } catch { cur[last] = val; }
+    }
     else cur[last] = val;
   }
   return obj;

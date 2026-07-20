@@ -192,7 +192,7 @@ export function splitText(text, maxBytes = MAX_REPLY_LEN) {
       // 对超长的单个段落，按句子边界（句号、感叹号、问号等）进行拆分
       let remaining = para;
       while (Buffer.byteLength(remaining, "utf-8") > maxBytes) {
-        const estChars = Math.floor(maxBytes / 3); // 对 CJK 字符取保守估算（每个 CJK 字符约占 3 字节）
+        const estChars = Math.max(1, Math.floor(maxBytes / 3)); // 至少推进一个字符，避免极小上限导致死循环
         const slice = remaining.slice(0, estChars);
         let bestBreak = -1;
         for (const bp of ["。", "！", "？", "!", "?", "\n"]) {
@@ -285,6 +285,21 @@ function collapseParts(parts, limit) {
     parts.splice(best + 1, 1);
   }
   return parts;
+}
+
+export function formatParentheticalLineBreaks(text) {
+  let t = String(text || "").replace(/\r\n?/g, "\n");
+  if (!t.trim()) return "";
+  t = t
+    // If a parenthetical action follows dialogue, make it its own readable line.
+    .replace(/([^\n])[\t ]*([（(])/g, "$1\n$2")
+    // If dialogue follows a parenthetical action, start it on the next line.
+    .replace(/([）)])[\t ]*(?=[^\s\n。，、！？!?；;：:」』”’）)\]])/g, "$1\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return t;
 }
 
 // 入口：将 AI 回复拆分为多条消息

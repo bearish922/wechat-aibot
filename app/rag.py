@@ -88,7 +88,6 @@ META_FILE = STORE_DIR / "rag_meta.json"
 COLLECTION_NAME = str(cfg("rag.collectionName", "bangdream_knowledge"))
 
 EMBED_MODEL = os.environ.get("WEIXIN_RAG_EMBED_MODEL") or str(cfg("rag.embedModel", "BAAI/bge-small-zh-v1.5"))
-EMBED_DIM = 512
 TOP_K = cfg_int("rag.topK", 3)
 MIN_SCORE = cfg_float("rag.minScore", 0.48)
 SCORE_MARGIN = cfg_float("rag.scoreMargin", 0.16)
@@ -580,6 +579,9 @@ def cmd_build():
     print(f"Loading embedding model: {EMBED_MODEL}")
     model = require_embedding()
     vectors = embed_passages(model, chunks)
+    if not vectors or not len(vectors[0]):
+        raise RuntimeError("embedding model returned no vectors")
+    vector_dim = len(vectors[0])
 
     if STORE_DIR.exists():
         shutil.rmtree(STORE_DIR)
@@ -589,7 +591,7 @@ def cmd_build():
     try:
         client.create_collection(
             COLLECTION_NAME,
-            vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
+            vectors_config=VectorParams(size=vector_dim, distance=Distance.COSINE),
         )
 
         points = []
@@ -622,7 +624,7 @@ def cmd_build():
             json.dumps(
                 {
                     "model": EMBED_MODEL,
-                    "dimension": EMBED_DIM,
+                    "dimension": vector_dim,
                     "collection": COLLECTION_NAME,
                     "chunks": len(chunks),
                     "top_k": TOP_K,
@@ -930,8 +932,6 @@ def result_allowed_for_query(payload: dict, qmeta: dict) -> bool:
     doc_type = str(payload.get("doc_type") or payload.get("type") or "")
     relation_pairs = set(ensure_list(payload.get("relation_pairs")))
     if relation_pairs and relation_pairs.isdisjoint(explicit_pairs):
-        return False
-    if doc_type in {"relationship", "boundary", "timeline"} and relation_pairs and relation_pairs.isdisjoint(explicit_pairs):
         return False
     return True
 

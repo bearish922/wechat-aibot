@@ -4,9 +4,11 @@ import { uuid } from "./utils.mjs";
 import { log } from "./utils.mjs";
 import { DATA_DIR, dataPath, ensureDir } from "./paths.mjs";
 import { sessions, profileTemplates } from "./state.mjs";
-import { normalizeWorldState, normalizeWorldSession, normalizeLifeArcs, getSceneConfig } from "./normalize.mjs";
-import { beijingISO } from "./reply.mjs";
+import { normalizeWorldState, normalizeWorldSession, normalizeLifeArcs, normalizeLifeTexture, normalizeLifeArcTimeSlots, getSceneConfig } from "./normalize.mjs";
+import { beijingISO, loadPrompts } from "./reply.mjs";
 import { backendModel, normalizeBackend } from "./backend-adapter.mjs";
+import { validateScheduleArc } from "./schedule-validation.mjs";
+import { timeSlotsFromRange } from "./time-slots.mjs";
 
 function normalizeSceneMemoryMap(raw) {
   const out = { cc: "", codex: "", api: "" };
@@ -149,10 +151,13 @@ function normalizeRoleWorld(raw = {}, profile = "默认") {
     _worldState: normalizeWorldState(raw._worldState || raw.worldState),
     // 世界内容跨后端共享；模型线程按后端分别续接
     _worldSessions: worldSessions,
-    // 运行时默认只保留仍有效的 active life arcs；关闭项仅在显式查询时读取。
-    _lifeArcs: normalizeLifeArcs(raw._lifeArcs || raw.lifeArcs),
+    // 持久层保留 active / closed / expired life arcs；运行时查询时再筛选。
+    _lifeArcs: normalizeLifeArcs(raw._lifeArcs || raw.lifeArcs, { includeClosed: true }),
     // 上次每日分享种子时间戳
     _lastDailyShareSeedAt: raw._lastDailyShareSeedAt ? String(raw._lastDailyShareSeedAt) : null,
+    // 世界状态推进或 daily-share 生成失败后的短退避截止时间
+    _dailyShareSeedRetryAfter: raw._dailyShareSeedRetryAfter ? String(raw._dailyShareSeedRetryAfter) : null,
+    _dailyShareSeedRetryReason: raw._dailyShareSeedRetryReason ? String(raw._dailyShareSeedRetryReason) : null,
     // 上次日程检查时间戳
     _lastScheduleCheckAt: raw._lastScheduleCheckAt ? String(raw._lastScheduleCheckAt) : null,
     // 待处理的日程候选列表
@@ -178,8 +183,10 @@ function roleWorldSnapshot(world) {
     profile: roleWorldKey(world?.profile),
     _worldState: normalizeWorldState(world?._worldState),
     _worldSessions: normalizeWorldSessions(world?._worldSessions),
-    _lifeArcs: normalizeLifeArcs(world?._lifeArcs),
+    _lifeArcs: normalizeLifeArcs(world?._lifeArcs, { includeClosed: true }),
     _lastDailyShareSeedAt: world?._lastDailyShareSeedAt || null,
+    _dailyShareSeedRetryAfter: world?._dailyShareSeedRetryAfter || null,
+    _dailyShareSeedRetryReason: world?._dailyShareSeedRetryReason || null,
     _lastScheduleCheckAt: world?._lastScheduleCheckAt || null,
     _pendingScheduleCandidates: Array.isArray(world?._pendingScheduleCandidates) ? world._pendingScheduleCandidates : [],
     _sceneMemory: normalizeSceneMemoryMap(world?._sceneMemory),
@@ -201,16 +208,147 @@ function lifeArcPromptItems(roleWorld) {
     title: arc.title,
     summary: arc.summary,
     progress_note: arc.progressNote,
+    life_texture: arc.lifeTexture || null,
     kind: arc.kind || null,
     time_start: arc.timeStart || null,
     time_end: arc.timeEnd || null,
     time_slots: arc.timeSlots || null,
+    duration_hours: arc.durationHours || null,
     updated_at: arc.updatedAt,
     expires_at: arc.expiresAt,
   }));
 }
 
+function cleanLifeText(value = "") {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function truncateText(value = "", max = 180) {
+  const text = cleanLifeText(value);
+  return text.length > max ? text.slice(0, Math.max(0, max - 1)) + "…" : text;
+}
+
+function splitLifeDetails(value = "", maxItems = 4, maxText = 120) {
+  const seen = new Set();
+  return cleanLifeText(value)
+    .split(/(?<=[。])|[；;]/)
+    .map(part => truncateText(part, maxText))
+    .map(part => part.replace(/[。！？!?]$/, "").trim())
+    .filter(part => part.length >= 8)
+    .filter(part => {
+      const key = part.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, maxItems);
+}
+
+function arcTimeMs(value) {
+  const ms = Date.parse(value || "");
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function lifeArcRelevance(arc, nowMs) {
+  const startMs = arcTimeMs(arc.timeStart);
+  const endMs = arcTimeMs(arc.timeEnd);
+  const dayMs = 24 * 60 * 60 * 1000;
+  if (arc.kind === "school" && startMs !== null && endMs !== null && endMs - startMs > 14 * dayMs) {
+    return "background";
+  }
+  if (startMs !== null && endMs !== null && startMs <= nowMs && nowMs <= endMs) return "current";
+  if (startMs !== null && startMs >= nowMs && startMs - nowMs <= 36 * 60 * 60 * 1000) return "near";
+  if (startMs !== null && startMs >= nowMs && startMs - nowMs <= 7 * dayMs) return "later_this_week";
+  if (arc.kind === "school") return "background";
+  return "future";
+}
+
+function relevanceRank(value) {
+  return { current: 0, near: 1, later_this_week: 2, background: 3, future: 4 }[value] ?? 9;
+}
+
+function whenLabel(relevance) {
+  return {
+    current: "现在相关",
+    near: "接下来一两天",
+    later_this_week: "这周稍后",
+    background: "长期背景",
+    future: "未来安排",
+  }[relevance] || "背景";
+}
+
+function lifeArcOneLine(arc, relevance, maxText = 180) {
+  if (arc?.lifeTexture?.currentLifeTexture) return truncateText(arc.lifeTexture.currentLifeTexture, maxText);
+  const detailSource = [arc.summary, arc.progressNote].filter(Boolean).join(" ");
+  const details = splitLifeDetails(detailSource, 4, maxText);
+  const detail = details.find(part => !part.startsWith("为")) || details[0] || "";
+  const prefix = `${whenLabel(relevance)}有${arc.title || "一项安排"}`;
+  return truncateText(detail ? `${prefix}。${detail}` : prefix, maxText);
+}
+
+function lifeTextureDetails(arc, maxDetails = 4) {
+  const modelDetails = Array.isArray(arc?.lifeTexture?.concreteChatableDetails)
+    ? arc.lifeTexture.concreteChatableDetails.map(x => truncateText(x, 130)).filter(Boolean)
+    : [];
+  if (modelDetails.length) return modelDetails.slice(0, maxDetails);
+  const detailSource = arc ? [arc.summary, arc.progressNote].filter(Boolean).join(" ") : "";
+  const primaryDetails = arc ? splitLifeDetails(detailSource, maxDetails + 2, 130) : [];
+  return primaryDetails.length > 1
+    ? primaryDetails.filter(part => !part.startsWith("为")).slice(0, maxDetails)
+    : primaryDetails.slice(0, maxDetails);
+}
+
+function lifeTexturePromptItems(roleWorld, { now = new Date(), maxDetails = 4, maxBackground = 2 } = {}) {
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(now);
+  const arcs = normalizeLifeArcs(roleWorld?._lifeArcs)
+    .map(arc => ({ ...arc, relevance: lifeArcRelevance(arc, Number.isFinite(nowMs) ? nowMs : Date.now()) }))
+    .sort((a, b) => {
+      const rank = relevanceRank(a.relevance) - relevanceRank(b.relevance);
+      if (rank !== 0) return rank;
+      return (arcTimeMs(a.timeStart) ?? Number.MAX_SAFE_INTEGER) - (arcTimeMs(b.timeStart) ?? Number.MAX_SAFE_INTEGER);
+    });
+  const primary = arcs.find(arc => arc.relevance !== "future") || arcs[0] || null;
+  const primaryTexture = primary?.lifeTexture || null;
+  const salientDetails = primary ? lifeTextureDetails(primary, maxDetails) : [];
+  return {
+    current_life_texture: primary ? lifeArcOneLine(primary, primary.relevance, 220) : "",
+    salient_details: salientDetails,
+    private_pressure: primaryTexture?.privatePressure || "",
+    mood_residue: primaryTexture?.moodResidue || "",
+    proactive_sendability: primaryTexture?.proactiveSendability || null,
+    what_not_to_say: primaryTexture?.whatNotToSay || [],
+    current_focus: primary ? {
+      title: primary.title,
+      kind: primary.kind || null,
+      relevance: primary.relevance,
+      time_start: primary.timeStart || null,
+      time_end: primary.timeEnd || null,
+    } : null,
+    background_threads: arcs
+      .filter(arc => !primary || arc.id !== primary.id)
+      .filter(arc => ["current", "near", "later_this_week", "background"].includes(arc.relevance))
+      .slice(0, Math.max(0, Number(maxBackground) || 0))
+      .map(arc => ({
+        title: arc.title,
+        kind: arc.kind || null,
+        relevance: arc.relevance,
+        texture: lifeArcOneLine(arc, arc.relevance, 140),
+      })),
+    chat_priority: "background",
+    usage_note: "这是当前生活背景和可用细节，不是默认聊天议题；只有用户询问、场景自然碰到或一句话吐槽足够自然时才显化。",
+  };
+}
+
+function resetRoleRuntimeWorld(profile, now = beijingISO()) {
+  const key = roleWorldKey(profile);
+  const worlds = roleWorldsMap();
+  const fresh = normalizeRoleWorld({ profile: key, updatedAt: now }, key);
+  worlds.set(key, fresh);
+  return fresh;
+}
+
 const ROLE_WORLD_FILE = dataPath("wechat-worlds.json");
+const ROLE_WORLD_BAK_FILE = dataPath("wechat-worlds.backup.json");
 
 // 获取存储在 globalThis 上的全局角色世界 Map
 function roleWorldsMap() {
@@ -228,12 +366,6 @@ export function getRoleWorld(profile) {
     worlds.set(key, normalizeRoleWorld({ profile: key }, key));
   }
   return worlds.get(key);
-}
-
-export function getSceneMemory(roleWorld, backend = "cc") {
-  const map = roleWorld?._sceneMemory;
-  if (map && typeof map === "object") return map[normalizeBackend(backend)] || "";
-  return "";
 }
 
 export function setSceneMemory(roleWorld, text, backend = "cc") {
@@ -266,6 +398,7 @@ export function saveRoleWorlds() {
     // 先写临时文件，再原子替换，避免进程中断留下半截 JSON。
     tempFile = `${ROLE_WORLD_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`;
     fs.writeFileSync(tempFile, JSON.stringify(data, null, 2) + "\n", "utf-8");
+    if (fs.existsSync(ROLE_WORLD_FILE)) fs.copyFileSync(ROLE_WORLD_FILE, ROLE_WORLD_BAK_FILE);
     fs.renameSync(tempFile, ROLE_WORLD_FILE);
     return true;
   } catch (e) {
@@ -284,12 +417,22 @@ export function loadRoleWorlds() {
   const loaded = new Map();
   try {
     if (fs.existsSync(ROLE_WORLD_FILE)) {
-      const data = JSON.parse(fs.readFileSync(ROLE_WORLD_FILE, "utf-8"));
+      let data;
+      let recovered = false;
+      try {
+        data = JSON.parse(fs.readFileSync(ROLE_WORLD_FILE, "utf-8"));
+      } catch (mainError) {
+        if (!fs.existsSync(ROLE_WORLD_BAK_FILE)) throw mainError;
+        data = JSON.parse(fs.readFileSync(ROLE_WORLD_BAK_FILE, "utf-8"));
+        recovered = true;
+        log("⚠️", `主角色世界文件损坏，已从备份恢复: ${mainError.message}`);
+      }
       // 解析 roles 字段，兼容空对象
       const roles = data?.roles && typeof data.roles === "object" ? data.roles : {};
       for (const [profile, raw] of Object.entries(roles)) {
         loaded.set(roleWorldKey(profile), normalizeRoleWorld(raw, profile));
       }
+      if (recovered) fs.copyFileSync(ROLE_WORLD_BAK_FILE, ROLE_WORLD_FILE);
     }
   } catch (e) {
     log("⚠️", `load hidden worlds failed: ${e.message}`);
@@ -318,10 +461,13 @@ export function activeWorldSessionIds() {
 
 // 对角色世界的生活弧线执行批量操作(create/update/close)，由 scenelet 输出驱动
 // 参数: roleWorld - 角色世界对象; rawOps - 操作数组，每项包含 op、id/title、各字段值
-export function applyLifeArcOps(roleWorld, rawOps = []) {
-  if (!roleWorld || !Array.isArray(rawOps) || !rawOps.length) return;
+export function applyLifeArcOps(roleWorld, rawOps = [], options = {}) {
+  if (!roleWorld || !Array.isArray(rawOps) || !rawOps.length) return { applied: 0, rejected: [] };
   const now = new Date();
   const nowIso = beijingISO(now);
+  const applied = [];
+  const rejected = [];
+  const workConfig = options.workEventConfig || loadPrompts(roleWorld.profile).workEventConfig || {};
   // 计算默认过期时间
   const defaultExpiresAt = beijingISO(new Date(now.getTime() + getSceneConfig().scheduleDefaultExpiryFromNowMs));
   // 获取当前所有弧线(含已关闭的)
@@ -355,6 +501,7 @@ export function applyLifeArcOps(roleWorld, rawOps = []) {
       existing.closedAt = nowIso;
       existing.closeReason = raw.reason ? String(raw.reason).slice(0, 300) : existing.closeReason || "closed by scenelet";
       existing.expiresAt = nowIso;
+      applied.push({ op, id: existing.id });
       continue;
     }
 
@@ -366,62 +513,88 @@ export function applyLifeArcOps(roleWorld, rawOps = []) {
     const kind = lifeArcKinds.includes(raw.kind) ? raw.kind : (existing?.kind || null);
     const subject = lifeArcSubjects.includes(raw.subject) ? raw.subject : (existing?.subject || null);
     // time_slots: 可选的结构化时间段，create/update 均可传入
+    const rawTimeSlots = raw.time_slots ?? raw.timeSlots;
+    const hasExplicitTimeSlots = rawTimeSlots !== undefined && rawTimeSlots !== null;
     let timeSlots = existing?.timeSlots || null;
-    if (raw.time_slots !== undefined || raw.timeSlots !== undefined) {
-      const rawSlots = raw.time_slots ?? raw.timeSlots;
-      if (Array.isArray(rawSlots) && rawSlots.length) {
-        timeSlots = rawSlots.map(s => {
-          if (!s || typeof s !== "object") return null;
-          const slot = {};
-          if (s.dayOfWeek || s.day_of_week) {
-            const dow = Number(s.dayOfWeek ?? s.day_of_week);
-            if (Number.isFinite(dow) && dow >= 1 && dow <= 7) slot.dayOfWeek = dow;
-          }
-          if (s.date) slot.date = String(s.date);
-          if (s.start) slot.start = String(s.start);
-          if (s.end) slot.end = String(s.end);
-          return (slot.dayOfWeek || slot.date) && slot.start && slot.end ? slot : null;
-        }).filter(Boolean);
-        if (!timeSlots.length) timeSlots = null;
-      } else {
-        timeSlots = null;
-      }
+    if (hasExplicitTimeSlots) {
+      timeSlots = normalizeLifeArcTimeSlots(rawTimeSlots);
     }
+    const durationHoursRaw = raw.duration_hours ?? raw.durationHours ?? existing?.durationHours;
+    const durationHours = Number.isFinite(Number(durationHoursRaw)) && Number(durationHoursRaw) > 0 ? Number(durationHoursRaw) : null;
+    const timeStart = raw.time_start || raw.timeStart ? String(raw.time_start || raw.timeStart) : (existing?.timeStart || null);
+    const timeEnd = raw.time_end || raw.timeEnd ? String(raw.time_end || raw.timeEnd) : (existing?.timeEnd || null);
+    const timingChanged = [
+      "time_start", "timeStart", "time_end", "timeEnd",
+      "duration_hours", "durationHours",
+    ].some(key => raw[key] !== undefined);
+    if (!hasExplicitTimeSlots && timingChanged) {
+      timeSlots = timeSlotsFromRange(timeStart, timeEnd, { durationHours });
+    }
+    const lifeTexture = raw.life_texture !== undefined || raw.lifeTexture !== undefined
+      ? normalizeLifeTexture(raw.life_texture ?? raw.lifeTexture)
+      : existing?.lifeTexture || null;
     const patch = {
       title: raw.title ? String(raw.title).trim().slice(0, 80) : existing?.title || "",
       summary: raw.summary ? String(raw.summary).trim().slice(0, 500) : existing?.summary || "",
       progressNote: raw.progress_note || raw.progressNote ? String(raw.progress_note || raw.progressNote).trim().slice(0, 500) : existing?.progressNote || "",
+      lifeTexture,
       source: raw.source || raw.basis ? String(raw.source || raw.basis).trim().slice(0, 300) : existing?.source || "",
       kind,
       subject,
-      timeStart: raw.time_start || raw.timeStart ? String(raw.time_start || raw.timeStart) : (existing?.timeStart || null),
-      timeEnd: raw.time_end || raw.timeEnd ? String(raw.time_end || raw.timeEnd) : (existing?.timeEnd || null),
+      timeStart,
+      timeEnd,
       timeSlots,
+      durationHours,
       expiresAt,
     };
     // 如果没有有效内容则跳过
     if (!patch.title && !patch.summary && !patch.progressNote) continue;
 
+    const candidateId = existing?.id || crypto.randomUUID();
+    const candidate = {
+      ...(existing || {}),
+      id: candidateId,
+      status: "active",
+      ...patch,
+    };
+    const scheduleFieldsChanged = op === "create" || timingChanged || hasExplicitTimeSlots || raw.kind !== undefined;
+    if (scheduleFieldsChanged) {
+      const validation = validateScheduleArc(candidate, arcs, {
+        conflictPolicy: workConfig.conflictPolicy,
+        minGapMinutes: workConfig.conflictPolicy?.minGapBetweenEventsMinutes,
+        workHoursPerDay: workConfig.workHoursPerDay,
+      });
+      if (!validation.valid) {
+        rejected.push({ op, id: candidateId, title: candidate.title, errors: validation.errors });
+        log("⚠️", `schedule write rejected [${candidate.title || candidateId}]: ${validation.errors.join("; ")}`);
+        continue;
+      }
+      candidate.timeSlots = validation.timeSlots;
+    }
+
     if (existing) {
       // 已有关闭的弧线不再更新
       if (existing.status === "closed") continue;
       // 更新已有弧线
-      Object.assign(existing, patch, { status: "active", updatedAt: nowIso });
+      Object.assign(existing, candidate, { status: "active", updatedAt: nowIso });
+      applied.push({ op, id: existing.id });
     } else if (op === "create") {
       // 创建新弧线
       arcs.push({
-        id: crypto.randomUUID(),
+        id: candidateId,
         status: "active",
-        ...patch,
+        ...candidate,
         createdAt: nowIso,
         updatedAt: nowIso,
         closedAt: null,
         closeReason: "",
       });
+      applied.push({ op, id: candidateId });
     }
   }
 
   roleWorld._lifeArcs = normalizeLifeArcs(arcs, { includeClosed: true });
+  return { applied: applied.length, operations: applied, rejected };
 }
 
 export {
@@ -431,4 +604,6 @@ export {
   resetWorldSession,
   roleWorldKey,
   lifeArcPromptItems,
+  lifeTexturePromptItems,
+  resetRoleRuntimeWorld,
 };

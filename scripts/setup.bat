@@ -6,7 +6,7 @@ echo.
 cd /d "%~dp0.."
 
 echo [1/3] Installing Node.js dependencies...
-call npm --prefix app install
+call npm --prefix app ci
 if %errorlevel% neq 0 (
     echo ERROR: npm install failed
     pause
@@ -15,7 +15,7 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [2/3] Installing Python dependencies...
-pip install -r app\requirements-rag.txt
+python -m pip install -r app\requirements-rag.txt
 if %errorlevel% neq 0 (
     echo WARNING: pip install failed. RAG features may not work.
 )

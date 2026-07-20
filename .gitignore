@@ -1,4 +1,5 @@
 # Personal config (contains API keys, tokens, paths)
+.claude/settings.local.json
 config.json
 data/config.json
 data/config.json.backup
@@ -61,6 +62,7 @@ data/rag_vector_store/
 data/rag_vector_store*/
 
 # Chat history (contains personal chat data)
+/chat-history.db
 data/chat-history.json
 data/chat-history.bak.json
 data/chat-history.db
@@ -79,6 +81,13 @@ data/wechat-memory.md
 data/wechat-memory.bak.md
 data/wechat-world-memory.md
 data/wechat-world-memory.bak.md
+
+# Accidental root-level runtime snapshots
+/wechat-sessions.json
+/wechat-worlds.json
+
+# Local roleplay drafts
+kabukicho-roleplay-draft.md
 
 # Local backups directory (snapshots of prompts/profiles/code, may contain sensitive content)
 data/backups/

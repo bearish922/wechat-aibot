@@ -66,10 +66,6 @@ describe("Prompts UI — 主回复 + 辅助独立模块", () => {
       "turnResetThreshold",
       "stateStaleThresholdMs",
       "maxCancelReasonLength",
-      "ragTopK",
-      "ragMinScore",
-      "ragResultMaxChars",
-      "ragTimeoutMs",
       "scheduleCheckIntervalMs",
     ];
     const toggles = [
@@ -84,6 +80,10 @@ describe("Prompts UI — 主回复 + 辅助独立模块", () => {
     for (const key of numFields) {
       assert.match(appJs, new RegExp(`renderNumberControl\\("${key}"`), `${key} should be editable`);
     }
+    for (const key of ["ragTopK", "ragMinScore", "ragResultMaxChars", "ragTimeoutMs"]) {
+      assert.doesNotMatch(appJs, new RegExp(`renderNumberControl\\("${key}"`), `${key} belongs to global Config RAG settings, not Prompt editing`);
+    }
+    assert.match(appJs, /Config 页的 RAG 区域编辑/);
     for (const key of toggles) {
       assert.match(appJs, new RegExp(`renderToggleControl\\("${key}"`), `${key} should be toggleable`);
     }

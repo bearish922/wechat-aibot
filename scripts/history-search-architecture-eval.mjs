@@ -6,14 +6,14 @@ import { fileURLToPath } from "node:url";
 import { loadPrompts } from "../app/lib/reply.mjs";
 import { beijingISO, formatZonedTimeParts } from "../app/lib/time-utils.mjs";
 import { memoryItemsText } from "../app/lib/memory.mjs";
+import { loadAllEvents } from "../app/lib/chat-history.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = path.join(ROOT, "data", "runtime", "history-search-architecture-eval", beijingISO().replace(/[:.]/g, "-"));
-const HISTORY_PATH = path.join(ROOT, "data", "chat-history.json");
-const PROFILE_PATH = path.join(ROOT, "wechat-profiles.json");
+const PROFILE_PATH = path.join(ROOT, "data", "wechat-profiles.json");
 const CONFIG_PATH = path.join(ROOT, "data", "config.json");
 const PROFILE = "白鹭千圣";
-const USER_ID = "o9cq804e1i6BqI31DcyKJi6xToQc@im.wechat";
+const USER_ID = process.env.WECHAT_EVAL_USER_ID || "eval-user";
 const PROMPTS_DOC = JSON.parse(fs.readFileSync(path.join(ROOT, "data", "prompts.json"), "utf-8"));
 
 // reply.mjs 已移除以下三个导出，在脚本中提供本地等价定义
@@ -562,7 +562,7 @@ function renderReport({ items, allResults }) {
   lines.push("");
   lines.push("## 这次怎么跑");
   lines.push("");
-  lines.push("这轮不是简化问答，而是从 `data/chat-history.json` 中抽取真实用户消息，给模型注入最近可见聊天上下文、当前 profile、长期记忆、scenelet bridge、chatStyle、当前现场与检索规则，然后比较三种路径：");
+  lines.push("这轮不是简化问答，而是从当前 SQLite 聊天历史中抽取真实用户消息，给模型注入最近可见聊天上下文、当前 profile、长期记忆、scenelet bridge、chatStyle、当前现场与检索规则，然后比较三种路径：");
   lines.push("");
   lines.push("- `main_self_search`：bare scenelet 只生成/标记，主回复自己判断是否搜索。");
   lines.push("- `hidden_flag_fact_pass`：bare scenelet 标记需要搜索后，单独 fact pass 搜索，再把 fact_pack 交给主回复。");
@@ -678,14 +678,14 @@ function renderReport({ items, allResults }) {
   return lines.join("\n");
 }
 
-function main() {
+async function main() {
   ensureDir(OUT_DIR);
-  const history = readJson(HISTORY_PATH).events || [];
+  const history = await loadAllEvents();
   const profiles = readJson(PROFILE_PATH);
   const config = readJson(CONFIG_PATH);
   const prompts = loadPrompts();
   const memoryPrompt = (() => {
-    const items = memoryItemsText(USER_ID, { profile: PROFILE });
+    const items = memoryItemsText(PROFILE);
     if (!items) return "";
     const instruction = prompts.memoryContextInstruction || "";
     return instruction ? `${instruction}\n\n${items}` : items;
@@ -722,4 +722,7 @@ function main() {
   console.log(`DONE ${OUT_DIR}`);
 }
 
-main();
+main().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

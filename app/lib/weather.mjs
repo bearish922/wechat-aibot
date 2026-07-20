@@ -27,7 +27,7 @@ const FETCH_TIMEOUT_MS = 5000;
 
 let _cache = null; // { at, data }
 
-async function fetchOne(key, loc) {
+async function fetchOne(loc) {
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,precipitation_probability&timezone=${encodeURIComponent(loc.tz)}`;
   const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -37,15 +37,19 @@ async function fetchOne(key, loc) {
 
 async function fetchWeatherData() {
   if (_cache && Date.now() - _cache.at < CACHE_TTL_MS) return _cache.data;
-  try {
-    const entries = await Promise.all(Object.entries(LOCATIONS).map(([k, loc]) => fetchOne(k, loc)));
-    const data = Object.fromEntries(entries.map((e, i) => [Object.keys(LOCATIONS)[i], e]));
+  const locationEntries = Object.entries(LOCATIONS);
+  const settled = await Promise.allSettled(locationEntries.map(([, loc]) => fetchOne(loc)));
+  const fresh = {};
+  settled.forEach((result, index) => {
+    if (result.status === "fulfilled") fresh[locationEntries[index][0]] = result.value;
+  });
+  if (Object.keys(fresh).length) {
+    const data = { ...(_cache?.data || {}), ...fresh };
     _cache = { at: Date.now(), data };
     return data;
-  } catch (_e) {
-    if (_cache) return _cache.data; // 降级到过期缓存
-    return null;                    // 彻底无数据，返回 null（调用方处理为空字符串）
   }
+  if (_cache) return _cache.data; // 降级到过期缓存
+  return null;                    // 彻底无数据，返回 null（调用方处理为空字符串）
 }
 
 // formatWeatherReality —— 将天气数据格式化为 prompt 注入文本

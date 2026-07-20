@@ -1,6 +1,5 @@
 // api-client.mjs — OpenAI-compatible Chat Completions API wrapper
 // Supports: streaming (SSE), non-streaming, function calling, auto-retry, timeout
-import { configValue } from "./config.mjs";
 import { envOrConfig } from "./config.mjs";
 
 function usableConfigString(value, fallback) {
@@ -41,20 +40,25 @@ const RETRIABLE_ERRORS = new Set(["UND_ERR_SOCKET", "ECONNRESET", "ECONNREFUSED"
 
 function isRetriable(status, errMsg = "") {
   if (status && RETRIABLE_STATUSES.has(status)) return true;
-  return RETRIABLE_ERRORS.has(errMsg) || /(socket|timeout|reset|refused|network)/i.test(errMsg);
+  const message = String(errMsg || "");
+  const httpStatus = Number(message.match(/\bHTTP\s+(\d{3})\b/i)?.[1] || 0);
+  return RETRIABLE_STATUSES.has(httpStatus)
+    || RETRIABLE_ERRORS.has(message)
+    || /(socket|timeout|reset|refused|network)/i.test(message);
 }
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function retryDelay(attempt) { return Math.min(500 * Math.pow(2, Math.max(0, attempt - 1)), 8000); }
 
 // ─── Streaming ─────────────────────────────────────────────────
 async function* streamChatCompletion(url, apiKey, body, timeoutMs = 300_000, signal = null) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  if (signal) signal.addEventListener("abort", () => controller.abort(), { once: true });
-
-  let resp;
+  const abortFromCaller = () => controller.abort();
+  if (signal) signal.addEventListener("abort", abortFromCaller, { once: true });
+  let reader = null;
   try {
-    resp = await fetch(url, {
+    const resp = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -63,20 +67,16 @@ async function* streamChatCompletion(url, apiKey, body, timeoutMs = 300_000, sig
       body: JSON.stringify({ ...body, stream: true }),
       signal: controller.signal,
     });
-  } finally {
-    clearTimeout(timer);
-  }
 
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => "");
-    throw new Error(`HTTP ${resp.status}: ${errText.slice(0, 300)}`);
-  }
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      throw new Error(`HTTP ${resp.status}: ${errText.slice(0, 300)}`);
+    }
 
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-
-  try {
+    reader = resp.body?.getReader();
+    if (!reader) throw new Error("API response body is not readable");
+    const decoder = new TextDecoder();
+    let buf = "";
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -91,6 +91,7 @@ async function* streamChatCompletion(url, apiKey, body, timeoutMs = 300_000, sig
         try {
           const json = JSON.parse(data);
           const choice = json.choices?.[0];
+          if (json.usage) yield { type: "usage", usage: json.usage };
           if (choice?.delta?.content) {
             yield { type: "text", text: choice.delta.content };
           }
@@ -106,12 +107,15 @@ async function* streamChatCompletion(url, apiKey, body, timeoutMs = 300_000, sig
         try {
           const json = JSON.parse(trimmed.slice(6));
           const choice = json.choices?.[0];
+          if (json.usage) yield { type: "usage", usage: json.usage };
           if (choice?.delta?.content) yield { type: "text", text: choice.delta.content };
         } catch {}
       }
     }
   } finally {
-    reader.releaseLock();
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", abortFromCaller);
+    reader?.releaseLock();
   }
 }
 
@@ -119,11 +123,10 @@ async function* streamChatCompletion(url, apiKey, body, timeoutMs = 300_000, sig
 async function nonStreamChatCompletion(url, apiKey, body, timeoutMs = 300_000, signal = null) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  if (signal) signal.addEventListener("abort", () => controller.abort(), { once: true });
-
-  let resp;
+  const abortFromCaller = () => controller.abort();
+  if (signal) signal.addEventListener("abort", abortFromCaller, { once: true });
   try {
-    resp = await fetch(url, {
+    const resp = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -132,16 +135,17 @@ async function nonStreamChatCompletion(url, apiKey, body, timeoutMs = 300_000, s
       body: JSON.stringify({ ...body, stream: false }),
       signal: controller.signal,
     });
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      throw new Error(`HTTP ${resp.status}: ${errText.slice(0, 300)}`);
+    }
+
+    return await resp.json();
   } finally {
     clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", abortFromCaller);
   }
-
-  if (!resp.ok) {
-    const errText = await resp.text().catch(() => "");
-    throw new Error(`HTTP ${resp.status}: ${errText.slice(0, 300)}`);
-  }
-
-  return resp.json();
 }
 
 // ─── Public API ─────────────────────────────────────────────────
@@ -179,12 +183,13 @@ export async function apiChatStream({ systemPrompt = "", body = "", messages: pr
   let lastError = null;
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) await sleep(Math.min(1000 * Math.pow(2, attempt), 8000));
+    if (attempt > 0) await sleep(retryDelay(attempt));
     try {
       const textParts = [];
       let lastUsage = null;
       for await (const ev of streamChatCompletion(url, apiKey, reqBody, timeoutMs)) {
         if (ev.type === "text") textParts.push(ev.text);
+        if (ev.type === "usage" && ev.usage) lastUsage = ev.usage;
         if (ev.type === "finish" && ev.usage) lastUsage = ev.usage;
       }
       return {
@@ -224,7 +229,7 @@ export async function apiChatJson({ systemPrompt = "", body = "", model = null, 
   let lastError = null;
 
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) await sleep(Math.min(1000 * Math.pow(2, attempt), 8000));
+    if (attempt > 0) await sleep(retryDelay(attempt));
     try {
       const json = await nonStreamChatCompletion(url, apiKey, reqBody, timeoutMs);
       const content = json.choices?.[0]?.message?.content || "";
@@ -309,10 +314,12 @@ export async function apiChatWithTools({ systemPrompt = "", body = "", messages:
   if (!prebuiltMessages) messages.push({ role: "user", content: body });
 
   const startedMs = Date.now();
+  const toolUsage = { webSearch: 0, webFetch: 0, tools: [] };
   for (let round = 0; round < maxToolRounds; round++) {
-    let lastError;
+    let response = null;
+    let lastError = null;
     for (let attempt = 0; attempt < 3; attempt++) {
-      if (attempt > 0) await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, attempt), 8000)));
+      if (attempt > 0) await sleep(retryDelay(attempt));
       try {
         const resp = await fetch(url, {
           method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
@@ -320,17 +327,35 @@ export async function apiChatWithTools({ systemPrompt = "", body = "", messages:
           signal: AbortSignal.timeout(timeoutMs),
         });
         if (!resp.ok) { const t = await resp.text().catch(() => ""); throw new Error(`HTTP ${resp.status}: ${t.slice(0, 200)}`); }
-        const json = await resp.json();
-        const msg = json.choices?.[0]?.message;
-        if (msg?.tool_calls?.length) {
-          messages.push(msg);
-          for (const tc of msg.tool_calls) messages.push(await handleToolCall(tc));
-          attempt = -1; break;
-        }
-        return { success: true, text: msg?.content || "", durationMs: Date.now() - startedMs, usage: json.usage ? { inputTokens: Number(json.usage.prompt_tokens || 0), outputTokens: Number(json.usage.completion_tokens || 0) } : null };
+        response = await resp.json();
+        lastError = null;
+        break;
       } catch (e) { lastError = e; if (!/(socket|timeout|reset|refused|network|429|5\d\d)/i.test(e.message)) break; }
     }
-    if (lastError) return { success: false, error: lastError.message, durationMs: Date.now() - startedMs };
+    if (!response) return { success: false, error: lastError?.message || "unknown", durationMs: Date.now() - startedMs, toolUsage };
+
+    const msg = response.choices?.[0]?.message;
+    if (msg?.tool_calls?.length) {
+      messages.push(msg);
+      for (const tc of msg.tool_calls) {
+        const name = String(tc.function?.name || "");
+        if (name && !toolUsage.tools.includes(name)) toolUsage.tools.push(name);
+        if (name === "web_search") toolUsage.webSearch += 1;
+        if (name === "web_fetch") toolUsage.webFetch += 1;
+        messages.push(await handleToolCall(tc));
+      }
+      continue;
+    }
+    return {
+      success: true,
+      text: msg?.content || "",
+      durationMs: Date.now() - startedMs,
+      usage: response.usage ? {
+        inputTokens: Number(response.usage.prompt_tokens || 0),
+        outputTokens: Number(response.usage.completion_tokens || 0),
+      } : null,
+      toolUsage,
+    };
   }
-  return { success: false, error: "max tool rounds exceeded", durationMs: Date.now() - startedMs };
+  return { success: false, error: "max tool rounds exceeded", durationMs: Date.now() - startedMs, toolUsage };
 }

@@ -1,11 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-const ROOT = process.cwd();
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = path.join(ROOT, "data", "runtime", "rag-pilot-eval");
 const HISTORY_PATH = path.join(ROOT, "data", "runtime", "proactive-eval", "cst-history.json");
-const PROFILE_PATH = path.join(ROOT, "wechat-profiles.json");
+const PROFILE_PATH = path.join(ROOT, "data", "wechat-profiles.json");
 const CONFIG_PATH = path.join(ROOT, "data", "config.json");
 const RAG_SCRIPT = path.join(ROOT, "app", "rag.py");
 const PROFILE = "白鹭千圣";

@@ -9,8 +9,7 @@ export function registerMemoryRoutes() {
   });
 
   addRoute("PUT", "/api/memory", ({ body }) => {
-    const content = String(body?.content || "").trim();
-    if (!content) return { ok: false, error: "content is required" };
+    const content = String(body?.content ?? "").trim();
     const profile = String(body?.profile || "").trim();
     saveMemoryDocument(content, profile);
     return { ok: true, length: content.length, profile: profile || null };
@@ -23,8 +22,7 @@ export function registerMemoryRoutes() {
   });
 
   addRoute("PUT", "/api/world-memory", ({ body }) => {
-    const content = String(body?.content || "").trim();
-    if (!content) return { ok: false, error: "content is required" };
+    const content = String(body?.content ?? "").trim();
     const profile = String(body?.profile || "").trim();
     saveWorldMemoryDocument(content, profile);
     return { ok: true, length: content.length, profile: profile || null };

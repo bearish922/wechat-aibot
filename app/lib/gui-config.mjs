@@ -12,6 +12,7 @@ const CONFIG_FIELDS = {
   "paths.codex": "string",
   "paths.ragScript": "string",
   "paths.workDir": "string",
+  "paths.profileClaudeConfigDirs": "object",
   "proxy.https": "string",
   "proxy.claudeHttps": "string",
   "proxy.codexHttps": "string",
@@ -34,6 +35,15 @@ const CONFIG_FIELDS = {
   "vision.model": "string",
   "vision.detail": "string",
   "vision.timeoutMs": "number",
+  "voice.enabled": "boolean",
+  "voice.whisperxPython": "string",
+  "voice.model": "string",
+  "voice.language": "string",
+  "voice.computeType": "string",
+  "voice.batchSize": "number",
+  "voice.sampleRate": "number",
+  "voice.noAlign": "boolean",
+  "voice.timeoutMs": "number",
   "rag.enabled": "boolean",
   "rag.knowledgeDir": "string",
   "rag.storeDir": "string",
@@ -46,6 +56,10 @@ const CONFIG_FIELDS = {
   "rag.chunkMaxChars": "number",
   "rag.resultMaxChars": "number",
   "rag.batchSize": "number",
+  "rag.rerankLimit": "number",
+  "rag.includeDirs": "string",
+  "rag.excludeDirs": "string",
+  "rag.excludeFiles": "string",
   "logs.retentionDays": "number",
   "send.chunkSendDelayMs": "number",
   "send.maxCancelReasonLength": "number",
@@ -80,6 +94,15 @@ function setNested(obj, key, value) {
 }
 
 function coerceConfigValue(value, type, currentValue) {
+  if (type === "object") {
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+    try {
+      const parsed = JSON.parse(String(value || "{}"));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : (currentValue ?? {});
+    } catch {
+      return currentValue ?? {};
+    }
+  }
   if (type === "number") {
     const n = Number(value);
     if (!Number.isFinite(n)) return currentValue ?? 0;

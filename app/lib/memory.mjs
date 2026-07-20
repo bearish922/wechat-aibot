@@ -1,5 +1,6 @@
 import fs from "node:fs";
-import { dataPath, ensureDir, PROJECT_ROOT } from "./paths.mjs";
+import path from "node:path";
+import { dataPath, ensureDir } from "./paths.mjs";
 import { loadPrompts } from "./reply.mjs";
 import { backendModel, runBackendStructured } from "./backend-adapter.mjs";
 
@@ -41,12 +42,11 @@ export function loadMemoryDocument(profile = "") {
 // 原子写入方式保存记忆文档：先写临时文件，备份旧文件，再重命名(原子写入防数据损坏)
 // 参数: text - 要保存的 Markdown 文本; profile - 角色名，为空时使用全局文件
 export function saveMemoryDocument(text, profile = "") {
-  ensureDir(PROJECT_ROOT);
-  const content = String(text || "").trim();
-  if (!content) return;
+  const content = String(text ?? "").trim();
   const main = memoryFileForProfile(profile);
   const bak = memoryBakForProfile(profile);
   const tmp = main + ".tmp";
+  ensureDir(path.dirname(main));
   fs.writeFileSync(tmp, content, "utf-8");
   if (fs.existsSync(main)) {
     fs.copyFileSync(main, bak);
@@ -110,12 +110,11 @@ export function loadWorldMemoryDocument(profile = "") {
 }
 
 export function saveWorldMemoryDocument(text, profile = "") {
-  ensureDir(PROJECT_ROOT);
-  const content = String(text || "").trim();
-  if (!content) return;
+  const content = String(text ?? "").trim();
   const main = worldMemoryFileForProfile(profile);
   const bak = worldMemoryBakForProfile(profile);
   const tmp = main + ".tmp";
+  ensureDir(path.dirname(main));
   fs.writeFileSync(tmp, content, "utf-8");
   if (fs.existsSync(main)) fs.copyFileSync(main, bak);
   fs.renameSync(tmp, main);

@@ -12,6 +12,7 @@ import {
 import { initializeWorldSession } from "../lib/world-state.mjs";
 
 const adapterSource = readFileSync(join(import.meta.dirname, "..", "lib", "backend-adapter.mjs"), "utf-8");
+const claudeRunnerSource = readFileSync(join(import.meta.dirname, "..", "lib", "claude-runner.mjs"), "utf-8");
 const botSource = readFileSync(join(import.meta.dirname, "..", "bot.mjs"), "utf-8");
 const turnSource = readFileSync(join(import.meta.dirname, "..", "lib", "turn.mjs"), "utf-8");
 const historySource = readFileSync(join(import.meta.dirname, "..", "lib", "gui-history.mjs"), "utf-8");
@@ -143,7 +144,8 @@ describe("Codex backend contract", () => {
     assert.match(adapterSource, /runCodexJson\(prompt, options\)/);
     assert.match(turnSource, /runBackendStructured\(prompt/);
     assert.doesNotMatch(turnSource, /runHiddenCall/);
-    assert.match(historySource, /activeAI !== "api"/);
+    assert.match(historySource, /SQLite history is the project-visible history used for visible context/);
+    assert.doesNotMatch(historySource, /activeAI !== "api"/);
     assert.match(historySource, /sessions\.api/);
     assert.doesNotMatch(historySource, /sessions\.cc/);
   });
@@ -161,11 +163,17 @@ describe("Codex backend contract", () => {
     assert.doesNotMatch(missingSessionBlock, /startChatAttempt\(/);
   });
 
+  it("checks Claude Actor session files in the profile-specific config directory", () => {
+    assert.match(claudeRunnerSource, /function sessionProjectDirsForProfile\(profile = ""\)/);
+    assert.match(claudeRunnerSource, /claudeConfigDirFor\(profile\)/);
+    assert.match(turnSource, /findExactSessionFile\(world\.sid, profile\)/);
+    assert.match(turnSource, /findExactSessionFile\(returnedSid, profile\)/);
+  });
+
   it("does not start a new Codex thread when resume fails", () => {
-    const runnerSource = readFileSync(join(import.meta.dirname, "..", "lib", "claude-runner.mjs"), "utf-8");
-    const resumeBlock = runnerSource.slice(
-      runnerSource.indexOf("if (sessionId) {", runnerSource.indexOf("function runCodexAppServer")),
-      runnerSource.indexOf("const turnResult", runnerSource.indexOf("function runCodexAppServer")),
+    const resumeBlock = claudeRunnerSource.slice(
+      claudeRunnerSource.indexOf("if (sessionId) {", claudeRunnerSource.indexOf("function runCodexAppServer")),
+      claudeRunnerSource.indexOf("const turnResult", claudeRunnerSource.indexOf("function runCodexAppServer")),
     );
     assert.match(resumeBlock, /thread\/resume/);
     assert.doesNotMatch(resumeBlock, /catch[\s\S]*thread\/start/);

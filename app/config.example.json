@@ -4,7 +4,8 @@
     "claude": "可选；默认从 PATH 自动查找 claude",
     "codex": "可选；默认从 PATH 自动查找 codex",
     "ragScript": "可选；默认使用 app/rag.py",
-    "workDir": "可选；默认使用当前 Windows 用户目录"
+    "workDir": "可选；默认使用当前 Windows 用户目录",
+    "profileClaudeConfigDirs": {}
   },
   "proxy": {
     "https": "",
@@ -24,19 +25,12 @@
     "codexMain": "gpt-5.5",
     "codexReasoningEffort": "high",
     "claudeContextMax": 1000000,
-    "codexContextMax": 1000000,
-    "scenelet": "deepseek-v4-pro[1m]"
+    "codexContextMax": 1000000
   },
   "timeouts": {
     "aiMs": 600000
   },
-  "sessions": {
-    "profileNoSessionPersistence": false
-  },
   "scene": {
-    "mainVisibleContextTurns": 12,
-    "sceneletVisibleContextTurns": 8,
-    "proactiveVisibleContextTurns": 8,
     "sceneletBare": false
   },
   "vision": {
@@ -49,7 +43,7 @@
   },
   "voice": {
     "enabled": true,
-    "whisperxPython": "optional path to the Python executable in a WhisperX virtual environment",
+    "whisperxPython": "python",
     "model": "large-v3",
     "language": "auto",
     "computeType": "default",

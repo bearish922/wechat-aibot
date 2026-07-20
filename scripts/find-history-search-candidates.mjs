@@ -1,6 +1,6 @@
-import fs from "node:fs";
+import { loadAllEvents } from "../app/lib/chat-history.mjs";
 
-const events = JSON.parse(fs.readFileSync("data/chat-history.json", "utf8")).events || [];
+const events = await loadAllEvents();
 const keywords = [
   "AI", "ai", "模型", "算力", "coding", "应用", "产业", "基础设施", "物理AI", "机器人",
   "书", "小说", "作者", "濑户内", "寂听", "柠檬", "文学界", "短篇", "推荐",

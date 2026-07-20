@@ -33,10 +33,13 @@ describe("core runtime invariants", () => {
     const retryBlock = turn.slice(retryStart, retryEnd);
     assert.ok(retryStart >= 0 && retryEnd > retryStart);
     assert.match(turn, /reset is required before opening a new hidden-world session/);
-    assert.match(turn, /findExactSessionFile\(world\.sid\)/);
+    assert.match(turn, /findExactSessionFile\(world\.sid,\s*profile\)/);
     assert.doesNotMatch(turn, /findSessionFile\(world\.sid,\s*sessionName\)/);
     assert.match(turn, /sessionId: world\.sid/);
-    assert.match(turn, /runBackendStructured\(prompt,\s*\{\s*\.\.\.structuredOptions,\s*label: "single_actor_retry"/);
+    assert.match(turn, /const retryPrompt = \[/);
+    assert.match(turn, /上一次响应因输出格式不合法被丢弃/);
+    assert.match(turn, /JSON\.parse 直接解析的 JSON 对象/);
+    assert.match(turn, /runBackendStructured\(retryPrompt,\s*\{\s*\.\.\.structuredOptions,\s*label: "single_actor_retry"/);
     assert.match(turn, /let retryFirstTurn = firstAttemptWasFirstTurn/);
     assert.match(turn, /fs\.rmSync\(createdSessionFile, \{ force: true \}\)/);
     assert.match(retryBlock, /firstTurn: retryFirstTurn/);
@@ -78,13 +81,19 @@ describe("core runtime invariants", () => {
     assert.doesNotMatch(bot, /if \(styleState\._turnCount >= threshold\)/);
   });
 
+  it("extends scene memory injection only for the dream Chisato roleplay profile", () => {
+    assert.match(turn, /const sceneMemoryTurns = profile === "梦中的千圣" \? 25 : 15/);
+    assert.match(turn, /\(world\.turnCount \|\| 0\) < sceneMemoryTurns/);
+  });
+
   it("registers the schedule timer unconditionally and commits against current world state", () => {
     assert.match(bot, /const runWorkEventTick = \(\) => runWorkEventGenerator\(\)/);
     assert.match(bot, /runWorkEventTick\(\);\s*setInterval\(runWorkEventTick, WORK_EVENT_GEN_INTERVAL_MS\)/);
     assert.doesNotMatch(bot, /if \(hasEnabledRoles\(\)\)/);
     assert.match(workEventGenerator, /config\.generationIntervalMs \|\| 12 \* 3600000/);
     assert.match(workEventGenerator, /const currentArcs = normalizeLifeArcs\(roleWorld\._lifeArcs/);
-    assert.match(workEventGenerator, /applyLifeArcOps\(roleWorld, \[lifeArcOp\]\)/);
+    assert.match(workEventGenerator, /const applyResult = applyLifeArcOps\(roleWorld, \[lifeArcOp\], \{ workEventConfig: config \}\)/);
+    assert.match(workEventGenerator, /if \(!applyResult\.applied\)/);
     assert.doesNotMatch(workEventGenerator, /_pendingGeneratedEvents\.push/);
   });
 

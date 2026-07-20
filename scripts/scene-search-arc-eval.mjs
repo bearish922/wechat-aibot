@@ -6,13 +6,13 @@ import { fileURLToPath } from "node:url";
 import { loadPrompts } from "../app/lib/reply.mjs";
 import { beijingISO, formatZonedTimeParts } from "../app/lib/time-utils.mjs";
 import { memoryItemsText } from "../app/lib/memory.mjs";
+import { loadAllEvents } from "../app/lib/chat-history.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PROFILE = "白鹭千圣";
-const USER_ID = "o9cq804e1i6BqI31DcyKJi6xToQc@im.wechat";
+const USER_ID = process.env.WECHAT_EVAL_USER_ID || "eval-user";
 const OUT_DIR = path.join(ROOT, "data", "runtime", "scene-search-arc-eval", beijingISO().replace(/[:.]/g, "-"));
-const HISTORY_PATH = path.join(ROOT, "data", "chat-history.json");
-const PROFILE_PATH = path.join(ROOT, "wechat-profiles.json");
+const PROFILE_PATH = path.join(ROOT, "data", "wechat-profiles.json");
 const CONFIG_PATH = path.join(ROOT, "data", "config.json");
 const RAG_SCRIPT = path.join(ROOT, "app", "rag.py");
 const PROMPTS_DOC = JSON.parse(fs.readFileSync(path.join(ROOT, "data", "prompts.json"), "utf-8"));
@@ -717,9 +717,9 @@ async function main() {
   const config = readJson(CONFIG_PATH);
   const profiles = readJson(PROFILE_PATH);
   const prompts = loadPrompts();
-  const history = readJson(HISTORY_PATH).events || [];
+  const history = await loadAllEvents();
   const memoryPrompt = (() => {
-    const items = memoryItemsText(USER_ID, { profile: PROFILE });
+    const items = memoryItemsText(PROFILE);
     if (!items) return "";
     const instruction = prompts.memoryContextInstruction || "";
     return instruction ? `${instruction}\n\n${items}` : items;

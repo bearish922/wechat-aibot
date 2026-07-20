@@ -69,7 +69,7 @@ describe("Role prompt suites", () => {
     });
     assert.deepEqual(roleRuntimePolicy(document, "白鹭千圣"), {
       actorMode: "single",
-      actorVisibleContextTurns: 2,
+      actorVisibleContextTurns: 8,
       visibleReplySource: "main",
       lifeArcEnabled: true,
       visibleContextTurns: 0,

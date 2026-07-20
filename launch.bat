@@ -18,12 +18,12 @@ if %errorlevel% equ 0 (
 if not exist "%~dp0data\runtime" mkdir "%~dp0data\runtime"
 set "LOCK_FILE=%~dp0data\runtime\.wechat-aibot.lock"
 set "BOT_PID="
-for /f "tokens=5" %%P in ('netstat -ano ^| findstr /R ":18720.*LISTENING" 2^>nul') do set "BOT_PID=%%P"
-if not defined BOT_PID if exist "%LOCK_FILE%" set /p BOT_PID=<"%LOCK_FILE%"
+if exist "%LOCK_FILE%" set /p BOT_PID=<"%LOCK_FILE%"
 
 if defined BOT_PID (
-    tasklist /FI "PID eq !BOT_PID!" 2>nul | findstr /R "\<!BOT_PID!\>" >nul
-    if !errorlevel! equ 0 (
+    set "BOT_IS_OURS="
+    for /f %%V in ('powershell -NoProfile -Command "$p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + !BOT_PID!) -ErrorAction SilentlyContinue; if($p -and $p.CommandLine -match 'app[\\/]bot\\.mjs'){ 'yes' }"') do set "BOT_IS_OURS=%%V"
+    if /i "!BOT_IS_OURS!"=="yes" (
         echo Existing WeChat AI Bot instance: PID !BOT_PID!
         echo [O] Open GUI
         echo [R] Restart bot

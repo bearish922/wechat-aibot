@@ -7,6 +7,7 @@ import { normalizeFailedTurn, normalizeVisibleHistory, normalizeProactiveIntents
 
 // session 持久化主文件路径
 const SESSION_FILE = dataPath("wechat-sessions.json");
+const SESSION_BAK_FILE = dataPath("wechat-sessions.bak.json");
 // 角色模板/profile 配置文件路径
 const PROFILE_FILE = dataPath("wechat-profiles.json");
 // 本地敏感 profile 覆盖文件（如梦中的千圣的 18+ 人设），加入 .gitignore 不入库
@@ -45,7 +46,7 @@ export function loadProfiles() {
 export function makeSession(name, profile = null) {
   return {
     id: uuid(),
-    name,
+    name: String(name || "S1"),
     // 忙标记：正在处理消息时为 true
     busy: false,
     // 消息队列
@@ -89,7 +90,7 @@ export function makeSession(name, profile = null) {
 export function hydrateSession(ai, raw = {}) {
   return {
     id: raw.id || uuid(),
-    name: raw.name || "S1",
+    name: String(raw.name || "S1"),
     sid: raw.sid || uuid(),
     _firstTurn: raw._firstTurn ?? true,
     // 运行时字段重置为非持久化状态
@@ -155,7 +156,7 @@ export function saveSessions() {
   const tmp = SESSION_FILE + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
   if (fs.existsSync(SESSION_FILE)) {
-    fs.copyFileSync(SESSION_FILE, SESSION_FILE.replace(/\.json$/, ".bak.json"));
+    fs.copyFileSync(SESSION_FILE, SESSION_BAK_FILE);
   }
   fs.renameSync(tmp, SESSION_FILE);
   // session 保存后同步保存角色世界数据
@@ -168,7 +169,14 @@ export function saveSessions() {
 export function loadSessions() {
   try {
     if (fs.existsSync(SESSION_FILE)) {
-      const data = JSON.parse(fs.readFileSync(SESSION_FILE, "utf-8"));
+      let data;
+      try {
+        data = JSON.parse(fs.readFileSync(SESSION_FILE, "utf-8"));
+      } catch (mainError) {
+        if (!fs.existsSync(SESSION_BAK_FILE)) throw mainError;
+        data = JSON.parse(fs.readFileSync(SESSION_BAK_FILE, "utf-8"));
+        log("⚠️", `主会话文件损坏，已从备份恢复: ${mainError.message}`);
+      }
       const topKeys = Object.keys(data);
       // 通过顶层 key 判断是新格式还是旧格式
       const isNewFormat = topKeys.includes("cc") || topKeys.includes("codex") || topKeys.includes("api");
@@ -176,9 +184,11 @@ export function loadSessions() {
         // 旧格式: 顶层键为 userId，所有数据归到 cc 后端
         const ccMap = new Map();
         for (const [userId, u] of Object.entries(data)) {
+          const list = (u.list || []).map(s => hydrateSession("cc", s));
+          if (!list.length) list.push(makeSession("S1"));
           ccMap.set(userId, {
-            activeId: u.activeId,
-            list: (u.list || []).map(s => hydrateSession("cc", s)),
+            activeId: list.some(s => s.id === u.activeId) ? u.activeId : list[0].id,
+            list,
           });
         }
         sessions.cc = ccMap;
@@ -191,9 +201,11 @@ export function loadSessions() {
           const aiData = data[ai] || {};
           const map = new Map();
           for (const [userId, u] of Object.entries(aiData)) {
+            const list = (u.list || []).map(s => hydrateSession(ai, s));
+            if (!list.length) list.push(makeSession("S1"));
             map.set(userId, {
-              activeId: u.activeId,
-              list: (u.list || []).map(s => hydrateSession(ai, s)),
+              activeId: list.some(s => s.id === u.activeId) ? u.activeId : list[0].id,
+              list,
             });
           }
           sessions[ai] = map;
@@ -236,7 +248,13 @@ export function ensureUser(userId, ai = activeAI) {
 // 输出：当前活跃的 session 对象，找不到则返回列表中第一个会话
 export function activeSession(userId, ai = activeAI) {
   const u = ensureUser(userId, ai);
-  return u.list.find(s => s.id === u.activeId) || u.list[0];
+  let active = u.list.find(s => s.id === u.activeId) || u.list[0];
+  if (!active) {
+    active = makeSession("S1");
+    u.list.push(active);
+  }
+  if (u.activeId !== active.id) u.activeId = active.id;
+  return active;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -277,11 +295,12 @@ export function nextSessionName(userId, ai = activeAI) {
 // 输出：匹配的 session 对象，找不到返回 null
 export function findSession(userId, key) {
   const u = ensureUser(userId);
-  const n = parseInt(key);
+  const normalizedKey = String(key ?? "");
+  const n = /^\d+$/.test(normalizedKey) ? Number(normalizedKey) : 0;
   // 数字编号匹配：直接取列表中的对应位置（索引 = 编号 - 1）
   if (n >= 1 && n <= u.list.length) return u.list[n - 1];
   // 精确名称匹配 → 部分名称匹配
-  return u.list.find(s => s.name === key) || u.list.find(s => s.name.includes(key)) || null;
+  return u.list.find(s => s.name === normalizedKey) || u.list.find(s => s.name.includes(normalizedKey)) || null;
 }
 
 // ═══════════════════════════════════════════════════════════════

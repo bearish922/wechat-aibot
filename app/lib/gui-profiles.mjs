@@ -1,8 +1,8 @@
-import { writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { addRoute } from "./server.mjs";
 import { profileTemplates, sessions } from "./state.mjs";
 import { log } from "./utils.mjs";
-import { dataPath } from "./paths.mjs";
+import { DATA_DIR, dataPath, ensureDir } from "./paths.mjs";
 import { deleteRolePromptSuite } from "./gui-prompts.mjs";
 
 const PROFILE_FILE = dataPath("wechat-profiles.json");
@@ -18,7 +18,8 @@ export function registerProfileRoutes() {
   });
 
   addRoute("POST", "/api/profiles", ({ body }) => {
-    const { name, prompt } = body;
+    const name = typeof body?.name === "string" ? body.name.trim() : "";
+    const prompt = typeof body?.prompt === "string" ? body.prompt.trim() : "";
     if (!name || !prompt) return { ok: false, error: "name and prompt required" };
     if (profileTemplates[name]) return { ok: false, error: `"${name}" already exists` };
     profileTemplates[name] = prompt;
@@ -28,7 +29,8 @@ export function registerProfileRoutes() {
   });
 
   addRoute("PUT", "/api/profiles", ({ body }) => {
-    const { name, prompt } = body;
+    const name = typeof body?.name === "string" ? body.name.trim() : "";
+    const prompt = typeof body?.prompt === "string" ? body.prompt : "";
     if (!name || !prompt) return { ok: false, error: "name and prompt required" };
     if (!profileTemplates[name]) return { ok: false, error: `"${name}" not found` };
     profileTemplates[name] = prompt;
@@ -55,6 +57,7 @@ export function registerProfileRoutes() {
     delete profileTemplates[name];
     deleteRolePromptSuite(name);
     saveToDisk();
+    globalThis.__wechatSaveSessions?.();
     log("\u{1F464}", `profile deleted: ${name} (${reverted} sessions reverted)`);
     return { ok: true, reverted };
   });
@@ -73,5 +76,15 @@ function countBindings(name) {
 }
 
 function saveToDisk() {
-  writeFileSync(PROFILE_FILE, JSON.stringify({ templates: profileTemplates }, null, 2), "utf-8");
+  ensureDir(DATA_DIR);
+  const tmp = `${PROFILE_FILE}.tmp`;
+  const backup = `${PROFILE_FILE}.backup`;
+  if (existsSync(PROFILE_FILE)) copyFileSync(PROFILE_FILE, backup);
+  try {
+    writeFileSync(tmp, JSON.stringify({ templates: profileTemplates }, null, 2) + "\n", "utf-8");
+    renameSync(tmp, PROFILE_FILE);
+  } catch (error) {
+    try { rmSync(tmp, { force: true }); } catch {}
+    throw error;
+  }
 }

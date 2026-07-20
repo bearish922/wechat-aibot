@@ -23,6 +23,7 @@ function allLifeArcs(arcs = []) {
       title: a.title || "",
       summary: a.summary || "",
       progressNote: a.progressNote || "",
+      lifeTexture: a.lifeTexture || null,
       source: a.source || "",
       status: a.status || "active",
       kind: a.kind || null,

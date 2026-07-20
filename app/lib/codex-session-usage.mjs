@@ -46,17 +46,17 @@ function findCodexSessionFile(sessionId) {
 
 export function readCodexSessionUsage(sessionId) {
   if (!sessionId) return null;
-  const cached = usageCache.get(sessionId);
-  if (cached !== undefined) return cached;
 
   const file = findCodexSessionFile(sessionId);
-  if (!file) {
-    usageCache.set(sessionId, null);
-    return null;
-  }
+  if (!file) return null;
 
   let latest = null;
   try {
+    const stat = fs.statSync(file);
+    const cached = usageCache.get(sessionId);
+    if (cached?.file === file && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+      return cached.usage;
+    }
     const lines = fs.readFileSync(file, "utf-8").split(/\r?\n/);
     for (const line of lines) {
       if (!line.includes("token_count")) continue;
@@ -66,10 +66,10 @@ export function readCodexSessionUsage(sessionId) {
       if (payload?.type !== "token_count") continue;
       latest = codexUsageFromTokenCountInfo(payload.info);
     }
+    usageCache.set(sessionId, { file, size: stat.size, mtimeMs: stat.mtimeMs, usage: latest });
   } catch {
     latest = null;
   }
-  usageCache.set(sessionId, latest);
   return latest;
 }
 
@@ -77,5 +77,7 @@ export function repairCodexUsageFromSession(usage, sessionId) {
   if (!usage || !sessionId) return usage || null;
   if (numberValue(usage.model_context_window) > 0) return usage;
   const repaired = readCodexSessionUsage(sessionId);
-  return repaired ? { ...usage, ...repaired } : usage;
+  return repaired?.model_context_window
+    ? { ...usage, model_context_window: repaired.model_context_window }
+    : usage;
 }
